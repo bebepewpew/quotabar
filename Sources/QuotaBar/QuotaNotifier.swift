@@ -48,8 +48,7 @@ struct UserNotificationSink: QuotaNotificationSink {
         content.title = title
         content.body = body
         content.sound = .default
-        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-           let attachment = try? UNNotificationAttachment(identifier: "quotabar-icon", url: iconURL) {
+        if let attachment = Self.iconAttachment() {
             content.attachments = [attachment]
         }
         do {
@@ -58,6 +57,23 @@ struct UserNotificationSink: QuotaNotificationSink {
             )
             return true
         } catch { return false }
+    }
+
+    /// `UNNotificationAttachment` takes ownership of the file at the URL and moves
+    /// it into the system attachment store. Attaching the bundle copy directly
+    /// would therefore delete `AppIcon.png` from `QuotaBar.app/Contents/Resources`
+    /// after the first notification — losing the icon on every later one, and
+    /// invalidating the ad-hoc signature that `./quotabar build` applied.
+    private static func iconAttachment() -> UNNotificationAttachment? {
+        guard let source = Bundle.main.url(forResource: "AppIcon", withExtension: "png") else { return nil }
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quotabar-icon-\(UUID().uuidString).png")
+        guard (try? FileManager.default.copyItem(at: source, to: copy)) != nil else { return nil }
+        guard let attachment = try? UNNotificationAttachment(identifier: "quotabar-icon", url: copy) else {
+            try? FileManager.default.removeItem(at: copy)
+            return nil
+        }
+        return attachment
     }
 }
 

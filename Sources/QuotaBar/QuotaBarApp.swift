@@ -6,12 +6,17 @@ import QuotaCore
 @main
 @MainActor
 final class QuotaBarApp: NSObject, NSApplicationDelegate {
+    /// `NSApplication.delegate` is a weak reference, so the delegate has to be
+    /// owned by something that outlives `main()`. Held in a local `let`, ARC is
+    /// free to release it before `run()` and the agent launches with a nil
+    /// delegate: no status item, no probes, and no window to show it went wrong.
+    private static let shared = QuotaBarApp()
+
     private var store: QuotaStore?
 
     static func main() {
         let application = NSApplication.shared
-        let delegate = QuotaBarApp()
-        application.delegate = delegate
+        application.delegate = shared
         application.setActivationPolicy(.accessory)
         application.run()
     }

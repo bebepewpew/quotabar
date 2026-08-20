@@ -77,6 +77,11 @@ case "$platform" in
         # treat QuotaBar as an unsupported command-line executable.
         lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
         "$lsregister" -f "$app_dir"
+        # QuotaBar is a resident LSUIElement agent, so `open` would find the
+        # previous instance and merely reactivate it, leaving the freshly built
+        # binary unused. `-n` would start a second one instead, giving two menu
+        # bar icons; replacing the running instance is what a rebuild wants.
+        /usr/bin/pkill -x QuotaBar 2>/dev/null || true
         exec /usr/bin/open -W "$app_dir"
         ;;
       build) build_app "$@" ;;
