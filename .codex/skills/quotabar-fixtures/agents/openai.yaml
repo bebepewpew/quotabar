@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuotaBar Fixtures"
+  short_description: "Add the parser fixtures AGENTS.md requires"
+  default_prompt: "Use $quotabar-fixtures to add or update fixtures for a QuotaBar parser or probe change."

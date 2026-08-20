@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+# Codex discovers skills only under $CODEX_HOME/skills; unlike Claude Code it
+# does not read them from the repository. So the skills are versioned here and
+# copied into place, the same way scripts/install-hooks wires up .githooks.
+# Re-run after pulling changes.
+
+repo_root=$(git rev-parse --show-toplevel)
+codex_home=${CODEX_HOME:-$HOME/.codex}
+dest="$codex_home/skills"
+marker=.quotabar-managed
+
+mkdir -p "$dest"
+
+for source in "$repo_root"/.codex/skills/*/; do
+    [ -d "$source" ] || continue
+    name=$(basename "$source")
+    target="$dest/$name"
+
+    # Never clobber a skill this script did not install.
+    if [ -e "$target" ] && [ ! -f "$target/$marker" ]; then
+        printf '%s\n' "Refusing to replace $target: it was not installed by this script." >&2
+        printf '%s\n' "Move it aside and re-run if you want the QuotaBar version." >&2
+        exit 1
+    fi
+
+    rm -rf "$target"
+    cp -R "$source" "$target"
+    printf '%s\n' "QuotaBar" > "$target/$marker"
+    printf '%s\n' "installed $name -> $target"
+done
+
+printf '%s\n' "Codex skills installed. They point at docs/agent-guides/ in the repo."

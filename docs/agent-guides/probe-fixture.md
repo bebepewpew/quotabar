@@ -1,8 +1,3 @@
----
-name: probe-fixture
-description: Add or update test fixtures for QuotaBar's quota parsers (Codex, Claude Code, Gemini). Use whenever probe parsing, the expect script, or provider output handling changes, which AGENTS.md requires fixtures for.
----
-
 # Fixtures for the quota parsers
 
 `AGENTS.md`: *"Parser changes require fixtures for boundaries, malformed data,
