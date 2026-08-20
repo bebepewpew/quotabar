@@ -14,5 +14,5 @@ All changes, including maintainer changes, go through pull requests.
    merge**. Merge commits and rebase merges are disabled.
 
 The local hooks provide fast feedback, but GitHub branch protection and CI are
-authoritative. See [AGENTS.md](AGENTS.md) for architecture, safety, and testing
+authoritative. See [AGENTS.md](../AGENTS.md) for architecture, safety, and testing
 rules that apply to both human and AI contributors.
