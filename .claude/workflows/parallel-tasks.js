@@ -86,6 +86,13 @@ Fetch and diff it against main:
   git fetch origin ${impl.branch} main
   git diff origin/main...origin/${impl.branch}
 
+CI has not run this branch. The pull request does not exist yet, so anything that
+only executes on a pull request — a newly added GitHub Actions workflow, for
+instance — cannot have produced a green run at this point. That is expected and is
+NOT a blocking finding: judge the diff itself. If a claim can only be proven once
+the pull request exists, record it as a non-blocking note and let it be verified
+there.
+
 Review it against docs/agent-guides/review-checklist.md and AGENTS.md. Report only
 what you can point at in the diff. Set blocking true only for something that must
 be fixed before merge — a correctness bug, a policy violation, a leaked process, a
@@ -107,6 +114,10 @@ Fill in the Validation and Safety checklists honestly from what the implementer
 reported — do not tick a box for something that was not actually run, and state
 any limitation (for example the macOS suite not running locally) in Notes. Put the
 review findings in Notes too.
+
+If the change adds or edits a GitHub Actions workflow, say plainly in Notes that
+this pull request is that workflow's first execution, so a reviewer knows the run
+on this PR is the evidence rather than something that already happened.
 
 Run: gh pr create --base main --title "..." --body "..."
 Return the URL. If it fails, return an empty url and the reason.`
@@ -143,27 +154,57 @@ const results = await pipeline(
   },
 )
 
+// Four outcomes, not two. "Held" used to conflate a task that failed with a task
+// whose work is finished and pushed but whose pull request could not be opened.
+// When a token expired mid-run, three good branches reported identically to
+// broken ones and sent the reader looking in the wrong place.
 const rows = results.filter(Boolean)
-const opened = rows.filter(r => r.published && r.published.url)
-const held = rows.filter(r => !r.published || !r.published.url)
 
-log(`${opened.length} pull request(s) opened, ${held.length} held back`)
-for (const row of held) {
-  const why = !row.impl ? 'the agent did not finish'
-    : !row.impl.validated ? 'the gate did not pass'
-    : row.review && row.review.blocking ? 'review found something blocking'
-    : row.published ? row.published.reason
-    : 'unknown'
-  log(`held: ${row.task} — ${why}`)
+function classify(row) {
+  if (!row.impl) return 'agentFailed'
+  if (!row.impl.validated) return 'gateFailed'
+  if (row.review && row.review.blocking) return 'reviewBlocked'
+  if (!row.published || !row.published.url) return 'awaitingPublish'
+  return 'opened'
 }
 
+const byState = { opened: [], awaitingPublish: [], reviewBlocked: [], gateFailed: [], agentFailed: [] }
+for (const row of rows) byState[classify(row)].push(row)
+
+const firstLine = (text) => String(text || '').split('\n').find(Boolean) || '(no detail)'
+
+log(`${byState.opened.length} opened · ${byState.awaitingPublish.length} awaiting publish · ` +
+    `${byState.reviewBlocked.length} blocked by review · ` +
+    `${byState.gateFailed.length + byState.agentFailed.length} failed`)
+
+for (const row of byState.awaitingPublish) {
+  log(`WORK IS COMPLETE, PULL REQUEST NOT OPENED: ${row.impl.branch}`)
+  log(`  reason: ${row.published ? firstLine(row.published.reason) : 'the publish step did not run'}`)
+  log(`  do not re-run the task — open it with: gh pr create --base main --head ${row.impl.branch}`)
+}
+for (const row of byState.reviewBlocked) {
+  log(`blocked by review: ${row.impl.branch} — ${firstLine(row.review.findings)}`)
+}
+for (const row of byState.gateFailed) {
+  log(`gate failed: ${row.impl.branch || '(nothing pushed)'} — ${firstLine(row.impl.details)}`)
+}
+for (const row of byState.agentFailed) {
+  log(`agent did not finish: ${String(row.task).slice(0, 70)}`)
+}
+
+const shape = (row) => ({
+  task: row.task,
+  branch: row.impl ? row.impl.branch : '',
+  url: row.published ? row.published.url : '',
+  reason: row.published ? row.published.reason : '',
+  review: row.review ? row.review.findings : '',
+  details: row.impl ? row.impl.details : '',
+})
+
 return {
-  opened: opened.map(r => ({ task: r.task, branch: r.impl.branch, url: r.published.url })),
-  held: held.map(r => ({
-    task: r.task,
-    branch: r.impl ? r.impl.branch : '',
-    validated: r.impl ? r.impl.validated : false,
-    review: r.review ? r.review.findings : '',
-    details: r.impl ? r.impl.details : '',
-  })),
+  opened: byState.opened.map(shape),
+  // Finished and pushed; only opening the pull request failed. Open those by hand.
+  awaitingPublish: byState.awaitingPublish.map(shape),
+  reviewBlocked: byState.reviewBlocked.map(shape),
+  failed: [...byState.gateFailed, ...byState.agentFailed].map(shape),
 }
