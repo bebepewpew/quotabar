@@ -167,7 +167,10 @@ struct ClaudePrintProbe: QuotaProbe {
         calendar.timeZone = timeZone
         let year = calendar.component(.year, from: now)
         let input = "\(value) \(year)"
-        let date = ["MMM d 'at' h:mma yyyy", "MMM d 'at' ha yyyy"].lazy.compactMap { format -> Date? in
+        // Claude Code has shipped both "Aug 22 at 2am" and "Aug 22, 8:59am".
+        let formats = ["MMM d 'at' h:mma yyyy", "MMM d 'at' ha yyyy",
+                       "MMM d, h:mma yyyy", "MMM d, ha yyyy"]
+        let date = formats.lazy.compactMap { format -> Date? in
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.timeZone = timeZone

@@ -37,6 +37,12 @@ final class QuotaCoreTests: XCTestCase {
         let reset = try XCTUnwrap(ClaudePrintProbe.parseReset("Aug 22 at 2am", timeZoneName: "Europe/Warsaw", now: now))
         XCTAssertEqual(calendar.component(.day, from: reset), 22)
         XCTAssertEqual(calendar.component(.hour, from: reset), 2)
+
+        // Current Claude Code builds separate date and time with a comma.
+        let comma = try XCTUnwrap(ClaudePrintProbe.parseReset("Aug 22, 8:59am", timeZoneName: "Europe/Warsaw", now: now))
+        XCTAssertEqual(calendar.component(.day, from: comma), 22)
+        XCTAssertEqual(calendar.component(.hour, from: comma), 8)
+        XCTAssertEqual(calendar.component(.minute, from: comma), 59)
     }
 
     func testParsesClaudeModelWindowsAndDecimalPercentages() throws {
