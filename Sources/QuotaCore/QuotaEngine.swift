@@ -5,41 +5,66 @@ import Foundation
 public enum QuotaEngine {
     public static let refreshIntervals = [0, 5, 15, 30, 60]
 
-    public static func discoverProviders() async -> [Provider] {
+    /// Produces one provider's snapshot, or throws the reason it could not.
+    /// `QuotaEngine.probe` is the real implementation; tests substitute a stub so
+    /// discovery, probing and retention can be exercised without a provider CLI.
+    public typealias SnapshotLoader = @Sendable (Provider) throws -> QuotaSnapshot
+
+    /// Resolves a CLI name to an executable path, or `nil` when it is not installed.
+    /// `CommandRunner.find` is the real implementation.
+    public typealias ExecutableLocator = @Sendable (String) -> String?
+
+    /// The default `SnapshotLoader`: the provider's real probe, errors and all.
+    public static func probe(_ provider: Provider) throws -> QuotaSnapshot {
+        switch provider {
+        case .codex: return try CodexProbe().fetch()
+        case .claude: return try ClaudePrintProbe().fetch()
+        case .gemini: return try GeminiTerminalProbe().fetch()
+        }
+    }
+
+    public static func discoverProviders(
+        locate: @escaping ExecutableLocator = { CommandRunner.find($0) }
+    ) async -> [Provider] {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: Provider.allCases.filter {
-                    CommandRunner.find($0.executableName) != nil
+                    locate($0.executableName) != nil
                 })
             }
         }
     }
 
-    public static func load(_ provider: Provider) -> QuotaSnapshot {
+    public static func load(
+        _ provider: Provider,
+        using loader: SnapshotLoader = { try QuotaEngine.probe($0) }
+    ) -> QuotaSnapshot {
         do {
-            switch provider {
-            case .codex: return try CodexProbe().fetch()
-            case .claude: return try ClaudePrintProbe().fetch()
-            case .gemini: return try GeminiTerminalProbe().fetch()
-            }
+            return try loader(provider)
         } catch {
             return .init(provider: provider, error: error.localizedDescription, probeSucceeded: false)
         }
     }
 
     /// Probes block on subprocesses, so they run off the cooperative pool.
-    public static func loadAsync(_ provider: Provider) async -> QuotaSnapshot {
+    public static func loadAsync(
+        _ provider: Provider,
+        using loader: @escaping SnapshotLoader = { try QuotaEngine.probe($0) }
+    ) async -> QuotaSnapshot {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: load(provider))
+                continuation.resume(returning: load(provider, using: loader))
             }
         }
     }
 
     /// Probes every provider concurrently and returns snapshots in `Provider.allCases` order.
-    public static func refresh(_ providers: [Provider]) async -> [QuotaSnapshot] {
+    public static func refresh(
+        _ providers: [Provider],
+        using loader: @escaping SnapshotLoader = { try QuotaEngine.probe($0) }
+    ) async -> [QuotaSnapshot] {
         await withTaskGroup(of: QuotaSnapshot.self) { group in
-            for provider in providers { group.addTask { await loadAsync(provider) } }
+            for provider in providers { group.addTask { await loadAsync(provider, using: loader) } }
             var output: [QuotaSnapshot] = []
             for await value in group { output.append(value) }
             return output.sorted {

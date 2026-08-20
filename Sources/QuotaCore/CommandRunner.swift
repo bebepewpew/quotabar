@@ -76,13 +76,19 @@ public enum CommandRunner {
         if finished.wait(timeout: .now() + timeout) == .timedOut {
             Self.terminate(process)
             _ = finished.wait(timeout: .now() + 1)
-            #if !os(Windows)
-            if process.processIdentifier > 1 { _ = kill(-process.processIdentifier, SIGKILL) }
-            #endif
+            Self.signalGroup(of: process, SIGKILL)
             _ = readers.wait(timeout: .now() + 2)
             throw ProbeError.message("The CLI did not respond in time")
         }
         if readers.wait(timeout: .now() + 2) == .timedOut {
+            // The command itself is gone, so whatever still holds the pipes is
+            // something it spawned. Leaving that behind would outlive the
+            // caller's deadline, so the group goes down before reporting.
+            Self.signalGroup(of: process, SIGTERM)
+            if readers.wait(timeout: .now() + 1) == .timedOut {
+                Self.signalGroup(of: process, SIGKILL)
+                _ = readers.wait(timeout: .now() + 1)
+            }
             try? output.fileHandleForReading.close()
             try? errors.fileHandleForReading.close()
             throw ProbeError.message("The CLI exited but left its output stream open")
@@ -118,12 +124,20 @@ public enum CommandRunner {
     }
 
     private static func terminate(_ process: Process) {
+        guard process.processIdentifier > 1 else { return }
+        signalGroup(of: process, SIGTERM)
+        process.terminate()
+    }
+
+    /// Signals the child's complete process group. Every child gets a group of
+    /// its own above, so this also reaches the grandchildren a provider CLI
+    /// spawned — a bare signal to the child would orphan them.
+    private static func signalGroup(of process: Process, _ signal: Int32) {
         let pid = process.processIdentifier
         guard pid > 1 else { return }
         #if !os(Windows)
-        _ = kill(-pid, SIGTERM)
+        _ = kill(-pid, signal)
         #endif
-        process.terminate()
     }
 
     private static func diagnostic(stdout: Data, stderr: Data) -> String {
@@ -133,9 +147,14 @@ public enum CommandRunner {
     /// Turns terminal output into safe, readable text for the menu UI. Commands
     /// launched through a PTY can emit cursor movement and bracketed-paste modes,
     /// which otherwise appear as strings such as `[?2004h[2K` in error cards.
+    ///
+    /// The operating-system-command pattern stops at the next escape as well as
+    /// at `BEL`: a hyperlink or title pair terminated by `ESC \` would otherwise
+    /// match greedily from the first sequence to the last, swallowing the error
+    /// text between them.
     public static func sanitizeDiagnostic(_ input: String) -> String {
         var text = input
-            .replacingOccurrences(of: "\u{1B}\\][^\u{7}]*(?:\u{7}|\u{1B}\\\\)", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\u{1B}\\][^\u{7}\u{1B}]*(?:\u{7}|\u{1B}\\\\)", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}[@-_]", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\r\n", with: "\n")
