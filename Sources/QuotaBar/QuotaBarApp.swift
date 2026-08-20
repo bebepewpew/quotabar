@@ -2,16 +2,26 @@ import SwiftUI
 import AppKit
 import Combine
 
-@main struct QuotaBarApp: App {
-    @StateObject private var store: QuotaStore
+@main
+@MainActor
+final class QuotaBarApp: NSObject, NSApplicationDelegate {
+    private var store: QuotaStore?
 
-    @MainActor init() {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = QuotaBarApp()
+        application.delegate = delegate
+        application.setActivationPolicy(.accessory)
+        application.run()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
         if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
            let icon = NSImage(contentsOf: iconURL) {
             NSApp.applicationIconImage = icon
         }
         let store = QuotaStore()
-        _store = StateObject(wrappedValue: store)
+        self.store = store
         StatusBarController.shared.install(store: store)
         NotificationPresentationDelegate.install {
             StatusBarController.shared.show()
@@ -20,9 +30,7 @@ import Combine
         Task { _ = await QuotaNotifier.shared.requestAuthorization() }
     }
 
-    var body: some Scene {
-        Settings { EmptyView() }
-    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 @MainActor
