@@ -79,8 +79,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         let lines = value.components(separatedBy: "\n")
         var rebuilt: [String] = [], characters = ""
         for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.count == 1 { characters += trimmed }
+            if line.count == 1 { characters += line }
             else { if !characters.isEmpty { rebuilt.append(characters); characters = "" }; rebuilt.append(line) }
         }
         if !characters.isEmpty { rebuilt.append(characters) }

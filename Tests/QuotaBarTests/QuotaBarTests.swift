@@ -39,13 +39,13 @@ final class QuotaBarTests: XCTestCase {
         XCTAssertEqual(snapshot.windows[0].usedPercent, 0)
         XCTAssertEqual(snapshot.windows[3].usedPercent, 100)
         XCTAssertNil(snapshot.windows[3].resetAt)
-        XCTAssertEqual(snapshot.windows[1].resetAt?.timeIntervalSince(now), 7_200, accuracy: 0.1)
+        XCTAssertEqual(try XCTUnwrap(snapshot.windows[1].resetAt).timeIntervalSince(now), 7_200, accuracy: 0.1)
         XCTAssertEqual(snapshot.windows[1].key, "gemini-3-flash-preview")
     }
 
     func testNormalizesAnsiRedrawsAndScreenReaderWrapping() throws {
         let ansi = "\u{1B}[2K\rgemini-2.5-pro  -  94.9% (Resets in 1h)\r\n"
-        XCTAssertEqual(try GeminiTerminalProbe.parse(ansi, now: .init()).windows.first?.usedPercent, 5.1, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(GeminiTerminalProbe.parse(ansi, now: .init()).windows.first).usedPercent, 5.1, accuracy: 0.01)
         let wrapped = "g\ne\nm\ni\nn\ni\n-\n2\n.\n5\n-\np\nr\no\n \n-\n \n1\n0\n0\n.\n0\n%"
         XCTAssertEqual(try GeminiTerminalProbe.parse(wrapped, now: .init()).windows.first?.usedPercent, 0)
     }
@@ -73,7 +73,7 @@ final class QuotaBarTests: XCTestCase {
         XCTAssertEqual(window.key, "weekly")
     }
 
-    func testBadgesAndUrgencyThresholds() {
+    @MainActor func testBadgesAndUrgencyThresholds() {
         XCTAssertEqual(QuotaStore.preferredBadge(for: .init(provider: .codex, windowLabel: "Session")), "S")
         XCTAssertEqual(QuotaStore.preferredBadge(for: .init(provider: .gemini, windowKey: "gemini-2.5-flash-lite", windowLabel: "2.5 Flash Lite")), "L")
         let provider = NSColor.blue
