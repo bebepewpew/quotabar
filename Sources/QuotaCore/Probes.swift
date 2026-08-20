@@ -35,7 +35,7 @@ private func probeWorkingDirectory() -> URL {
 struct GeminiTerminalProbe: QuotaProbe {
     func fetch() throws -> QuotaSnapshot {
         guard let binary = CommandRunner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
-        let output = try CommandRunner.runExpect(Self.expectScript(binary: binary), timeout: 45, currentDirectory: probeWorkingDirectory())
+        let output = try CommandRunner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
         if output.contains("QUOTABAR_AUTH") { throw ProbeError.unsupported("Gemini authentication is required. Open Gemini CLI and sign in.") }
         if output.contains("QUOTABAR_STARTUP_TIMEOUT") { throw ProbeError.unsupported("Gemini did not reach its input prompt in time.") }
         if output.contains("QUOTABAR_STATS_TIMEOUT") { throw ProbeError.unsupported("Gemini did not finish refreshing /stats in time.") }
@@ -45,28 +45,44 @@ struct GeminiTerminalProbe: QuotaProbe {
     static func expectScript(binary: String) -> String {
         """
         proc stop_child {} { catch {send -- "\\003"}; catch {close}; catch {wait -nowait} }
-        set timeout 12
+        set timeout 30
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
-        spawn -noecho \(CommandRunner.tclQuoted(binary)) --screen-reader
+        spawn -noecho \(CommandRunner.tclQuoted(binary)) --screen-reader --skip-trust
         stty rows 40 columns 160 < $spawn_out(slave,name)
         expect {
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
-            -re {(^|[\r\n]+)[ \t]*(User:|[>❯])[ \t]+} {}
+            -re {Type your message or @path/to/file} {}
             timeout {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
         }
-        send -- "/stats\\r"
-        set timeout 15
+        # Full /stats performs the quota refresh in Gemini 0.56, but its default
+        # view contains session data only. Wait for it to finish before opening
+        # /model, which renders the freshly updated account-wide quota buckets.
+        after 300
+        send -- "/stats"
+        after 100
+        send -- "\\r"
+        set timeout 45
         expect {
-            -re {(?i)(Model Usage|Usage left)} {}
+            -re {(?i)Session Stats} {}
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
-        set timeout 12
+        set timeout 15
         expect {
-            -re {(^|[\r\n]+)[ \t]*(User:|[>❯])[ \t]+} {puts "QUOTABAR_STATS_COMPLETE"}
+            -re {Type your message or @path/to/file} {}
+            timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
+            eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
+        }
+        after 300
+        send -- "/model"
+        after 100
+        send -- "\\r"
+        set timeout 30
+        expect {
+            -re {(?i)\\(Press Esc to close\\)} {puts "QUOTABAR_STATS_COMPLETE"}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
@@ -76,9 +92,25 @@ struct GeminiTerminalProbe: QuotaProbe {
 
     static func parse(_ raw: String, now: Date) throws -> QuotaSnapshot {
         let output = normalize(raw)
-        let regex = try NSRegularExpression(pattern: #"(?im)^\s*(gemini-[a-z0-9._-]+)\s+(?:-|[\d,]+)\s+(\d{1,3}(?:\.\d+)?)%\s*(?:\((?:resets?\s+)?([^\r\n)]*)\))?\s*$"#)
+        let modelPattern = #"(?ims)^\s*(Flash Lite|Flash|Pro|gemini-[a-z0-9._-]+)\s+.*?(\d{1,3}(?:\.\d+)?)%\s+Resets:\s+.*?\(([^)]*)\)"#
+        let modelRegex = try NSRegularExpression(pattern: modelPattern)
         var windows: [QuotaWindow] = []
         var seen = Set<String>()
+        for match in modelRegex.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
+            guard let nameRange = Range(match.range(at: 1), in: output),
+                  let percentRange = Range(match.range(at: 2), in: output),
+                  let used = Double(output[percentRange]) else { continue }
+            let name = String(output[nameRange])
+            let key = name.hasPrefix("gemini-") ? name : QuotaWindow.key(for: name)
+            guard seen.insert(key).inserted else { continue }
+            let reset = Range(match.range(at: 3), in: output).map { String(output[$0]) }
+            let label = name.hasPrefix("gemini-") ? modelLabel(name) : name
+            windows.append(.init(key: key, label: label, usedPercent: min(max(used, 0), 100), resetAt: reset.flatMap { parseReset($0, now: now) }))
+        }
+        if !windows.isEmpty { return .init(provider: .gemini, windows: windows) }
+
+        let regex = try NSRegularExpression(pattern: #"(?im)^\s*(gemini-[a-z0-9._-]+)\s+(?:-|[\d,]+)\s+(\d{1,3}(?:\.\d+)?)%\s*(?:\((?:resets?\s+)?([^\r\n)]*)\))?\s*$"#)
+        seen.removeAll()
         for match in regex.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
             guard let modelRange = Range(match.range(at: 1), in: output), let percentRange = Range(match.range(at: 2), in: output),
                   let remaining = Double(output[percentRange]) else { continue }

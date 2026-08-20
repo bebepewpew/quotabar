@@ -126,17 +126,38 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertFalse(diagnostic.unicodeScalars.contains(where: { $0.value == 0x1b || $0.value == 0x07 }))
     }
 
-    func testGeminiProbeUsesFullStatsAndBoundedTerminal() {
+    func testGeminiProbeUsesFullStatsAndBoundedTerminal() throws {
         let script = GeminiTerminalProbe.expectScript(binary: "/tmp/gemini")
-        XCTAssertTrue(script.contains("/stats\\r"))
-        XCTAssertFalse(script.contains("/stats model"))
+        let refresh = try XCTUnwrap(script.range(of: "send -- \"/stats\""))
+        let modelView = try XCTUnwrap(script.range(of: "send -- \"/model\""))
+        XCTAssertLessThan(refresh.lowerBound, modelView.lowerBound)
         XCTAssertTrue(script.contains("rows 40 columns 160"))
         XCTAssertTrue(script.contains("--screen-reader"))
+        XCTAssertTrue(script.contains("--skip-trust"))
         XCTAssertTrue(script.contains("wait -nowait"))
         XCTAssertFalse(script.containsCaseInsensitive("waiting for authentication"))
-        XCTAssertTrue(script.contains("[>❯])[ \t]+"))
-        XCTAssertTrue(script.contains("set timeout 12"))
+        XCTAssertTrue(script.contains("Type your message or @path/to/file"))
+        XCTAssertTrue(script.contains("set timeout 30"))
+        XCTAssertTrue(script.contains("set timeout 45"))
+        XCTAssertTrue(script.contains("Session Stats"))
         XCTAssertTrue(script.contains("set timeout 15"))
+    }
+
+    func testParsesGeminiModelPickerUsage() throws {
+        let output = """
+        Model usage
+        Flash ▬▬▬▬▬▬▬▬▬ 0% Resets: 10:05 AM (16h 18m)
+        Flash Lite ▬▬▬▬▬ 0.2% Resets: 9:58 AM (16h 11m)
+        Pro ▬▬▬▬▬▬▬▬▬▬▬ 1% Resets: 10:01 AM (16h 14m)
+        gemini-3.5-flash ▬▬▬ 4.5% Resets: 10:05 AM (16h
+        18m)
+        (Press Esc to close)
+        """
+        let now = Date(timeIntervalSince1970: 1_000)
+        let snapshot = try GeminiTerminalProbe.parse(output, now: now)
+        XCTAssertEqual(snapshot.windows.map(\.label), ["Flash", "Flash Lite", "Pro", "3.5 Flash"])
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0, 0.2, 1, 4.5])
+        XCTAssertEqual(try XCTUnwrap(snapshot.windows[3].resetAt).timeIntervalSince(now), 58_680)
     }
 
     func testOldSelectionAndWindowPayloadsMigrateToStableKeys() throws {
