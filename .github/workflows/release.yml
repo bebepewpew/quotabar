@@ -1,0 +1,514 @@
+name: Release
+
+# Manual only. A release is a deliberate act, so nothing here is triggered by a
+# push or a pull request.
+#
+# AGENTS.md forbids pushing to `main`, and this workflow never does. It pushes
+# exactly two kinds of ref: the annotated release tag, and a
+# `release/formula-*` branch that carries the Homebrew formula update as a pull
+# request. The version stamped into the sources for the build is left
+# uncommitted in each build job's checkout, so the tag still points at the
+# untouched commit the run started from.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to increment
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Compute the next version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      tag: ${{ steps.next.outputs.tag }}
+      previous: ${{ steps.next.outputs.previous }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Derive the next semantic version
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          # `bump` is a choice input, but re-check it rather than trusting the
+          # event payload to constrain what reaches the shell.
+          case "$BUMP" in
+            patch|minor|major) ;;
+            *) echo "::error::unsupported bump '$BUMP'"; exit 1 ;;
+          esac
+
+          # No pipe into head: `set -o pipefail` would turn git's SIGPIPE into a
+          # job failure. Take the first line with a parameter expansion instead.
+          # `-v:refname` sorts 10.0.0 above 9.0.0, and it sorts a `-rc` suffix
+          # above the plain version, so a prerelease tag on top stops the run
+          # with the error below rather than being bumped from silently.
+          tags="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname)"
+          previous="${tags%%$'\n'*}"
+
+          if [ -z "$previous" ]; then
+            next="0.1.0"
+            echo "No v-prefixed tag exists; starting at v$next."
+          else
+            core="${previous#v}"
+            if ! printf '%s\n' "$core" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::latest tag '$previous' is not a plain vMAJOR.MINOR.PATCH tag"
+              exit 1
+            fi
+            major="${core%%.*}"
+            rest="${core#*.}"
+            minor="${rest%%.*}"
+            patch="${rest##*.}"
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+            esac
+            next="${major}.${minor}.${patch}"
+            echo "Latest tag $previous, $BUMP bump -> v$next."
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; then
+            echo "::error::tag v${next} already exists"
+            exit 1
+          fi
+
+          {
+            echo "version=$next"
+            echo "tag=v$next"
+            echo "previous=$previous"
+          } >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Build Linux x86_64
+    needs: version
+    runs-on: ubuntu-latest
+    container: swift:6.3-noble
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      NFPM_VERSION: 2.47.0
+      NFPM_DEB_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Stamp the release version into the sources
+        # Deliberately not committed: the tag must point at the commit this run
+        # started from, so only this throwaway checkout carries the version.
+        # perl rather than sed because BSD and GNU sed disagree about -i.
+        run: |
+          set -euo pipefail
+          perl -pi -e 's{^(\s*static let version = ")[^"]*(")}{$1$ENV{VERSION}$2}' \
+            Sources/QuotaBarCLI/Arguments.swift
+          perl -pi -e 's{(<key>CFBundleShortVersionString</key><string>)[^<]*(</string>)}{$1$ENV{VERSION}$2}' \
+            Resources/Info.plist
+          grep -Fq "static let version = \"${VERSION}\"" Sources/QuotaBarCLI/Arguments.swift
+          grep -Fq "<key>CFBundleShortVersionString</key><string>${VERSION}</string>" Resources/Info.plist
+
+      - name: Build the statically linked binary
+        run: swift build -c release --static-swift-stdlib --product quotabar
+
+      - name: Verify the binary
+        run: |
+          set -euo pipefail
+          bin_dir="$(swift build -c release --static-swift-stdlib --product quotabar --show-bin-path)"
+          bin="${bin_dir}/quotabar"
+          test -x "$bin"
+          # --static-swift-stdlib only claims the Swift runtime; glibc stays
+          # dynamic. Assert the Swift half really was linked in.
+          if ldd "$bin" | grep -q 'libswift'; then
+            echo "::error::the Swift runtime is still linked dynamically"
+            ldd "$bin"
+            exit 1
+          fi
+          test "$("$bin" --version)" = "quotabar ${VERSION}"
+          "$bin" --help > /dev/null
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Stage the payload
+        run: |
+          set -euo pipefail
+          pkgroot="dist/linux-x86_64"
+          mkdir -p "$pkgroot"
+          install -m 0755 "$BIN" "${pkgroot}/quotabar"
+
+          tarroot="dist/quotabar-${VERSION}-linux-x86_64"
+          mkdir -p "$tarroot"
+          install -m 0755 "$BIN" "${tarroot}/quotabar"
+          install -m 0644 README.md LICENSE "$tarroot/"
+          tar -czf "${tarroot}.tar.gz" -C dist "quotabar-${VERSION}-linux-x86_64"
+          rm -rf "$tarroot"
+
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          deb="/tmp/nfpm_${NFPM_VERSION}_amd64.deb"
+          curl -fsSL --max-time 120 --retry 3 --retry-all-errors -o "$deb" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          echo "${NFPM_DEB_SHA256}  ${deb}" | sha256sum --check --strict -
+          dpkg --install "$deb"
+          nfpm --version
+
+      - name: Package the .deb and the .rpm
+        env:
+          QUOTABAR_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          nfpm package --config packaging/nfpm.yaml --packager deb \
+            --target "dist/quotabar_${VERSION}_amd64.deb"
+          nfpm package --config packaging/nfpm.yaml --packager rpm \
+            --target "dist/quotabar-${VERSION}.x86_64.rpm"
+          rm -rf dist/linux-x86_64
+          ls -l dist
+
+      - name: Upload the Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+
+  build-macos:
+    name: Build macOS universal
+    needs: version
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Stamp the release version into the sources
+        # Same stamping as the Linux job, and just as uncommitted. Kept inline
+        # rather than shared because a composite action would be a fourth file.
+        run: |
+          set -euo pipefail
+          perl -pi -e 's{^(\s*static let version = ")[^"]*(")}{$1$ENV{VERSION}$2}' \
+            Sources/QuotaBarCLI/Arguments.swift
+          perl -pi -e 's{(<key>CFBundleShortVersionString</key><string>)[^<]*(</string>)}{$1$ENV{VERSION}$2}' \
+            Resources/Info.plist
+          grep -Fq "static let version = \"${VERSION}\"" Sources/QuotaBarCLI/Arguments.swift
+          grep -Fq "<key>CFBundleShortVersionString</key><string>${VERSION}</string>" Resources/Info.plist
+
+      - name: Build the universal binary
+        run: swift build -c release --product quotabar --arch arm64 --arch x86_64
+
+      - name: Verify the binary
+        run: |
+          set -euo pipefail
+          bin_dir="$(swift build -c release --product quotabar --arch arm64 --arch x86_64 --show-bin-path)"
+          bin="${bin_dir}/quotabar"
+          test -x "$bin"
+          archs="$(lipo -archs "$bin")"
+          echo "architectures: $archs"
+          for arch in arm64 x86_64; do
+            case " $archs " in
+              *" $arch "*) ;;
+              *) echo "::error::universal binary is missing $arch"; exit 1 ;;
+            esac
+          done
+          test "$("$bin" --version)" = "quotabar ${VERSION}"
+          "$bin" --help > /dev/null
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Stage the payload
+        env:
+          # Keep AppleDouble ._ companions out of the tarball.
+          COPYFILE_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          tarroot="dist/quotabar-${VERSION}-macos-universal"
+          mkdir -p "$tarroot"
+          install -m 0755 "$BIN" "${tarroot}/quotabar"
+          install -m 0644 README.md LICENSE "$tarroot/"
+          tar -czf "${tarroot}.tar.gz" -C dist "quotabar-${VERSION}-macos-universal"
+          rm -rf "$tarroot"
+          ls -l dist
+
+      - name: Upload the macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          if-no-files-found: error
+          path: dist/*.tar.gz
+
+  release:
+    name: Sign, tag and publish
+    needs: [version, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      PREVIOUS: ${{ needs.version.outputs.previous }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download the built artifacts
+        uses: actions/download-artifact@v8
+        with:
+          # Outside the checkout on purpose: the tag step refuses to run against
+          # a dirty working tree, and release files are not repository content.
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+
+      - name: Check the artifact set and write SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dist"
+          for artifact in \
+            "quotabar-${VERSION}-linux-x86_64.tar.gz" \
+            "quotabar-${VERSION}-macos-universal.tar.gz" \
+            "quotabar_${VERSION}_amd64.deb" \
+            "quotabar-${VERSION}.x86_64.rpm"
+          do
+            if [ ! -f "$artifact" ]; then
+              echo "::error::missing release artifact $artifact"
+              ls -l
+              exit 1
+            fi
+          done
+          # Sorted for a stable file, and relative so `sha256sum --check` works
+          # from whatever directory a user downloaded into.
+          find . -maxdepth 1 -type f -printf '%P\n' | LC_ALL=C sort > "$RUNNER_TEMP/names"
+          xargs -a "$RUNNER_TEMP/names" sha256sum > SHA256SUMS
+          cat SHA256SUMS
+          # SHA256SUMS is signed alongside the artifacts it covers.
+          cp "$RUNNER_TEMP/names" "$RUNNER_TEMP/to-sign"
+          echo SHA256SUMS >> "$RUNNER_TEMP/to-sign"
+
+      - name: Install cosign
+        # No moving `v4` tag exists on this action, so the patch version is
+        # pinned. It installs cosign v3 by default.
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign every artifact keylessly
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dist"
+          # cosign v3 defaults to the new bundle format and to a TUF-served
+          # signing config, and in that mode it ignores --output-signature and
+          # --output-certificate. Turn both off to get the detached .sig/.pem
+          # pair this release publishes. Identity comes from the GitHub OIDC
+          # token, so there is no key to hold.
+          while IFS= read -r artifact; do
+            echo "::group::sign ${artifact}"
+            cosign sign-blob \
+              --yes \
+              --use-signing-config=false \
+              --new-bundle-format=false \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              "$artifact"
+            test -s "${artifact}.sig"
+            test -s "${artifact}.pem"
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/to-sign"
+          ls -l
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/dist/*.tar.gz
+            ${{ runner.temp }}/dist/*.deb
+            ${{ runner.temp }}/dist/*.rpm
+
+      - name: Create the annotated tag
+        run: |
+          set -euo pipefail
+          # Only refs/tags/<tag> is pushed, and it points at the commit this run
+          # started from. Nothing lands on main.
+          dirty="$(git status --porcelain)"
+          if [ -n "$dirty" ]; then
+            echo "::error::refusing to tag a dirty checkout"
+            printf '%s\n' "$dirty"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "QuotaBar ${VERSION}" "$GITHUB_SHA"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "# macOS — built from source, so Gatekeeper never sees an unnotarized binary"
+            echo "brew tap ${GITHUB_REPOSITORY} https://github.com/${GITHUB_REPOSITORY}"
+            echo "brew install ${GITHUB_REPOSITORY}/quotabar"
+            echo
+            echo "# Debian/Ubuntu"
+            echo "sudo dpkg -i quotabar_${VERSION}_amd64.deb"
+            echo
+            echo "# Fedora/RHEL"
+            echo "sudo rpm -i quotabar-${VERSION}.x86_64.rpm"
+            echo '```'
+            echo
+            echo "## Verify"
+            echo
+            echo "Every artifact is signed keylessly with sigstore cosign through this"
+            echo "repository's GitHub OIDC identity, and carries a build provenance"
+            echo "attestation. \`SHA256SUMS\` covers all of them."
+            echo
+            echo '```sh'
+            echo "sha256sum --check --ignore-missing SHA256SUMS"
+            echo
+            echo "cosign verify-blob \\"
+            echo "  --certificate quotabar-${VERSION}-linux-x86_64.tar.gz.pem \\"
+            echo "  --signature quotabar-${VERSION}-linux-x86_64.tar.gz.sig \\"
+            echo "  --certificate-identity '${identity}' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  quotabar-${VERSION}-linux-x86_64.tar.gz"
+            echo
+            echo "gh attestation verify quotabar-${VERSION}-linux-x86_64.tar.gz \\"
+            echo "  --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+            echo
+            if [ -n "$PREVIOUS" ]; then
+              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREVIOUS}...${TAG}"
+            else
+              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
+            fi
+          } > "$notes"
+          cat "$notes"
+
+      - name: Publish the GitHub release
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "QuotaBar ${VERSION}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag \
+            "$RUNNER_TEMP"/dist/*
+
+  formula:
+    name: Open the Homebrew formula pull request
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Checksum the tagged source tarball
+        run: |
+          set -euo pipefail
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          tarball="$RUNNER_TEMP/source.tar.gz"
+          # GitHub materializes a tag archive a moment after the ref appears, so
+          # retry — but a bounded number of times, with a bounded curl.
+          downloaded=false
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsSL --max-time 120 -o "$tarball" "$url"; then
+              downloaded=true
+              break
+            fi
+            echo "attempt ${attempt}: ${url} is not available yet"
+            sleep 6
+          done
+          if [ "$downloaded" != true ]; then
+            echo "::error::could not download ${url}"
+            exit 1
+          fi
+          tar -tzf "$tarball" > /dev/null
+          {
+            echo "SOURCE_URL=${url}"
+            echo "SOURCE_SHA256=$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+          } >> "$GITHUB_ENV"
+
+      - name: Update the formula
+        run: |
+          set -euo pipefail
+          formula="Formula/quotabar.rb"
+          # Line-anchored so the `head` URL and any other quoted string are left
+          # alone. Both keys appear exactly once, at the top of the class.
+          perl -pi -e 's{^(\s*url\s+")[^"]*(")}{$1$ENV{SOURCE_URL}$2}' "$formula"
+          perl -pi -e 's{^(\s*sha256\s+")[^"]*(")}{$1$ENV{SOURCE_SHA256}$2}' "$formula"
+          grep -Fq "\"${SOURCE_URL}\"" "$formula"
+          grep -Fq "\"${SOURCE_SHA256}\"" "$formula"
+          if git diff --quiet -- "$formula"; then
+            echo "::error::${formula} already points at ${TAG}"
+            exit 1
+          fi
+          git diff -- "$formula"
+
+      - name: Open the pull request
+        run: |
+          set -euo pipefail
+          # A branch and a pull request, never a push to main.
+          branch="release/formula-${TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add Formula/quotabar.rb
+          git commit -m "Point the Homebrew formula at ${TAG}"
+          git push origin "HEAD:refs/heads/${branch}"
+
+          body="$RUNNER_TEMP/pr.md"
+          {
+            echo "Release ${TAG} is published, so the formula now builds that tag from source."
+            echo
+            echo "- \`url\`: ${SOURCE_URL}"
+            echo "- \`sha256\`: ${SOURCE_SHA256}"
+            echo
+            echo "Opened by the release workflow because AGENTS.md forbids pushing to \`main\`."
+            echo "Squash and merge, as the repository requires."
+            echo
+            echo "> Pull requests created with \`GITHUB_TOKEN\` do not start workflow runs, so"
+            echo "> CI has to be kicked off manually if you want it on this branch."
+          } > "$body"
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Point the Homebrew formula at ${TAG}" \
+            --body-file "$body"
