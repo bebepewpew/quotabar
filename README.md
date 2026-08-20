@@ -1,8 +1,9 @@
 # QuotaBar
 
 [![CI](https://github.com/bebepewpew/quotabar/actions/workflows/ci.yml/badge.svg)](https://github.com/bebepewpew/quotabar/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/bebepewpew/quotabar/actions/workflows/codeql.yml/badge.svg)](https://github.com/bebepewpew/quotabar/actions/workflows/codeql.yml)
 [![Security scan](https://github.com/bebepewpew/quotabar/actions/workflows/security-scan.yml/badge.svg)](https://github.com/bebepewpew/quotabar/actions/workflows/security-scan.yml)
-[![Latest release](https://img.shields.io/github/v/release/bebepewpew/quotabar?sort=semver)](https://github.com/bebepewpew/quotabar/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/bebepewpew/quotabar?sort=semver)](https://github.com/bebepewpew/quotabar/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Monitoring for AI coding CLI quotas — a native macOS menu-bar app, and a
@@ -98,7 +99,7 @@ still surfaces both from there, and the root stays short enough to read.
 ## Installation
 
 Released binaries and packages are published on the
-[releases page](https://github.com/bebepewpew/quotabar/releases/latest). To
+[releases page](https://github.com/bebepewpew/quotabar/releases). To
 build from a checkout instead, skip to [Build and run](#build-and-run).
 
 ### macOS — Homebrew
