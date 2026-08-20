@@ -8,7 +8,8 @@ All changes, including maintainer changes, go through pull requests.
 3. Make the change and add proportionate tests.
 4. Run `./quotabar build`, `./quotabar test`, and `git diff --check`.
 5. Push the branch and open a pull request using the repository template.
-6. Merge only after required CI passes and all conversations are resolved.
+6. After required CI passes and all conversations are resolved, use **Squash and
+   merge**. Merge commits and rebase merges are disabled.
 
 The local hooks provide fast feedback, but GitHub branch protection and CI are
 authoritative. See [AGENTS.md](AGENTS.md) for architecture, safety, and testing

@@ -16,6 +16,8 @@ log, or store provider credentials or complete login prompts.
 
 - Never commit or push directly to `main`. Create a focused branch and open a
   pull request for every change.
+- Merge pull requests with **Squash and merge** only. Keep the PR title concise
+  and imperative because it becomes the commit subject on `main`.
 - Preserve unrelated and pre-existing working-tree changes. Do not rewrite,
   delete, or stage them.
 - Keep commits focused and use imperative commit subjects.
