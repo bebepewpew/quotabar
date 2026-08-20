@@ -76,7 +76,7 @@ final class QuotaBarTests: XCTestCase {
         XCTAssertTrue(script.contains("rows 40 columns 160"))
         XCTAssertTrue(script.contains("--screen-reader"))
         XCTAssertTrue(script.contains("waiting for authentication"))
-        XCTAssertTrue(script.contains("[>❯])[ \\t]+"))
+        XCTAssertTrue(script.contains("[>❯])[ \t]+"))
         XCTAssertTrue(script.contains("set timeout 12"))
         XCTAssertTrue(script.contains("set timeout 15"))
     }
