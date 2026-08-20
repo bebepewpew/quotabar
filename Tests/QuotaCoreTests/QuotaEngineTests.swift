@@ -433,13 +433,20 @@ private final class Barrier: @unchecked Sendable {
     private let expected: Int
     private var arrived = 0
     private var released = false
+    private var timedOut = false
 
     init(expected: Int) { self.expected = expected }
 
+    /// True only if every waiter was inside the barrier at the same time.
+    ///
+    /// Counting arrivals alone is not enough: three strictly sequential calls
+    /// also reach `expected`, so a serial implementation would satisfy the
+    /// barrier and this test would guard nothing. A waiter that leaves on its
+    /// deadline never overlapped with the others, and that is recorded.
     var everyoneArrived: Bool {
         condition.lock()
         defer { condition.unlock() }
-        return released
+        return released && !timedOut
     }
 
     func arriveAndWait(timeout: TimeInterval) {
@@ -453,6 +460,7 @@ private final class Barrier: @unchecked Sendable {
             return
         }
         while !released && Date() < deadline { _ = condition.wait(until: deadline) }
+        if !released { timedOut = true }
     }
 }
 
