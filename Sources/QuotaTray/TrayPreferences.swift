@@ -9,10 +9,22 @@ public final class TrayPreferences: @unchecked Sendable {
     /// Mirrors the macOS menu bar, which shows at most three.
     public static let maximumSelections = 3
 
-    private let store: StateStore
+    /// Encoding a selection list on its way to the store. It is a seam because
+    /// `[QuotaSelection]` always encodes, which would otherwise leave the
+    /// "never overwrite what we could not encode" guarantee in `setSelections`
+    /// unreachable from a test.
+    typealias Encode = @Sendable ([QuotaSelection]) throws -> Data
 
-    public init(store: StateStore = StateStoreFactory.makeDefault()) {
+    private let store: StateStore
+    private let encode: Encode
+
+    public convenience init(store: StateStore = StateStoreFactory.makeDefault()) {
+        self.init(store: store, encode: { try JSONEncoder().encode($0) })
+    }
+
+    init(store: StateStore, encode: @escaping Encode) {
         self.store = store
+        self.encode = encode
     }
 
     /// Saved selections, capped at `maximumSelections`. Older or malformed
@@ -31,7 +43,7 @@ public final class TrayPreferences: @unchecked Sendable {
     public func setSelections(_ selections: [QuotaSelection]) {
         // A payload we cannot encode must not wipe the saved one: leave the
         // stored value alone rather than writing nil over it.
-        guard let data = try? JSONEncoder().encode(Self.capped(selections)) else { return }
+        guard let data = try? encode(Self.capped(selections)) else { return }
         store.setData(data, forKey: Self.storageKey)
     }
 
