@@ -54,7 +54,12 @@ public enum CommandRunner {
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
         try process.run()
+        #if !os(Windows)
+        // Give the child its own process group so a timeout can take the whole
+        // tree down — the provider CLIs spawn children of their own. The Windows
+        // equivalent is a Job Object, which belongs with a Windows front-end.
         if process.processIdentifier > 1 { _ = setpgid(process.processIdentifier, process.processIdentifier) }
+        #endif
 
         let stdout = LockedData(), stderr = LockedData(), readers = DispatchGroup()
         readers.enter()
@@ -71,7 +76,9 @@ public enum CommandRunner {
         if finished.wait(timeout: .now() + timeout) == .timedOut {
             Self.terminate(process)
             _ = finished.wait(timeout: .now() + 1)
+            #if !os(Windows)
             if process.processIdentifier > 1 { _ = kill(-process.processIdentifier, SIGKILL) }
+            #endif
             _ = readers.wait(timeout: .now() + 2)
             throw ProbeError.message("The CLI did not respond in time")
         }
@@ -96,6 +103,8 @@ public enum CommandRunner {
     static var expectInstallHint: String {
         #if os(macOS)
         "expect is not installed. Install it with `brew install expect`."
+        #elseif os(Windows)
+        "expect is not installed, and there is no Windows build of it. The Gemini probe needs a pseudo-terminal and is not supported on Windows yet."
         #else
         "expect is not installed. Install it with `sudo pacman -S expect` or `sudo apt install expect`."
         #endif
@@ -111,7 +120,9 @@ public enum CommandRunner {
     private static func terminate(_ process: Process) {
         let pid = process.processIdentifier
         guard pid > 1 else { return }
+        #if !os(Windows)
         _ = kill(-pid, SIGTERM)
+        #endif
         process.terminate()
     }
 

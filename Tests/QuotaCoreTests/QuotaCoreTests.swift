@@ -30,6 +30,43 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertEqual(value.windows[0].resetAt, Date(timeIntervalSince1970: 2_000_000_000))
     }
 
+    func testCodexRequestsAreSingleLineJSONRPC() throws {
+        let requests = [CodexProbe.initializeRequest, CodexProbe.initializedNotification, CodexProbe.rateLimitsRequest]
+        for request in requests {
+            XCTAssertFalse(request.contains("\n"), "app-server reads one request per line")
+            XCTAssertNotNil(CodexProbe.jsonObject(request), "\(request) is not valid JSON")
+        }
+        XCTAssertEqual(CodexProbe.identifier(of: CodexProbe.initializeRequest), 1)
+        XCTAssertEqual(CodexProbe.identifier(of: CodexProbe.rateLimitsRequest), 2)
+        XCTAssertNil(CodexProbe.identifier(of: CodexProbe.initializedNotification), "a notification carries no id")
+        let initialize = try XCTUnwrap(CodexProbe.jsonObject(CodexProbe.initializeRequest))
+        XCTAssertEqual(initialize["method"] as? String, "initialize")
+    }
+
+    /// The Codex probe needs to read a reply before sending the next request.
+    /// `cat` echoes lines back, which exercises exactly that interleaving.
+    func testProcessLineSessionInterleavesWritesAndReads() throws {
+        let session = try ProcessLineSession(executable: "/bin/cat", arguments: [])
+        defer { session.close() }
+        var transcript: [String] = []
+
+        try session.send(#"{"id":1}"#)
+        XCTAssertNotNil(session.waitForLine(matching: { CodexProbe.identifier(of: $0) == 1 },
+                                            before: Date().addingTimeInterval(10), transcript: &transcript))
+        try session.send(#"{"id":2}"#)
+        XCTAssertNotNil(session.waitForLine(matching: { CodexProbe.identifier(of: $0) == 2 },
+                                            before: Date().addingTimeInterval(10), transcript: &transcript))
+        XCTAssertEqual(transcript.count, 2)
+    }
+
+    func testProcessLineSessionGivesUpAtTheDeadline() throws {
+        let session = try ProcessLineSession(executable: "/bin/cat", arguments: [])
+        defer { session.close() }
+        var transcript: [String] = []
+        XCTAssertNil(session.waitForLine(matching: { _ in true },
+                                         before: Date().addingTimeInterval(0.3), transcript: &transcript))
+    }
+
     func testParsesClaudeResetDate() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Warsaw"))

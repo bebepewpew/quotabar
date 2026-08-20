@@ -30,8 +30,15 @@ struct QuotaBarCLI {
         let sink = NotifySendSink()
         // Descriptor 1 by number: the C `stdout` global is a mutable var and so
         // not readable under strict concurrency.
+        #if os(Windows)
+        // A Windows console also needs ENABLE_VIRTUAL_TERMINAL_PROCESSING before
+        // ANSI means anything, so this only reports whether it is a terminal.
+        let isTerminal = _isatty(1) != 0
+        #else
+        let isTerminal = isatty(1) == 1
+        #endif
         let useColor = arguments.color
-            && isatty(1) == 1
+            && isTerminal
             && ProcessInfo.processInfo.environment["NO_COLOR"] == nil
 
         let installed = await QuotaEngine.discoverProviders()

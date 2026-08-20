@@ -189,34 +189,56 @@ struct ClaudePrintProbe: QuotaProbe {
 }
 
 struct CodexProbe: QuotaProbe {
+    static let initializeRequest =
+        #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"QuotaBar","title":"QuotaBar","version":"0.1.0"},"capabilities":{}}}"#
+    static let initializedNotification = #"{"method":"initialized"}"#
+    static let rateLimitsRequest = #"{"id":2,"method":"account/rateLimits/read"}"#
+
     func fetch() throws -> QuotaSnapshot {
         guard let binary = CommandRunner.find("codex") else { throw ProbeError.missing("Codex") }
-        // app-server requires strict sequencing: it silently ignores requests sent
-        // before the initialize response. expect gives us that handshake without
-        // copying the CLI's OAuth credentials into this app.
-        let script = """
-        set timeout 12
-        spawn -noecho \(CommandRunner.tclQuoted(binary)) app-server --stdio
-        stty -echo < $spawn_out(slave,name)
-        send -- "{\\"id\\":1,\\"method\\":\\"initialize\\",\\"params\\":{\\"clientInfo\\":{\\"name\\":\\"QuotaBar\\",\\"title\\":\\"QuotaBar\\",\\"version\\":\\"0.1.0\\"},\\"capabilities\\":{}}}\\n"
-        expect { -re {"id":1} {} timeout {puts "QUOTABAR_ERROR=initialize timeout"; exit 2} eof {exit 2} }
-        send -- "{\\"method\\":\\"initialized\\"}\\n{\\"id\\":2,\\"method\\":\\"account/rateLimits/read\\"}\\n"
-        expect { -re {"id":2.*\\r\\n} {} timeout {puts "QUOTABAR_ERROR=quota timeout"; exit 2} eof {exit 2} }
-        close
-        """
-        let output = try CommandRunner.runExpect(script, timeout: 30)
-        let objects = output.components(separatedBy: .newlines).compactMap { line -> [String: Any]? in
-            guard let start = line.firstIndex(of: "{"), let end = line.lastIndex(of: "}") else { return nil }
-            return try? JSONSerialization.jsonObject(with: Data(line[start...end].utf8)) as? [String: Any]
+        // app-server speaks line-delimited JSON-RPC over stdio and silently ignores
+        // requests sent before the initialize response, so the exchange has to be
+        // sequenced — but plain pipes are enough for that. No pseudo-terminal, so
+        // no `expect` dependency and nothing platform-specific, and still no
+        // copying of the CLI's OAuth credentials into this app.
+        let session = try ProcessLineSession(executable: binary, arguments: ["app-server", "--stdio"],
+                                             currentDirectory: probeWorkingDirectory())
+        defer { session.close() }
+
+        let deadline = Date().addingTimeInterval(30)
+        var transcript: [String] = []
+
+        try session.send(Self.initializeRequest)
+        guard session.waitForLine(matching: { Self.identifier(of: $0) == 1 },
+                                  before: deadline, transcript: &transcript) != nil else {
+            throw Self.failure(transcript, detail: "Codex did not answer the initialize request.")
         }
-        guard let response = objects.first(where: { jsonNumber($0["id"]) == 2 }),
-              let result = response["result"] as? [String: Any] else {
-            if output.containsCaseInsensitive("not logged in") || output.containsCaseInsensitive("authentication") {
-                throw ProbeError.unsupported("Codex authentication is required. Open Codex once and sign in.")
-            }
-            throw ProbeError.unsupported("Codex returned an unreadable quota response. Refresh after updating Codex.")
+
+        try session.send(Self.initializedNotification)
+        try session.send(Self.rateLimitsRequest)
+        guard let reply = session.waitForLine(matching: { Self.identifier(of: $0) == 2 },
+                                              before: deadline, transcript: &transcript),
+              let result = Self.jsonObject(reply)?["result"] as? [String: Any] else {
+            throw Self.failure(transcript, detail: "Codex returned an unreadable quota response. Refresh after updating Codex.")
         }
         return Self.parse(result)
+    }
+
+    static func jsonObject(_ line: String) -> [String: Any]? {
+        guard let start = line.firstIndex(of: "{"), let end = line.lastIndex(of: "}"), start < end else { return nil }
+        return try? JSONSerialization.jsonObject(with: Data(line[start...end].utf8)) as? [String: Any]
+    }
+
+    static func identifier(of line: String) -> Double? {
+        jsonObject(line).flatMap { jsonNumber($0["id"]) }
+    }
+
+    private static func failure(_ transcript: [String], detail: String) -> ProbeError {
+        let output = transcript.joined(separator: "\n")
+        if output.containsCaseInsensitive("not logged in") || output.containsCaseInsensitive("authentication") {
+            return .unsupported("Codex authentication is required. Open Codex once and sign in.")
+        }
+        return .unsupported(detail)
     }
 
     static func parse(_ result: [String: Any]) -> QuotaSnapshot {

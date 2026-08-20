@@ -51,14 +51,26 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     private var contents: [String: JSONValue]
     private var written: Set<String> = []
 
+    /// Named per platform rather than "macOS or else", so a future Windows
+    /// front-end does not silently inherit XDG paths.
     public static func defaultURL() -> URL {
         let environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser
         let base: URL
+        #if os(Windows)
+        if let appData = environment["APPDATA"], !appData.isEmpty {
+            base = URL(fileURLWithPath: appData, isDirectory: true)
+        } else {
+            base = home.appendingPathComponent("AppData", isDirectory: true)
+                .appendingPathComponent("Roaming", isDirectory: true)
+        }
+        #else
         if let xdg = environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
             base = URL(fileURLWithPath: xdg, isDirectory: true)
         } else {
-            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config", isDirectory: true)
+            base = home.appendingPathComponent(".config", isDirectory: true)
         }
+        #endif
         return base.appendingPathComponent("quotabar", isDirectory: true).appendingPathComponent("state.json")
     }
 
@@ -120,12 +132,19 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     /// Advisory lock on a sidecar file — the state file itself is replaced by an
     /// atomic rename, which would leave each writer holding a different inode.
     private func withFileLock(_ body: () -> Void) {
+        #if os(Windows)
+        // `flock` is POSIX-only; `LockFileEx` is the equivalent and belongs with a
+        // Windows front-end. The read-merge-write above already prevents the
+        // stale-snapshot clobber; the lock only closes the interleaving window.
+        body()
+        #else
         let descriptor = open(url.path + ".lock", O_CREAT | O_RDWR, 0o644)
         guard descriptor >= 0 else { return body() }
         defer { close(descriptor) }
         guard flock(descriptor, LOCK_EX) == 0 else { return body() }
         defer { flock(descriptor, LOCK_UN) }
         body()
+        #endif
     }
 
     private enum JSONValue: Codable {

@@ -48,8 +48,10 @@ error if a CLI is unavailable, unauthenticated, or returns unreadable data.
 - At least one supported CLI: `codex`, `claude`, or `gemini`, already
   authenticated. QuotaBar never completes login prompts and does not copy,
   inspect, or store provider credentials or API keys.
-- `expect` — required by the Gemini and Codex probes.
+- `expect` — required by the Gemini probe only, which drives an interactive TUI
+  and therefore needs a pseudo-terminal.
   (`brew install expect`, `sudo pacman -S expect`, `sudo apt install expect`)
+  Codex and Claude Code speak over plain pipes and need nothing extra.
 - **macOS:** macOS 14 or later, Swift 6.
 - **Linux:** Swift 6 — or just docker, see below. `libnotify` for `--notify`, and
   `zsh` if you use the `./quotabar` wrapper (`swift build` / `swift run quotabar`
@@ -122,6 +124,23 @@ and read the `text` field, or use plain `quotabar` for the full table.
 
 A native KDE tray icon (StatusNotifierItem) is planned as a separate front-end
 on top of `QuotaCore`.
+
+## Porting to another platform
+
+`QuotaCore` carries no UI framework, and the platform seams are `StateStore`,
+`QuotaNotificationSink` and `QuotaProbe`. A new platform means a new front-end
+target plus implementations of those, declared in `Package.swift` the way the
+macOS app already is.
+
+What Windows would still need, none of which is in the way today:
+
+- process termination via a Job Object, where POSIX uses `setpgid` and a
+  process-group `kill`;
+- `LockFileEx` in `JSONFileStateStore` in place of `flock`;
+- `ENABLE_VIRTUAL_TERMINAL_PROCESSING` before ANSI colour means anything;
+- a toast notification sink instead of `notify-send`;
+- a native pseudo-terminal (ConPTY) for the Gemini probe, which is the only
+  part that genuinely needs one. Codex and Claude Code already run over pipes.
 
 ## Tests
 
