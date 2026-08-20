@@ -74,6 +74,9 @@ The guidance lives once, in `docs/agent-guides/`:
 - `probe-fixture.md` — what a parser change must cover, and the parsing traps
   this repository has already hit.
 - `review-checklist.md` — how a change is reviewed against this file.
+- `security-review.md` — the threat model: binary discovery, script
+  construction, untrusted CLI output, credentials, process lifetime, supply chain.
+- `review-swarm.md` — reviewing through six narrow lenses instead of one broad one.
 - `parallel-tasks.md` — running independent tasks at once in separate
   worktrees, one pull request per task.
 
@@ -82,6 +85,8 @@ Each tool gets a thin wrapper pointing at those, the same way `CLAUDE.md` and
 
 - `.claude/` — `settings.json`, `skills/quotabar-dev`, `skills/quotabar-fixtures`
   and `agents/quotabar-reviewer`. Claude Code reads these from the repository.
+- `.claude/workflows/review-swarm.js` — six-lens review with adversarial
+  verification of every finding. Use it before merging anything substantial.
 - `.claude/workflows/parallel-tasks.js` and `scripts/codex-parallel` — the
   parallel runners for each toolchain. Both open a pull request only for a
   task that passed the validation above.
