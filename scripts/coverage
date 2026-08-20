@@ -1,0 +1,141 @@
+#!/bin/sh
+set -eu
+
+# Print a code coverage report for the targets the test suite links.
+#
+#   scripts/coverage                       # report to stdout
+#   scripts/coverage --lcov coverage.lcov  # also write lcov for upload
+#   scripts/coverage --filter QuotaCore    # anything else goes to `swift test`
+#
+# This expects a Swift toolchain on PATH. Go through `./quotabar coverage`
+# instead: it selects the toolchain and, on Linux without Swift, runs this
+# script inside the container that produced the profile.
+#
+# Only QuotaCore and QuotaTray are measured. They are the library targets the
+# test binary links; the CLI and the macOS app are separate executables the
+# tests do not link, so they never appear in the report.
+#
+# The report goes to stdout and everything else to stderr, so the caller can
+# redirect the report on its own.
+
+usage() {
+    sed -n '4,8p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+}
+
+lcov_path=""
+configuration=""
+
+# Unrecognised arguments are forwarded to `swift test`, so `--filter` or
+# `-c release` still work. The configuration is read here as well, because it
+# decides which bin path holds the profile. Forwarded arguments are rotated to
+# the back of "$@" rather than accumulated in a string, which keeps arguments
+# containing spaces intact.
+pending=$#
+while [ "$pending" -gt 0 ]; do
+    case "$1" in
+        --lcov)
+            [ "$pending" -ge 2 ] || {
+                printf '%s\n' "scripts/coverage: --lcov needs a file path" >&2
+                exit 2
+            }
+            lcov_path=$2
+            shift 2
+            pending=$((pending - 2))
+            ;;
+        --lcov=*)
+            lcov_path=${1#--lcov=}
+            shift
+            pending=$((pending - 1))
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -c|--configuration)
+            [ "$pending" -ge 2 ] || {
+                printf '%s\n' "scripts/coverage: $1 needs a configuration" >&2
+                exit 2
+            }
+            configuration=$2
+            set -- "$@" "$1" "$2"
+            shift 2
+            pending=$((pending - 2))
+            ;;
+        --configuration=*)
+            configuration=${1#--configuration=}
+            set -- "$@" "$1"
+            shift
+            pending=$((pending - 1))
+            ;;
+        *)
+            set -- "$@" "$1"
+            shift
+            pending=$((pending - 1))
+            ;;
+    esac
+done
+
+# An empty lcov_path means the option was not given and matches nothing here.
+case "$lcov_path" in
+    -*)
+        printf '%s\n' "scripts/coverage: --lcov needs a file path, got '$lcov_path'" >&2
+        exit 2
+        ;;
+esac
+
+# The Linux Swift toolchain ships llvm-cov on PATH. On macOS it lives inside the
+# active developer directory, where xcrun is the supported way to find it.
+llvm_cov() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        xcrun llvm-cov "$@"
+    else
+        llvm-cov "$@"
+    fi
+}
+
+swift test --enable-code-coverage "$@" >&2
+
+if [ -n "$configuration" ]; then
+    bin_dir=$(swift build --show-bin-path -c "$configuration")
+else
+    bin_dir=$(swift build --show-bin-path)
+fi
+
+profdata="$bin_dir/codecov/default.profdata"
+[ -f "$profdata" ] || {
+    printf '%s\n' "scripts/coverage: no coverage profile at $profdata" >&2
+    exit 1
+}
+
+# SwiftPM emits a plain executable on Linux and a bundle on macOS, where the
+# instrumented Mach-O sits inside Contents/MacOS.
+binary=""
+for candidate in "$bin_dir"/*.xctest; do
+    [ -e "$candidate" ] || continue
+    if [ -d "$candidate" ]; then
+        name=${candidate##*/}
+        candidate="$candidate/Contents/MacOS/${name%.xctest}"
+        [ -f "$candidate" ] || continue
+    fi
+    binary=$candidate
+    break
+done
+[ -n "$binary" ] || {
+    printf '%s\n' "scripts/coverage: no .xctest binary in $bin_dir" >&2
+    exit 1
+}
+
+# Test sources and everything SwiftPM generates under .build are not the code
+# under measurement, and counting them only flatters the totals.
+ignore='(^|/)(Tests|\.build)/'
+
+if [ -n "$lcov_path" ]; then
+    llvm_cov export -format=lcov "$binary" \
+        -instr-profile "$profdata" \
+        -ignore-filename-regex="$ignore" >"$lcov_path"
+    printf '%s\n' "scripts/coverage: wrote $lcov_path" >&2
+fi
+
+llvm_cov report "$binary" \
+    -instr-profile "$profdata" \
+    -ignore-filename-regex="$ignore"
