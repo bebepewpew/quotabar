@@ -36,22 +36,93 @@ struct GeminiTerminalProbe: QuotaProbe {
     func fetch() throws -> QuotaSnapshot {
         guard let binary = CommandRunner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
         let output = try CommandRunner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
-        if output.contains("QUOTABAR_AUTH") { throw ProbeError.unsupported("Gemini authentication is required. Open Gemini CLI and sign in.") }
-        if output.contains("QUOTABAR_STARTUP_TIMEOUT") { throw ProbeError.unsupported("Gemini did not reach its input prompt in time.") }
-        if output.contains("QUOTABAR_STATS_TIMEOUT") { throw ProbeError.unsupported("Gemini did not finish refreshing /stats in time.") }
+        if let failure = Self.failure(in: output) { throw failure }
         return try Self.parse(output, now: Date())
+    }
+
+    /// Maps the markers the expect script prints to an error, most specific first.
+    ///
+    /// Order matters. Gemini shows its "Sign in with Google / Use Gemini API Key /
+    /// Vertex AI" menu both when nobody is signed in *and* when Google has
+    /// withdrawn the account's tier — in the second case the next line reads
+    /// "Failed to sign in … no longer supported". Reporting "sign in" there sends
+    /// the user on an errand that cannot succeed.
+    /// Screen-reader mode can wrap one character per line, so the transcript
+    /// holds `W\na\ni\nt…` rather than the phrase. A plain substring search
+    /// silently never matches; comparing with whitespace removed does.
+    static func mentions(_ phrase: String, in output: String) -> Bool {
+        func squashed(_ value: String) -> String {
+            value.lowercased().filter { !$0.isWhitespace }
+        }
+        return squashed(normalize(output)).contains(squashed(phrase))
+    }
+
+    static func failure(in output: String) -> ProbeError? {
+        if output.contains("QUOTABAR_INELIGIBLE") {
+            return .unsupported("Gemini rejected this client: Google no longer supports Gemini Code Assist for individual accounts here. Signing in again will not help — see https://antigravity.google.")
+        }
+        // An account that has never been signed in never reaches the sign-in
+        // menu: Gemini opens a browser OAuth flow, shows "Waiting for
+        // authentication…", and asks about folder trust on top of it. Whichever
+        // prompt we stopped on, the blocker is the unfinished sign-in, so it
+        // outranks them. The phrase alone is not a verdict — a signed-in client
+        // shows it briefly while refreshing a token and then reaches its prompt.
+        if Self.mentions("waiting for authentication", in: output),
+           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT") {
+            return .unsupported("Gemini has not finished signing in. Run `gemini` once and complete the prompts it shows — folder trust, then sign-in — before refreshing.")
+        }
+        if output.contains("QUOTABAR_TRUST") {
+            return .unsupported("Gemini is waiting for a folder-trust decision. Start Gemini CLI once in your home directory and trust the folder.")
+        }
+        if output.contains("QUOTABAR_AUTH") {
+            return .unsupported("Gemini authentication is required. Open Gemini CLI and sign in.")
+        }
+        if output.contains("QUOTABAR_STARTUP_TIMEOUT") {
+            return .unsupported("Gemini did not reach its input prompt in time.")
+        }
+        if output.contains("QUOTABAR_STATS_TIMEOUT") {
+            return .unsupported("Gemini did not finish refreshing /stats in time.")
+        }
+        return nil
     }
 
     static func expectScript(binary: String) -> String {
         """
-        proc stop_child {} { catch {send -- "\\003"}; catch {close}; catch {wait -nowait} }
+        proc stop_child {} {
+            # Ctrl-C and close leave Gemini's own children running: they keep the
+            # output pipe open long after expect exits, so the transcript never
+            # comes back and the probe reports a bare timeout instead of the
+            # reason. Signal the spawned process *group*, which is what
+            # AGENTS.md requires and what actually releases the pipe.
+            set child [exp_pid]
+            catch {send -- "\\003"}
+            catch {exec kill -TERM -$child}
+            catch {close}
+            catch {exec kill -KILL -$child}
+            catch {wait -nowait}
+        }
+        proc classify_auth {} {
+            # The sign-in menu is also what Gemini shows when Google has withdrawn
+            # the account's tier, and the rejection arrives a moment later. Wait for
+            # it rather than reporting a sign-in that cannot succeed.
+            set timeout 6
+            expect {
+                -re {(?i)(no longer supported|migrate to the antigravity|ineligible)} {puts "QUOTABAR_INELIGIBLE"}
+                timeout {puts "QUOTABAR_AUTH"}
+                eof {puts "QUOTABAR_AUTH"}
+            }
+            stop_child
+            exit 0
+        }
         set timeout 30
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
         spawn -noecho \(CommandRunner.tclQuoted(binary)) --screen-reader --skip-trust
         stty rows 40 columns 160 < $spawn_out(slave,name)
         expect {
-            -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
+            -re {(?i)(no longer supported|migrate to the antigravity)} {puts "QUOTABAR_INELIGIBLE"; stop_child; exit 0}
+            -re {(?i)do you trust the files in this folder} {puts "QUOTABAR_TRUST"; stop_child; exit 0}
+            -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
             -re {Type your message or @path/to/file} {}
             timeout {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
@@ -66,7 +137,9 @@ struct GeminiTerminalProbe: QuotaProbe {
         set timeout 45
         expect {
             -re {(?i)Session Stats} {}
-            -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
+            -re {(?i)(no longer supported|migrate to the antigravity)} {puts "QUOTABAR_INELIGIBLE"; stop_child; exit 0}
+            -re {(?i)do you trust the files in this folder} {puts "QUOTABAR_TRUST"; stop_child; exit 0}
+            -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
