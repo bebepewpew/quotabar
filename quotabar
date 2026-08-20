@@ -30,7 +30,6 @@ build_app() {
   cp "$bin_dir/QuotaBar" "$app_dir/Contents/MacOS/QuotaBar"
   cp "$project_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
   cp "$project_dir/Resources/AppIcon.icns" "$app_dir/Contents/Resources/AppIcon.icns"
-  cp "$project_dir/Resources/AppIcon.png" "$app_dir/Contents/Resources/AppIcon.png"
   /usr/bin/codesign --force --sign - "$app_dir" >/dev/null
   print "$app_dir"
 }
