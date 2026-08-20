@@ -1,0 +1,55 @@
+# nfpm configuration for the Linux `quotabar` command.
+#
+# `.github/workflows/release.yml` stages the statically linked binary at
+# `dist/linux-x86_64/quotabar`, exports QUOTABAR_VERSION, and then runs
+# `nfpm package` once per packager. nfpm expands `${...}` from the environment
+# when it reads this file, so the version is never committed here.
+
+name: quotabar
+arch: amd64
+platform: linux
+version: ${QUOTABAR_VERSION}
+version_schema: semver
+release: "1"
+section: utils
+priority: optional
+maintainer: bebepewpew <bebepewpew@users.noreply.github.com>
+vendor: QuotaBar
+homepage: https://github.com/bebepewpew/quotabar
+license: MIT
+description: |
+  Quota monitor for the Codex, Claude Code and Gemini CLIs.
+  quotabar reads quota data from the locally installed provider CLIs and prints
+  it as a table, as JSON, or as a Waybar payload. It never reads, copies, logs
+  or stores provider credentials, and it never completes a login prompt.
+
+contents:
+  - src: ./dist/linux-x86_64/quotabar
+    dst: /usr/bin/quotabar
+    file_info:
+      mode: 0755
+  # Plain files, not `type: doc`: nfpm maps that type onto the RPM %doc flag and
+  # its deb packager drops those entries entirely, so the .deb would ship
+  # without a README or a licence.
+  - src: ./README.md
+    dst: /usr/share/doc/quotabar/README.md
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/doc/quotabar/LICENSE
+    file_info:
+      mode: 0644
+
+# The binary is linked with --static-swift-stdlib, so it carries the Swift
+# runtime itself and needs no Swift package at all. `expect` is used by the
+# Gemini probe alone and libnotify only by `--notify`, so both stay weak
+# dependencies, spelled with each distribution's own package name.
+overrides:
+  deb:
+    recommends:
+      - expect
+      - libnotify-bin
+  rpm:
+    recommends:
+      - expect
+      - libnotify
