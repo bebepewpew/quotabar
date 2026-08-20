@@ -1,0 +1,53 @@
+#!/bin/zsh
+set -euo pipefail
+
+project_dir="${0:A:h}"
+cd "$project_dir"
+
+# Some Command Line Tools updates temporarily pair a newer compiler with an
+# incompatible newest SDK. The 15.4 SDK remains compatible with QuotaBar's
+# macOS 14 deployment target and avoids that toolchain mismatch.
+compatible_sdk="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
+if [[ -d "$compatible_sdk" ]]; then
+  export SDKROOT="$compatible_sdk"
+fi
+
+task_cache="${TMPDIR:-/tmp}/quotabar-swift-cache"
+clang_cache="${TMPDIR:-/tmp}/quotabar-clang-cache"
+mkdir -p "$task_cache" "$clang_cache"
+export SWIFTPM_MODULECACHE_OVERRIDE="$task_cache"
+export CLANG_MODULE_CACHE_PATH="$clang_cache"
+
+action="${1:-run}"
+if (( $# > 0 )); then shift; fi
+
+build_app() {
+  swift build "$@" >&2
+  local bin_dir app_dir
+  bin_dir="$(swift build --show-bin-path)"
+  app_dir="$project_dir/.build/QuotaBar.app"
+  mkdir -p "$app_dir/Contents/MacOS"
+  cp "$bin_dir/QuotaBar" "$app_dir/Contents/MacOS/QuotaBar"
+  cp "$project_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
+  /usr/bin/codesign --force --sign - "$app_dir" >/dev/null
+  print "$app_dir"
+}
+
+case "$action" in
+  run)
+    app_dir="$(build_app "$@")"
+    # Launch the bundle through Launch Services so macOS assigns the process its
+    # bundle identity. Running the inner Mach-O directly makes UserNotifications
+    # treat QuotaBar as an unsupported command-line executable.
+    exec /usr/bin/open -W -n "$app_dir"
+    ;;
+  build) build_app "$@" ;;
+  test)
+    if [[ ! -x /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild ]]; then
+      print -u2 "QuotaBar tests require the full Xcode toolchain (this Command Line Tools installation includes neither XCTest nor Swift Testing)."
+      exit 2
+    fi
+    exec swift test "$@"
+    ;;
+  *) print -u2 "Usage: ./quotabar [run|build|test] [SwiftPM options]"; exit 2 ;;
+esac
