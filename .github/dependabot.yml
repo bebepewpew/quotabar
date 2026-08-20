@@ -1,0 +1,23 @@
+version: 2
+
+# QuotaBar declares no third-party Swift packages, and Dependabot has no Swift
+# Package Manager ecosystem anyway. The dependencies this repository actually
+# ships are the GitHub Actions in .github/workflows, which run with access to
+# the repository and its token.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    # One grouped pull request per week instead of one per action. Actions
+    # pinned by major version pick up patches without a bump at all, so this
+    # mostly matters for aquasecurity/trivy-action, which publishes no moving
+    # major tag and has to be pinned to a release.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
