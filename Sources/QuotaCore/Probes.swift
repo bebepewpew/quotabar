@@ -2,6 +2,49 @@ import Foundation
 
 protocol QuotaProbe: Sendable { func fetch() throws -> QuotaSnapshot }
 
+/// The command execution every `fetch()` depends on, gathered behind one seam.
+///
+/// The parsers were always testable; the half of each probe that shells out was
+/// not, because it needed a real Codex, Claude Code or Gemini install. The
+/// default implementation forwards to `CommandRunner`/`ProcessLineSession`, so
+/// production behaviour is unchanged, while tests substitute a stub and drive
+/// the not-installed, authentication, unreadable-response and success branches.
+protocol ProbeRunner: Sendable {
+    func find(_ executable: String) -> String?
+    func run(_ executable: String, _ arguments: [String], timeout: TimeInterval, currentDirectory: URL?) throws -> Data
+    func runExpect(_ script: String, timeout: TimeInterval, currentDirectory: URL?) throws -> String
+    func lineSession(executable: String, arguments: [String], currentDirectory: URL?) throws -> any LineSession
+}
+
+/// The line-delimited conversation `CodexProbe` sequences its JSON-RPC exchange
+/// over. `ProcessLineSession` is the process-backed implementation; a test can
+/// script the replies instead, including a server that never answers.
+protocol LineSession: AnyObject, Sendable {
+    func send(_ line: String) throws
+    func waitForLine(matching matches: (String) -> Bool, before deadline: Date, transcript: inout [String]) -> String?
+    func close()
+}
+
+extension ProcessLineSession: LineSession {}
+
+/// The real toolchain: child processes with the deadlines and process-group
+/// teardown `CommandRunner` and `ProcessLineSession` already implement.
+struct SystemProbeRunner: ProbeRunner {
+    func find(_ executable: String) -> String? { CommandRunner.find(executable) }
+
+    func run(_ executable: String, _ arguments: [String], timeout: TimeInterval, currentDirectory: URL?) throws -> Data {
+        try CommandRunner.run(executable, arguments, timeout: timeout, currentDirectory: currentDirectory)
+    }
+
+    func runExpect(_ script: String, timeout: TimeInterval, currentDirectory: URL?) throws -> String {
+        try CommandRunner.runExpect(script, timeout: timeout, currentDirectory: currentDirectory)
+    }
+
+    func lineSession(executable: String, arguments: [String], currentDirectory: URL?) throws -> any LineSession {
+        try ProcessLineSession(executable: executable, arguments: arguments, currentDirectory: currentDirectory)
+    }
+}
+
 /// `JSONSerialization` bridges numbers to `NSNumber` on Darwin, but on
 /// swift-corelibs-foundation they arrive as plain `Int`/`Double`, so an
 /// `as? NSNumber` cast silently yields zero for every Codex quota on Linux.
@@ -33,9 +76,13 @@ private func probeWorkingDirectory() -> URL {
 
 
 struct GeminiTerminalProbe: QuotaProbe {
+    let runner: any ProbeRunner
+
+    init(runner: any ProbeRunner = SystemProbeRunner()) { self.runner = runner }
+
     func fetch() throws -> QuotaSnapshot {
-        guard let binary = CommandRunner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
-        let output = try CommandRunner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
+        guard let binary = runner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
+        let output = try runner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
         if let failure = Self.failure(in: output) { throw failure }
         return try Self.parse(output, now: Date())
     }
@@ -234,11 +281,31 @@ struct GeminiTerminalProbe: QuotaProbe {
 }
 
 struct ClaudePrintProbe: QuotaProbe {
+    let runner: any ProbeRunner
+
+    init(runner: any ProbeRunner = SystemProbeRunner()) { self.runner = runner }
+
     func fetch() throws -> QuotaSnapshot {
-        guard let binary = CommandRunner.find("claude") else { throw ProbeError.missing("Claude Code") }
-        let data = try CommandRunner.run(binary, ["-p", "/usage"], timeout: 45, currentDirectory: probeWorkingDirectory())
+        guard let binary = runner.find("claude") else { throw ProbeError.missing("Claude Code") }
+        let data: Data
+        do {
+            data = try runner.run(binary, ["-p", "/usage"], timeout: 45, currentDirectory: probeWorkingDirectory())
+        } catch {
+            // A signed-out `claude -p /usage` exits non-zero, so its "Please run
+            // /login" arrives as a thrown command diagnostic rather than as
+            // output to parse. Only the zero-exit branch used to be classified,
+            // which left the actionable step buried under raw CLI text.
+            throw Self.authenticationFailure(in: (error as? ProbeError)?.errorDescription ?? error.localizedDescription) ?? error
+        }
         let output = String(decoding: data, as: UTF8.self)
         return try Self.parse(output, now: Date())
+    }
+
+    /// Untrusted CLI text in, one concise actionable error out — or nil when the
+    /// text is about something other than signing in.
+    static func authenticationFailure(in text: String) -> ProbeError? {
+        guard text.containsCaseInsensitive("login") || text.containsCaseInsensitive("authentication") else { return nil }
+        return .unsupported("Claude authentication is required. Open Claude Code once and sign in.")
     }
 
     static func parse(_ output: String, now: Date) throws -> QuotaSnapshot {
@@ -258,9 +325,7 @@ struct ClaudePrintProbe: QuotaProbe {
             windows.append(.init(label: label, usedPercent: min(percent, 100), resetAt: resetAt))
         }
         guard !windows.isEmpty else {
-            if output.containsCaseInsensitive("login") || output.containsCaseInsensitive("authentication") {
-                throw ProbeError.unsupported("Claude authentication is required. Open Claude Code once and sign in.")
-            }
+            if let failure = Self.authenticationFailure(in: output) { throw failure }
             throw ProbeError.unsupported("Claude returned an unreadable /usage response.")
         }
         return .init(provider: .claude, windows: windows)
@@ -299,14 +364,18 @@ struct CodexProbe: QuotaProbe {
     static let initializedNotification = #"{"method":"initialized"}"#
     static let rateLimitsRequest = #"{"id":2,"method":"account/rateLimits/read"}"#
 
+    let runner: any ProbeRunner
+
+    init(runner: any ProbeRunner = SystemProbeRunner()) { self.runner = runner }
+
     func fetch() throws -> QuotaSnapshot {
-        guard let binary = CommandRunner.find("codex") else { throw ProbeError.missing("Codex") }
+        guard let binary = runner.find("codex") else { throw ProbeError.missing("Codex") }
         // app-server speaks line-delimited JSON-RPC over stdio and silently ignores
         // requests sent before the initialize response, so the exchange has to be
         // sequenced — but plain pipes are enough for that. No pseudo-terminal, so
         // no `expect` dependency and nothing platform-specific, and still no
         // copying of the CLI's OAuth credentials into this app.
-        let session = try ProcessLineSession(executable: binary, arguments: ["app-server", "--stdio"],
+        let session = try runner.lineSession(executable: binary, arguments: ["app-server", "--stdio"],
                                              currentDirectory: probeWorkingDirectory())
         defer { session.close() }
 
