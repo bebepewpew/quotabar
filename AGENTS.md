@@ -65,6 +65,22 @@ and every supported row form. Process changes require timeout, authentication,
 and cleanup coverage where practical. UI threshold changes require exact boundary
 tests.
 
+## Agent tooling
+
+`.claude/` holds checked-in configuration shared by every contributor:
+
+- `settings.json` — a permission allowlist for the commands this project really
+  runs. It deliberately allows `./quotabar ...` rather than raw `docker run`, so
+  agents use the wrapper and get the right toolchain and file ownership. The deny
+  entries discouraging pushes to `main` are a speed bump; `.githooks/pre-push`
+  and branch protection are the enforcement.
+- `skills/quotabar-dev` — the build, test and pre-PR validation flow above.
+- `skills/probe-fixture` — what a parser change must cover, and the parsing
+  traps this repository has already hit.
+- `agents/quotabar-reviewer` — reviews a change against the rules in this file.
+
+These describe the rules; they do not replace them. This file stays canonical.
+
 ## Repository hygiene
 
 - `README.md` describes current behavior and supported requirements.

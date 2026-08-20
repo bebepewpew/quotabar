@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./quotabar build)",
+      "Bash(./quotabar build *)",
+      "Bash(./quotabar test)",
+      "Bash(./quotabar test *)",
+      "Bash(./quotabar cli)",
+      "Bash(./quotabar cli *)",
+      "Bash(scripts/install-hooks)",
+      "Bash(swift build)",
+      "Bash(swift build *)",
+      "Bash(swift test)",
+      "Bash(swift test *)",
+      "Bash(swift run quotabar)",
+      "Bash(swift run quotabar *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch)",
+      "Bash(git branch *)",
+      "Bash(git ls-files *)",
+      "Bash(git rev-parse *)",
+      "Bash(git fetch)",
+      "Bash(git fetch *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)"
+    ],
+    "deny": [
+      "Bash(git push origin main)",
+      "Bash(git push origin main *)",
+      "Bash(git push origin HEAD:main *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)"
+    ]
+  }
+}
