@@ -26,9 +26,10 @@ build_app() {
   local bin_dir app_dir
   bin_dir="$(swift build --show-bin-path)"
   app_dir="$project_dir/.build/QuotaBar.app"
-  mkdir -p "$app_dir/Contents/MacOS"
+  mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
   cp "$bin_dir/QuotaBar" "$app_dir/Contents/MacOS/QuotaBar"
   cp "$project_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
+  cp "$project_dir/Resources/AppIcon.icns" "$app_dir/Contents/Resources/AppIcon.icns"
   /usr/bin/codesign --force --sign - "$app_dir" >/dev/null
   print "$app_dir"
 }
@@ -39,7 +40,9 @@ case "$action" in
     # Launch the bundle through Launch Services so macOS assigns the process its
     # bundle identity. Running the inner Mach-O directly makes UserNotifications
     # treat QuotaBar as an unsupported command-line executable.
-    exec /usr/bin/open -W -n "$app_dir"
+    lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    "$lsregister" -f "$app_dir"
+    exec /usr/bin/open -W "$app_dir"
     ;;
   build) build_app "$@" ;;
   test)

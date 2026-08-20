@@ -6,6 +6,10 @@ import Combine
     @StateObject private var store: QuotaStore
 
     @MainActor init() {
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL) {
+            NSApp.applicationIconImage = icon
+        }
         let store = QuotaStore()
         _store = StateObject(wrappedValue: store)
         StatusBarController.shared.install(store: store)
