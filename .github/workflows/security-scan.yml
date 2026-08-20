@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Scan the working tree
         uses: aquasecurity/trivy-action@v0.36.0
@@ -81,7 +81,7 @@ jobs:
     steps:
       - name: Check out repository
         # upload-sarif resolves the commit it is annotating from the checkout.
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Scan swift:6.3-noble
         # The image CI builds in and the one ./quotabar runs on a Linux host
