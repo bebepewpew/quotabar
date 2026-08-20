@@ -186,4 +186,5 @@ QuotaBar is available under the [MIT License](LICENSE).
 
 All changes go through pull requests with required CI. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) and the shared human/AI rules in
-[AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone.
+[AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone
+(and `scripts/install-codex-skills` if you use Codex).

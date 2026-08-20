@@ -8,3 +8,4 @@ DerivedData/
 *.xcscmblueprint
 *.swp
 *~
+.claude/.cc-writes/

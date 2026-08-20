@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuotaBar Dev"
+  short_description: "Build, test and validate QuotaBar before a pull request"
+  default_prompt: "Use $quotabar-dev to build and test QuotaBar and run the checks AGENTS.md requires before a pull request."

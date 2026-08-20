@@ -65,6 +65,34 @@ and every supported row form. Process changes require timeout, authentication,
 and cleanup coverage where practical. UI threshold changes require exact boundary
 tests.
 
+## Agent tooling
+
+The guidance lives once, in `docs/agent-guides/`:
+
+- `quotabar-dev.md` — build, test and pre-PR validation, including the Linux
+  container path and the platform facts that are easy to get wrong.
+- `probe-fixture.md` — what a parser change must cover, and the parsing traps
+  this repository has already hit.
+- `review-checklist.md` — how a change is reviewed against this file.
+
+Each tool gets a thin wrapper pointing at those, the same way `CLAUDE.md` and
+`GEMINI.md` point here instead of restating policy:
+
+- `.claude/` — `settings.json`, `skills/quotabar-dev`, `skills/quotabar-fixtures`
+  and `agents/quotabar-reviewer`. Claude Code reads these from the repository.
+- `.codex/skills/` — the same three with `agents/openai.yaml` manifests. Codex
+  discovers skills only under `$CODEX_HOME/skills` and does not read them from a
+  repository, so run `scripts/install-codex-skills` once per clone and again
+  after pulling changes to them. Codex reads `AGENTS.md` natively, which is why
+  there is no `CODEX.md`.
+
+`.claude/settings.json` allows `./quotabar ...` rather than raw `docker run ...`
+deliberately: the wrapper selects the right toolchain and keeps `.build` owned by
+the invoking user. Its deny entries for pushes to `main` are a speed bump only;
+`.githooks/pre-push` and branch protection are the enforcement.
+
+These describe the rules; they do not replace them. This file stays canonical.
+
 ## Repository hygiene
 
 - `README.md` describes current behavior and supported requirements.

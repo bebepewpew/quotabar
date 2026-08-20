@@ -2,7 +2,9 @@
 
 All changes, including maintainer changes, go through pull requests.
 
-1. Run `scripts/install-hooks` once after cloning.
+1. Run `scripts/install-hooks` once after cloning. If you use Codex, also
+   run `scripts/install-codex-skills` — Codex only loads skills from
+   `$CODEX_HOME/skills`, never from the repository.
 2. Update `main`, then create a focused branch such as `fix/gemini-timeout` or
    `feature/custom-badges`.
 3. Make the change and add proportionate tests.
