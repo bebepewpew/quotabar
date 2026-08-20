@@ -88,7 +88,12 @@ a finding.`, {
       phase: 'Review',
       agentType: lens.agentType,
       schema: FINDINGS,
-    }).then(r => ({ lens: lens.key, findings: (r && r.findings) || [] })),
+    })
+      .then(r => ({ lens: lens.key, findings: (r && r.findings) || [], ran: true }))
+      // A lens that errors must not be indistinguishable from a lens that looked
+      // and found nothing. Reporting a five-lens review as six is how a gap in
+      // coverage gets read as a clean bill of health.
+      .catch(e => ({ lens: lens.key, findings: [], ran: false, error: String((e && e.message) || e) })),
 
   // Every finding is attacked before it is believed. A reviewer that is wrong
   // costs more than one that is silent, because someone acts on it.
@@ -109,15 +114,30 @@ if it was overstated or understated.`, {
         label: `verify:${lens}`,
         phase: 'Verify',
         schema: VERDICT,
-      }).then(v => ({ ...f, lens, verdict: v }))
+      })
+        .then(v => ({ ...f, lens, verdict: v }))
+        // An unverifiable finding is surfaced, not silently dropped.
+        .catch(e => ({ ...f, lens, verdict: null, verifyError: String((e && e.message) || e) }))
     )).then(rows => rows.filter(Boolean)),
 )
 
-const all = perLens.flat().filter(Boolean)
+const lensRuns = perLens.map((rows, i) => ({
+  key: LENSES[i].key,
+  // A stage that threw leaves nothing behind, so an absent entry is a failure too.
+  ran: Array.isArray(rows) ? rows.every(r => r && r.ran !== false) : false,
+  error: Array.isArray(rows) ? (rows.find(r => r && r.ran === false) || {}).error : 'the lens produced no result',
+}))
+const failedLenses = lensRuns.filter(l => !l.ran)
+
+const all = perLens.flat().filter(f => f && f.claim)
 const survived = all.filter(f => f.verdict && f.verdict.survives)
 const refuted = all.filter(f => f.verdict && !f.verdict.survives)
+const unverified = all.filter(f => !f.verdict)
 
-log(`${all.length} raised · ${survived.length} survived · ${refuted.length} refuted`)
+for (const l of failedLenses) log(`LENS DID NOT RUN — ${l.key}: ${l.error}. This review covered ${LENSES.length - failedLenses.length} of ${LENSES.length} angles.`)
+for (const f of unverified) log(`unverified: [${f.lens}] ${f.file} — ${f.claim}`)
+
+log(`${all.length} raised · ${survived.length} survived · ${refuted.length} refuted · ${unverified.length} unverified`)
 
 const rank = { critical: 0, high: 1, medium: 2, low: 3 }
 const severity = f => (f.verdict && f.verdict.severity) || f.severity
@@ -129,6 +149,10 @@ const blocking = survived.filter(f => ['critical', 'high'].includes(severity(f))
 
 return {
   target,
+  // Not a clean bill of health if a lens never ran.
+  complete: failedLenses.length === 0,
+  lensesThatFailed: failedLenses,
+  unverified: unverified.map(f => ({ lens: f.lens, file: f.file, claim: f.claim, why: f.verifyError })),
   blocking: blocking.length > 0,
   findings: survived.map(f => ({
     severity: severity(f), lens: f.lens, file: f.file, line: f.line,
@@ -136,5 +160,5 @@ return {
   })),
   // Kept so a refuted finding is not raised again by the next run.
   refuted: refuted.map(f => ({ lens: f.lens, file: f.file, claim: f.claim, why: f.verdict.reason })),
-  lensesWithNothing: LENSES.map(l => l.key).filter(k => !all.some(f => f.lens === k)),
+  lensesWithNothing: lensRuns.filter(l => l.ran).map(l => l.key).filter(k => !all.some(f => f.lens === k)),
 }

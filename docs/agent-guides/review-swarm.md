@@ -1,10 +1,23 @@
 # Reviewing with a swarm
 
-One reviewer has one blind spot. The correctness lens waves through a test that
-asserts a function against a copy of its own algorithm, because that is not a
-correctness bug — it is a *test quality* bug, and nobody was looking for it. That
-happened here: a self-referential adler32 assertion was marked non-blocking and
-merged.
+One reviewer has one blind spot. A correctness lens waves through a test that
+cannot fail, because an unfalsifiable assertion is not a correctness bug — it is a
+*test quality* bug, and nobody was looking for one.
+
+Both kinds have turned up here. Review of the coverage work blocked two tests that
+could not fail: a barrier that released on the third *arrival* regardless of
+whether the earlier waiters had already left, so a serial implementation satisfied
+it; and a path assertion that passed only because `/bin` is a symlink to
+`/usr/bin` in the container, and would have gone red on macOS. The swarm's own
+first run then found `TrayIconTests.swift:180`, where the test's reader slices a
+chunk payload *using* the declared length and then asserts the two are equal.
+
+That run is also worth reading for what it **refuted**. A reviewer claimed the
+file's adler32 assertions were tautological. They are not: the encoder's copy is
+`private`, so file-scoped, and `@testable` cannot reach it — the test's copy is a
+separate implementation, and mutating the encoder does make the assertions fail.
+The verifier proved it by simulating the mutation. A swarm that only ever adds
+findings is not worth much; refusing a plausible one matters as much.
 
 `.claude/workflows/review-swarm.js` runs six narrow reviewers instead of one broad
 one.
@@ -42,6 +55,15 @@ knocked down is not raised again by the next run.
 
 ## Reading the result
 
-`blocking` is true when anything critical or high survived. `lensesWithNothing`
-lists the angles that found nothing — worth reading, because a lens that *always*
-finds nothing is either pointing at the wrong thing or being ignored.
+`blocking` is true when anything critical or high survived.
+
+**`complete` matters more.** A lens can fail to run at all — the first run lost the
+security lens because the agent type had not been registered yet — and an errored
+lens must never be reported as one that looked and found nothing. `complete` is
+false whenever any lens failed, `lensesThatFailed` names them with the reason, and
+the log says how many of the angles were actually covered.
+
+`lensesWithNothing` lists only lenses that **ran** and found nothing — worth
+reading, because a lens that always finds nothing is either pointed at the wrong
+thing or being ignored. `unverified` holds findings whose refutation step itself
+failed; they are surfaced rather than dropped.
