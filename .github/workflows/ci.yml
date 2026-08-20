@@ -18,6 +18,7 @@ jobs:
       - name: Validate repository policy
         run: |
           test -x scripts/install-hooks
+          test -x scripts/install-codex-skills
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
