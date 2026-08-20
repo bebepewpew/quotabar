@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$remote_ref" = "refs/heads/main" ]; then
+        echo "Push blocked: changes to main must be merged through a pull request." >&2
+        exit 1
+    fi
+done
+
+repo_root=$(git rev-parse --show-toplevel)
+"$repo_root/quotabar" build >/dev/null
+
+if [ -x /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild ]; then
+    "$repo_root/quotabar" test
+else
+    echo "Full Xcode is unavailable; CI must run the XCTest suite." >&2
+fi

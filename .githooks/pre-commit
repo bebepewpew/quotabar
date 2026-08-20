@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if ! git diff --cached --check; then
+    echo "Commit blocked: fix whitespace errors shown above." >&2
+    exit 1
+fi
+if git diff --cached --name-only | grep -Eq '(^|/)REVIEW\.md$|(^|/)\.build/'; then
+    echo "Commit blocked: generated review reports and .build artifacts are not publishable." >&2
+    exit 1
+fi
