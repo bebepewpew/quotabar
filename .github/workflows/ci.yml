@@ -20,6 +20,7 @@ jobs:
           test -x scripts/install-hooks
           test -x scripts/install-codex-skills
           test -x scripts/codex-parallel
+          test -x scripts/coverage
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
@@ -43,3 +44,20 @@ jobs:
         run: |
           swift run quotabar --version
           swift run quotabar --help
+      # Reported only. There is deliberately no threshold yet, so a coverage
+      # drop is visible in the step summary without failing the run.
+      - name: Coverage
+        run: |
+          scripts/coverage --lcov coverage.lcov > coverage.txt
+          {
+            printf '## Coverage (Linux: QuotaCore, QuotaTray)\n\n'
+            printf '```\n'
+            cat coverage.txt
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage lcov
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov-linux
+          path: coverage.lcov
+          if-no-files-found: error
