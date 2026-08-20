@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Security Review"
+  short_description: "Review a change against QuotaBar's threat model"
+  default_prompt: "Use $quotabar-security-review to review the current change against docs/agent-guides/security-review.md."
+policy:
+  allow_implicit_invocation: false
