@@ -1,0 +1,5 @@
+# The repo root holds an executable zsh dev wrapper also called `quotabar`.
+# Without this it is what COPY picks up, and the image ends up shipping a shell
+# script debian cannot run. Keep the context minimal and explicit.
+*
+!dist/
