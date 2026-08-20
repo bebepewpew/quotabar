@@ -17,12 +17,25 @@ public final class TrayPreferences: @unchecked Sendable {
 
     /// Saved selections, capped at `maximumSelections`. Older or malformed
     /// payloads must decode to an empty list rather than throwing.
+    ///
+    /// The cap is applied on read as well as on write, so a list stored by a
+    /// future build that shows more windows still renders at this build's limit
+    /// instead of overflowing the tray.
     public var selections: [QuotaSelection] {
-        // TODO(task 4: preferences)
-        []
+        guard let data = store.data(forKey: Self.storageKey),
+              let decoded = try? JSONDecoder().decode([QuotaSelection].self, from: data)
+        else { return [] }
+        return Self.capped(decoded)
     }
 
     public func setSelections(_ selections: [QuotaSelection]) {
-        // TODO(task 4: preferences)
+        // A payload we cannot encode must not wipe the saved one: leave the
+        // stored value alone rather than writing nil over it.
+        guard let data = try? JSONEncoder().encode(Self.capped(selections)) else { return }
+        store.setData(data, forKey: Self.storageKey)
+    }
+
+    private static func capped(_ selections: [QuotaSelection]) -> [QuotaSelection] {
+        Array(selections.prefix(maximumSelections))
     }
 }
