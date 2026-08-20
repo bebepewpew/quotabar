@@ -22,7 +22,7 @@ struct GeminiTerminalProbe: QuotaProbe {
 
     static func expectScript(binary: String) -> String {
         """
-        proc stop_child {} { catch {send -- "\\003"}; catch {send -- "/quit\\r"}; catch {close}; catch {wait} }
+        proc stop_child {} { catch {send -- "\\003"}; catch {close}; catch {wait -nowait} }
         set timeout 12
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
@@ -30,7 +30,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         stty rows 40 columns 160 < $spawn_out(slave,name)
         expect {
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
-            -re {(^|\r\n)[ \t]*(User:|[>❯])[ \t]+} {}
+            -re {(^|[\r\n]+)[ \t]*(User:|[>❯])[ \t]+} {}
             timeout {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
         }
@@ -44,7 +44,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         }
         set timeout 12
         expect {
-            -re {(^|\r\n)[ \t]*(User:|[>❯])[ \t]+} {puts "QUOTABAR_STATS_COMPLETE"}
+            -re {(^|[\r\n]+)[ \t]*(User:|[>❯])[ \t]+} {puts "QUOTABAR_STATS_COMPLETE"}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }

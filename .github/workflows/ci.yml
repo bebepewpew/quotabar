@@ -14,6 +14,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+      - name: Validate repository policy
+        run: |
+          test -x scripts/install-hooks
+          test -x .githooks/pre-commit
+          test -x .githooks/pre-push
+          test ! -e REVIEW.md
       - name: Build
         run: swift build
       - name: Test

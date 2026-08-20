@@ -46,8 +46,7 @@ enum CommandRunner {
             _ = finished.wait(timeout: .now() + 1)
             if process.processIdentifier > 1 { _ = kill(-process.processIdentifier, SIGKILL) }
             _ = readers.wait(timeout: .now() + 2)
-            let detail = diagnostic(stdout: stdout.value, stderr: stderr.value)
-            throw ProbeError.message(detail.isEmpty ? "The CLI did not respond in time" : "The CLI timed out: \(detail)")
+            throw ProbeError.message("The CLI did not respond in time")
         }
         if readers.wait(timeout: .now() + 2) == .timedOut {
             try? output.fileHandleForReading.close()
