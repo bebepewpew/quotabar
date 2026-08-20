@@ -1,6 +1,10 @@
 # QuotaBar
 
 [![CI](https://github.com/bebepewpew/quotabar/actions/workflows/ci.yml/badge.svg)](https://github.com/bebepewpew/quotabar/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/bebepewpew/quotabar/actions/workflows/codeql.yml/badge.svg)](https://github.com/bebepewpew/quotabar/actions/workflows/codeql.yml)
+[![Security scan](https://github.com/bebepewpew/quotabar/actions/workflows/security-scan.yml/badge.svg)](https://github.com/bebepewpew/quotabar/actions/workflows/security-scan.yml)
+[![Latest release](https://img.shields.io/github/v/release/bebepewpew/quotabar?sort=semver)](https://github.com/bebepewpew/quotabar/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Monitoring for AI coding CLI quotas — a native macOS menu-bar app, and a
 cross-platform `quotabar` command for everything else.
@@ -14,7 +18,42 @@ QuotaBar discovers installed providers at launch. It caches the last successful
 snapshot, refreshes automatically, and keeps cached values visible with a refresh
 error if a CLI is unavailable, unauthenticated, or returns unreadable data.
 
-## Layout
+## Screenshots
+
+None are committed yet. Each bullet below marks where one goes; add the image
+and write its caption at the same time, and delete the placeholder it replaces.
+
+- **Screenshot placeholder** — the macOS menu-bar item with its menu open.
+- **Screenshot placeholder** — `quotabar` printing its table in a terminal.
+- **Screenshot placeholder** — `quotabar --format waybar` inside a status bar.
+
+## Repository layout
+
+| Path | What lives there |
+| --- | --- |
+| `Package.swift`, `Sources/`, `Tests/` | The SwiftPM package: every target and its tests |
+| `Resources/` | `Info.plist` and the icons the macOS app bundle is built from |
+| `Formula/` | The Homebrew formula for the `quotabar` command |
+| `packaging/` | The nfpm configuration the release workflow builds the `.deb` and `.rpm` from |
+| `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` |
+| `docs/agent-guides/` | The long-form guidance the agent tooling points at |
+| `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `CONTRIBUTING.md`, `SECURITY.md` |
+| `.claude/`, `.codex/`, `.githooks/` | Per-tool wrappers and the repository hooks |
+| `quotabar` | The wrapper that picks a toolchain: `./quotabar build`, `test`, `coverage`, `run`, `cli` |
+
+Two of those cannot move, so please do not re-litigate them:
+
+- **`Formula/` stays at the top level.** Homebrew discovers formulae only in
+  `Formula/`, `HomebrewFormula/`, or the repository root. Nesting it anywhere
+  else breaks `brew tap`.
+- **`Package.swift`, `Sources/`, `Tests/` and `Resources/` stay where they
+  are.** SwiftPM requires the manifest at the package root and finds target
+  sources by convention.
+
+`CONTRIBUTING.md` and `SECURITY.md` live under `.github/` deliberately: GitHub
+still surfaces both from there, and the root stays short enough to read.
+
+### Modules
 
 | Module | Platforms | What it is |
 | --- | --- | --- |
@@ -56,6 +95,67 @@ error if a CLI is unavailable, unauthenticated, or returns unreadable data.
 - **Linux:** Swift 6 — or just docker, see below. `libnotify` for `--notify`, and
   `zsh` if you use the `./quotabar` wrapper (`swift build` / `swift run quotabar`
   work without it).
+
+## Installation
+
+Released binaries and packages are published on the
+[releases page](https://github.com/bebepewpew/quotabar/releases). To
+build from a checkout instead, skip to [Build and run](#build-and-run).
+
+### macOS — Homebrew
+
+```sh
+brew tap bebepewpew/quotabar https://github.com/bebepewpew/quotabar
+brew install quotabar
+```
+
+The explicit URL is what lets the formula live in this repository instead of a
+separate `homebrew-quotabar` tap. If `quotabar` is ambiguous on your machine,
+name it in full: `brew install bebepewpew/quotabar/quotabar`.
+
+The formula builds from source on purpose. A downloaded Mach-O that Apple has
+not notarized picks up the `com.apple.quarantine` attribute and Gatekeeper
+blocks it on first run; a binary compiled on the installing machine never
+carries that attribute. The trade-off is a build dependency: Xcode 16 or later,
+for the Swift 6 toolchain.
+
+### Linux — `.deb` and `.rpm`
+
+Download the package for your distribution from the release, then:
+
+```sh
+# Debian, Ubuntu
+sudo apt install ./quotabar_<version>_amd64.deb
+
+# Fedora, RHEL
+sudo rpm -i quotabar-<version>.x86_64.rpm
+```
+
+Both install `/usr/bin/quotabar`. The binary is linked with
+`--static-swift-stdlib`, so it carries the Swift runtime and needs no Swift
+package installed. `expect` and libnotify are recommended rather than required:
+the first is used only by the Gemini probe, the second only by `--notify`.
+
+### Any platform — static tarball
+
+```sh
+tar -xzf quotabar-<version>-linux-x86_64.tar.gz
+sudo install -m 0755 quotabar-<version>-linux-x86_64/quotabar /usr/local/bin/
+```
+
+The macOS build is published the same way as
+`quotabar-<version>-macos-universal.tar.gz`. Each tarball holds the `quotabar`
+binary alongside `README.md` and `LICENSE`. Prefer the Homebrew tap on macOS:
+a browser download picks up `com.apple.quarantine` and Gatekeeper then blocks
+the unnotarized binary on first run.
+
+### Verifying a release
+
+Every release artifact is signed keylessly with
+[cosign](https://docs.sigstore.dev/) through this repository's GitHub OIDC
+identity and carries a GitHub build provenance attestation, and `SHA256SUMS`
+covers the whole set. Each release's notes carry the exact `cosign verify-blob`
+and `gh attestation verify` commands for that version.
 
 ## Build and run
 
@@ -182,9 +282,16 @@ State is stored per platform: `UserDefaults` on macOS, and
 
 QuotaBar is available under the [MIT License](LICENSE).
 
+## Security
+
+Report vulnerabilities privately through GitHub security advisories rather than
+a public issue. [`.github/SECURITY.md`](.github/SECURITY.md) has the reporting
+process, what is in and out of scope, and what QuotaBar does with your machine
+so you can judge the risk yourself.
+
 ## Contributing
 
 All changes go through pull requests with required CI. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) and the shared human/AI rules in
-[AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone
+[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) and the shared human/AI
+rules in [AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone
 (and `scripts/install-codex-skills` if you use Codex).
