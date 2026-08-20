@@ -199,17 +199,21 @@ final class CommandRunnerTests: XCTestCase {
     /// earlier on `PATH` cannot shadow a real installation.
     func testFindPrefersKnownInstallLocationsOverPath() throws {
         try requireLiveEnvironment()
-        let echo = try systemBinary("echo")
+        // Pin to an entry that is actually in find()'s explicit list. Comparing
+        // against whatever the system calls "echo" passes on a merged-usr Linux,
+        // where /bin is a symlink to /usr/bin, and fails on macOS, where
+        // /bin/echo and /usr/bin/echo are distinct files and only /usr/bin is
+        // searched. The point of the test is the ordering, not the path.
+        let known = "/usr/bin/echo"
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: known),
+                          "\(known) is absent, so there is no known install location to prefer")
         let shadow = scratch.appendingPathComponent("shadow")
         let fake = try makeExecutable(named: "echo", in: shadow)
 
         try withPath("\(shadow.path):/usr/bin:/bin") {
             let resolved = CommandRunner.find("echo")
             XCTAssertNotEqual(resolved, fake, "a PATH entry must not shadow a known install location")
-            // /bin and /usr/bin are the same directory on a merged-usr Linux,
-            // so compare what the two paths actually point at.
-            XCTAssertEqual(resolved.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
-                           URL(fileURLWithPath: echo).resolvingSymlinksInPath().path)
+            XCTAssertEqual(resolved, known)
         }
     }
 
