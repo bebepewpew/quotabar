@@ -125,6 +125,22 @@ and read the `text` field, or use plain `quotabar` for the full table.
 A native KDE tray icon (StatusNotifierItem) is planned as a separate front-end
 on top of `QuotaCore`.
 
+## Troubleshooting
+
+QuotaBar reports why a provider is unavailable rather than hiding it. The common
+causes:
+
+| Message | Cause |
+| --- | --- |
+| `expect is not installed` | Only the Gemini probe needs it. Install it, or ignore it if you do not use Gemini. |
+| `Gemini rejected this client…` | Google has withdrawn this account's Gemini Code Assist tier. Signing in again cannot fix it; see <https://antigravity.google>. |
+| `Gemini is waiting for a folder-trust decision` | Gemini CLI asks whether to trust the working directory before it will start. Run `gemini` once and answer it. |
+| `Gemini authentication is required` | Genuinely signed out. Run `gemini` and sign in. |
+| `… is not installed` | The provider's CLI was not found on `PATH` or in the usual install locations. |
+
+A failed provider never clears the values QuotaBar already had; the last
+successful reading stays visible with the error beside it.
+
 ## Porting to another platform
 
 `QuotaCore` carries no UI framework, and the platform seams are `StateStore`,

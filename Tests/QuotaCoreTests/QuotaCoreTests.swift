@@ -160,6 +160,55 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(snapshot.windows[3].resetAt).timeIntervalSince(now), 58_680)
     }
 
+    func testGeminiProbeDetectsTierRejectionAndFolderTrust() {
+        let script = GeminiTerminalProbe.expectScript(binary: "/tmp/gemini")
+        XCTAssertTrue(script.contains("QUOTABAR_INELIGIBLE"))
+        XCTAssertTrue(script.contains("QUOTABAR_TRUST"))
+        XCTAssertTrue(script.containsCaseInsensitive("no longer supported"))
+        XCTAssertTrue(script.containsCaseInsensitive("migrate to the antigravity"))
+        XCTAssertTrue(script.containsCaseInsensitive("do you trust the files in this folder"))
+        // The sign-in menu defers to classify_auth rather than reporting straight
+        // away, so a tier rejection arriving a moment later still wins.
+        XCTAssertTrue(script.contains("proc classify_auth"))
+        XCTAssertTrue(script.contains("{classify_auth}"))
+        XCTAssertFalse(script.contains("select.*auth)} {puts \"QUOTABAR_AUTH\""))
+        // Every branch that gives up still tears the child down.
+        for branch in script.components(separatedBy: "exit 0").dropLast() {
+            XCTAssertTrue(branch.contains("stop_child") || branch.contains("eof"),
+                          "an exit path leaves the child running")
+        }
+    }
+
+    /// Gemini shows the same sign-in menu whether nobody is signed in or Google
+    /// has withdrawn the tier, so the decisive marker has to win.
+    func testGeminiFailurePrecedencePrefersTheDecisiveMarker() throws {
+        func message(_ output: String) throws -> String {
+            try XCTUnwrap(XCTUnwrap(GeminiTerminalProbe.failure(in: output)).errorDescription)
+        }
+        XCTAssertTrue(try message("QUOTABAR_AUTH\nQUOTABAR_INELIGIBLE\n").contains("no longer supports"))
+        XCTAssertTrue(try message("QUOTABAR_AUTH\nQUOTABAR_TRUST\n").contains("folder-trust"))
+        XCTAssertTrue(try message("QUOTABAR_AUTH\n").contains("sign in"))
+        XCTAssertTrue(try message("QUOTABAR_STARTUP_TIMEOUT\n").contains("input prompt"))
+        XCTAssertTrue(try message("QUOTABAR_STATS_TIMEOUT\n").contains("/stats"))
+        XCTAssertNil(GeminiTerminalProbe.failure(in: "gemini-2.5-pro   -   10.0% (Resets in 1h)"))
+    }
+
+    /// The real screen-reader transcript: the menu and the rejection arrive
+    /// together, which is exactly the case that used to be misreported.
+    func testGeminiTierRejectionTranscriptIsNotReportedAsSignIn() throws {
+        let transcript = """
+        How would you like to authenticate for this project?
+        (checked) 1. Sign in with Google 2. Use Gemini API Key 3. Vertex AI
+        Failed to sign in. Message: This client is no longer supported for Gemini
+        Code Assist for individuals. To continue using Gemini, please migrate to
+        the Antigravity suite of products: https://antigravity.google
+        QUOTABAR_INELIGIBLE
+        """
+        let message = try XCTUnwrap(GeminiTerminalProbe.failure(in: transcript)?.errorDescription)
+        XCTAssertTrue(message.contains("no longer supports"))
+        XCTAssertFalse(message.contains("Open Gemini CLI and sign in"))
+    }
+
     func testOldSelectionAndWindowPayloadsMigrateToStableKeys() throws {
         let selection = try JSONDecoder().decode(QuotaSelection.self, from: Data(#"{"provider":"Codex","windowLabel":"Weekly"}"#.utf8))
         XCTAssertEqual(selection.windowKey, "weekly")
