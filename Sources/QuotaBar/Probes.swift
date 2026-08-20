@@ -13,7 +13,7 @@ private func probeWorkingDirectory() -> URL {
 struct GeminiTerminalProbe: QuotaProbe {
     func fetch() throws -> QuotaSnapshot {
         guard let binary = CommandRunner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
-        let output = try CommandRunner.runExpect(Self.expectScript(binary: binary), timeout: 45, currentDirectory: probeWorkingDirectory())
+        let output = try CommandRunner.runExpect(Self.expectScript(binary: binary), timeout: 75, currentDirectory: probeWorkingDirectory())
         if output.contains("QUOTABAR_AUTH") { throw ProbeError.unsupported("Gemini authentication is required. Open Gemini CLI and sign in.") }
         if output.contains("QUOTABAR_STARTUP_TIMEOUT") { throw ProbeError.unsupported("Gemini did not reach its input prompt in time.") }
         if output.contains("QUOTABAR_STATS_TIMEOUT") { throw ProbeError.unsupported("Gemini did not finish refreshing /stats in time.") }
@@ -35,7 +35,7 @@ struct GeminiTerminalProbe: QuotaProbe {
             eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
         }
         send -- "/stats\\r"
-        set timeout 15
+        set timeout 45
         expect {
             -re {(?i)(Model Usage|Usage left)} {}
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}

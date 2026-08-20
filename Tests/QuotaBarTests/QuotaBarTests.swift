@@ -79,7 +79,7 @@ final class QuotaBarTests: XCTestCase {
         XCTAssertTrue(script.contains("[>❯])[ \t]+"))
         XCTAssertTrue(script.contains("wait -nowait"))
         XCTAssertTrue(script.contains("set timeout 12"))
-        XCTAssertTrue(script.contains("set timeout 15"))
+        XCTAssertTrue(script.contains("set timeout 45"))
     }
 
     func testOldSelectionAndWindowPayloadsMigrateToStableKeys() throws {
