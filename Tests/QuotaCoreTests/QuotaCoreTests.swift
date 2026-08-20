@@ -169,6 +169,11 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertTrue(script.containsCaseInsensitive("do you trust the files in this folder"))
         // The sign-in menu defers to classify_auth rather than reporting straight
         // away, so a tier rejection arriving a moment later still wins.
+        // Killing only the spawned pid leaves Gemini's children holding the
+        // output pipe; the group is what has to go.
+        XCTAssertTrue(script.contains("set child [exp_pid]"))
+        XCTAssertTrue(script.contains("kill -TERM -$child"))
+        XCTAssertTrue(script.contains("kill -KILL -$child"))
         XCTAssertTrue(script.contains("proc classify_auth"))
         XCTAssertTrue(script.contains("{classify_auth}"))
         XCTAssertFalse(script.contains("select.*auth)} {puts \"QUOTABAR_AUTH\""))
@@ -207,6 +212,72 @@ final class QuotaCoreTests: XCTestCase {
         let message = try XCTUnwrap(GeminiTerminalProbe.failure(in: transcript)?.errorDescription)
         XCTAssertTrue(message.contains("no longer supports"))
         XCTAssertFalse(message.contains("Open Gemini CLI and sign in"))
+    }
+
+    /// Screen-reader mode emits one character per line, which is how the phrase
+    /// actually arrives — `W\na\ni\nt…`.
+    private func screenReaderWrapped(_ text: String) -> String {
+        text.map(String.init).joined(separator: "\n")
+    }
+
+    func testDetectsSignInWaitThroughScreenReaderWrapping() {
+        let phrase = "waiting for authentication"
+        XCTAssertTrue(GeminiTerminalProbe.mentions(phrase, in: "⠋ Waiting for authentication... (Press Esc to cancel)"))
+        XCTAssertTrue(GeminiTerminalProbe.mentions(phrase, in: screenReaderWrapped("Waiting for authentication...")))
+        XCTAssertFalse(GeminiTerminalProbe.mentions(phrase, in: "gemini-2.5-pro   -   10.0% (Resets in 1h)"))
+        XCTAssertFalse(GeminiTerminalProbe.mentions(phrase, in: screenReaderWrapped("Model Usage")))
+    }
+
+    /// A brand-new install with no account never reaches the sign-in menu:
+    /// Gemini opens a browser OAuth flow and asks about folder trust on top of
+    /// it. Reporting only the trust prompt would hide the real blocker.
+    func testFreshInstallWithNoAccountIsReportedAsUnfinishedSignIn() throws {
+        let transcript = """
+        Warning you are running Gemini CLI in your home directory.
+        \(screenReaderWrapped("Waiting for authentication... (Press Esc or Ctrl+C to cancel)"))
+        Do you trust the files in this folder?
+        (checked) 1. Trust folder 2. Trust parent folder 3. Don't trust
+        QUOTABAR_TRUST
+        """
+        let message = try XCTUnwrap(GeminiTerminalProbe.failure(in: transcript)?.errorDescription)
+        XCTAssertTrue(message.contains("has not finished signing in"))
+        XCTAssertTrue(message.contains("`gemini`"), "the message must name the command to run")
+        XCTAssertFalse(message.hasPrefix("Gemini is waiting for a folder-trust decision"))
+    }
+
+    func testSignInWaitThatEndsInAStartupTimeoutIsAlsoUnfinishedSignIn() throws {
+        let transcript = screenReaderWrapped("Waiting for authentication...") + "\nQUOTABAR_STARTUP_TIMEOUT\n"
+        let message = try XCTUnwrap(GeminiTerminalProbe.failure(in: transcript)?.errorDescription)
+        XCTAssertTrue(message.contains("has not finished signing in"))
+        XCTAssertFalse(message.contains("did not reach its input prompt"))
+    }
+
+    func testFolderTrustAloneStillReportsFolderTrust() throws {
+        let transcript = "Do you trust the files in this folder?\nQUOTABAR_TRUST\n"
+        let message = try XCTUnwrap(GeminiTerminalProbe.failure(in: transcript)?.errorDescription)
+        XCTAssertTrue(message.contains("folder-trust"))
+        XCTAssertFalse(message.contains("has not finished signing in"))
+    }
+
+    func testTierRejectionOutranksAnUnfinishedSignIn() throws {
+        let transcript = screenReaderWrapped("Waiting for authentication...")
+            + "\nQUOTABAR_TRUST\nQUOTABAR_INELIGIBLE\n"
+        let message = try XCTUnwrap(GeminiTerminalProbe.failure(in: transcript)?.errorDescription)
+        XCTAssertTrue(message.contains("no longer supports"))
+    }
+
+    /// A signed-in client shows the same spinner briefly while refreshing a
+    /// token. If it then reaches its prompt and reports quota, nothing failed.
+    func testSignInWaitDoesNotFailAProbeThatStillReturnedQuota() throws {
+        let transcript = """
+        \(screenReaderWrapped("Waiting for authentication..."))
+        Model Usage                 Reqs                  Usage left
+        gemini-2.5-pro                 -    40.0% (Resets in 2h)
+        QUOTABAR_STATS_COMPLETE
+        """
+        XCTAssertNil(GeminiTerminalProbe.failure(in: transcript))
+        let snapshot = try GeminiTerminalProbe.parse(transcript, now: Date())
+        XCTAssertEqual(snapshot.windows.first?.usedPercent, 60)
     }
 
     func testOldSelectionAndWindowPayloadsMigrateToStableKeys() throws {

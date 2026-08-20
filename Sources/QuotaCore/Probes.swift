@@ -47,9 +47,29 @@ struct GeminiTerminalProbe: QuotaProbe {
     /// withdrawn the account's tier — in the second case the next line reads
     /// "Failed to sign in … no longer supported". Reporting "sign in" there sends
     /// the user on an errand that cannot succeed.
+    /// Screen-reader mode can wrap one character per line, so the transcript
+    /// holds `W\na\ni\nt…` rather than the phrase. A plain substring search
+    /// silently never matches; comparing with whitespace removed does.
+    static func mentions(_ phrase: String, in output: String) -> Bool {
+        func squashed(_ value: String) -> String {
+            value.lowercased().filter { !$0.isWhitespace }
+        }
+        return squashed(normalize(output)).contains(squashed(phrase))
+    }
+
     static func failure(in output: String) -> ProbeError? {
         if output.contains("QUOTABAR_INELIGIBLE") {
             return .unsupported("Gemini rejected this client: Google no longer supports Gemini Code Assist for individual accounts here. Signing in again will not help — see https://antigravity.google.")
+        }
+        // An account that has never been signed in never reaches the sign-in
+        // menu: Gemini opens a browser OAuth flow, shows "Waiting for
+        // authentication…", and asks about folder trust on top of it. Whichever
+        // prompt we stopped on, the blocker is the unfinished sign-in, so it
+        // outranks them. The phrase alone is not a verdict — a signed-in client
+        // shows it briefly while refreshing a token and then reaches its prompt.
+        if Self.mentions("waiting for authentication", in: output),
+           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT") {
+            return .unsupported("Gemini has not finished signing in. Run `gemini` once and complete the prompts it shows — folder trust, then sign-in — before refreshing.")
         }
         if output.contains("QUOTABAR_TRUST") {
             return .unsupported("Gemini is waiting for a folder-trust decision. Start Gemini CLI once in your home directory and trust the folder.")
@@ -68,7 +88,19 @@ struct GeminiTerminalProbe: QuotaProbe {
 
     static func expectScript(binary: String) -> String {
         """
-        proc stop_child {} { catch {send -- "\\003"}; catch {close}; catch {wait -nowait} }
+        proc stop_child {} {
+            # Ctrl-C and close leave Gemini's own children running: they keep the
+            # output pipe open long after expect exits, so the transcript never
+            # comes back and the probe reports a bare timeout instead of the
+            # reason. Signal the spawned process *group*, which is what
+            # AGENTS.md requires and what actually releases the pipe.
+            set child [exp_pid]
+            catch {send -- "\\003"}
+            catch {exec kill -TERM -$child}
+            catch {close}
+            catch {exec kill -KILL -$child}
+            catch {wait -nowait}
+        }
         proc classify_auth {} {
             # The sign-in menu is also what Gemini shows when Google has withdrawn
             # the account's tier, and the rejection arrives a moment later. Wait for
