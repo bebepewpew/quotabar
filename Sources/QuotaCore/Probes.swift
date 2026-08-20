@@ -2,6 +2,28 @@ import Foundation
 
 protocol QuotaProbe: Sendable { func fetch() throws -> QuotaSnapshot }
 
+/// `JSONSerialization` bridges numbers to `NSNumber` on Darwin, but on
+/// swift-corelibs-foundation they arrive as plain `Int`/`Double`, so an
+/// `as? NSNumber` cast silently yields zero for every Codex quota on Linux.
+func jsonNumber(_ value: Any?) -> Double? {
+    switch value {
+    case let number as NSNumber: return number.doubleValue
+    case let number as Double: return number
+    case let number as Int: return Double(number)
+    case let text as String: return Double(text)
+    default: return nil
+    }
+}
+
+extension StringProtocol {
+    /// `localizedCaseInsensitiveContains` depends on ICU collation that
+    /// swift-corelibs-foundation does not always provide; plain case-insensitive
+    /// search is enough for matching CLI error text.
+    func containsCaseInsensitive(_ other: String) -> Bool {
+        range(of: other, options: [.caseInsensitive]) != nil
+    }
+}
+
 private func probeWorkingDirectory() -> URL {
     let candidate = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("tmp", isDirectory: true)
     var isDirectory: ObjCBool = false
@@ -131,7 +153,7 @@ struct ClaudePrintProbe: QuotaProbe {
             windows.append(.init(label: label, usedPercent: min(percent, 100), resetAt: resetAt))
         }
         guard !windows.isEmpty else {
-            if output.localizedCaseInsensitiveContains("login") || output.localizedCaseInsensitiveContains("authentication") {
+            if output.containsCaseInsensitive("login") || output.containsCaseInsensitive("authentication") {
                 throw ProbeError.unsupported("Claude authentication is required. Open Claude Code once and sign in.")
             }
             throw ProbeError.unsupported("Claude returned an unreadable /usage response.")
@@ -184,9 +206,9 @@ struct CodexProbe: QuotaProbe {
             guard let start = line.firstIndex(of: "{"), let end = line.lastIndex(of: "}") else { return nil }
             return try? JSONSerialization.jsonObject(with: Data(line[start...end].utf8)) as? [String: Any]
         }
-        guard let response = objects.first(where: { ($0["id"] as? NSNumber)?.intValue == 2 }),
+        guard let response = objects.first(where: { jsonNumber($0["id"]) == 2 }),
               let result = response["result"] as? [String: Any] else {
-            if output.localizedCaseInsensitiveContains("not logged in") || output.localizedCaseInsensitiveContains("authentication") {
+            if output.containsCaseInsensitive("not logged in") || output.containsCaseInsensitive("authentication") {
                 throw ProbeError.unsupported("Codex authentication is required. Open Codex once and sign in.")
             }
             throw ProbeError.unsupported("Codex returned an unreadable quota response. Refresh after updating Codex.")
@@ -200,9 +222,9 @@ struct CodexProbe: QuotaProbe {
         var windows: [QuotaWindow] = []
         func add(_ value: Any?, label: String) {
             guard let item = value as? [String: Any] else { return }
-            let used = (item["usedPercent"] as? NSNumber)?.doubleValue ?? (item["used_percent"] as? NSNumber)?.doubleValue ?? 0
-            let timestamp = (item["resetsAt"] as? NSNumber)?.doubleValue ?? (item["resets_at"] as? NSNumber)?.doubleValue
-            let minutes = (item["windowDurationMins"] as? NSNumber)?.intValue ?? (item["window_duration_mins"] as? NSNumber)?.intValue
+            let used = jsonNumber(item["usedPercent"]) ?? jsonNumber(item["used_percent"]) ?? 0
+            let timestamp = jsonNumber(item["resetsAt"]) ?? jsonNumber(item["resets_at"])
+            let minutes = (jsonNumber(item["windowDurationMins"]) ?? jsonNumber(item["window_duration_mins"])).map { Int($0) }
             let resolvedLabel = minutes.map { $0 >= 1_440 ? "Weekly" : ($0 <= 360 ? "Session" : label) } ?? label
             windows.append(.init(label: resolvedLabel, usedPercent: min(max(used, 0), 100), resetAt: timestamp.map(Date.init(timeIntervalSince1970:))))
         }

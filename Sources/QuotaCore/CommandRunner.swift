@@ -1,21 +1,38 @@
 import Foundation
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
-enum CommandRunner {
-    static func find(_ executable: String) -> String? {
+public enum CommandRunner {
+    public static func find(_ executable: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let explicit = ["\(home)/.local/bin/\(executable)", "\(home)/.volta/bin/\(executable)",
+                        "\(home)/.npm-global/bin/\(executable)", "\(home)/.bun/bin/\(executable)",
                         "/opt/homebrew/bin/\(executable)", "/usr/local/bin/\(executable)", "/usr/bin/\(executable)"]
         let fromPath = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { "\($0)/\(executable)" }
         if let match = (explicit + fromPath).first(where: FileManager.default.isExecutableFile) { return match }
 
         guard executable.range(of: #"^[A-Za-z0-9._+-]+$"#, options: .regularExpression) != nil else { return nil }
-        guard let data = try? run("/bin/zsh", ["-lic", "command -v -- \(executable)"], timeout: 4) else { return nil }
+        guard let shell = loginShell(),
+              let data = try? run(shell.path, [shell.flags, "command -v -- \(executable)"], timeout: 4) else { return nil }
         return String(decoding: data, as: UTF8.self)
             .split(whereSeparator: \.isNewline).map(String.init).last(where: FileManager.default.isExecutableFile)
     }
 
-    static func run(_ executable: String, _ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12, currentDirectory: URL? = nil) throws -> Data {
+    /// Interactive login shell so PATH additions made in `.zshrc`/`.bashrc` — where
+    /// version managers put CLI shims — are visible. `sh` gets `-lc`, since a POSIX
+    /// shell need not accept `-i` alongside `-c`.
+    static func loginShell() -> (path: String, flags: String)? {
+        let candidates = [ProcessInfo.processInfo.environment["SHELL"],
+                          "/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"].compactMap { $0 }
+        guard let path = candidates.first(where: FileManager.default.isExecutableFile) else { return nil }
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return (path, ["zsh", "bash"].contains(name) ? "-lic" : "-lc")
+    }
+
+    public static func run(_ executable: String, _ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12, currentDirectory: URL? = nil) throws -> Data {
         let process = Process()
         let output = Pipe(), errors = Pipe(), stdin = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -60,12 +77,23 @@ enum CommandRunner {
         return stdout.value
     }
 
-    static func runExpect(_ script: String, timeout: TimeInterval = 18, currentDirectory: URL? = nil) throws -> String {
-        let data = try run("/usr/bin/expect", ["-c", script], timeout: timeout, currentDirectory: currentDirectory)
+    public static func runExpect(_ script: String, timeout: TimeInterval = 18, currentDirectory: URL? = nil) throws -> String {
+        guard let expect = find("expect") else { throw ProbeError.missing(expectInstallHint) }
+        let data = try run(expect, ["-c", script], timeout: timeout, currentDirectory: currentDirectory)
         return String(decoding: data, as: UTF8.self)
     }
 
-    static func tclQuoted(_ value: String) -> String {
+    /// `ProbeError.missing` renders as "<value> is not installed", so this reads as
+    /// a complete sentence with the platform's install command appended.
+    static var expectInstallHint: String {
+        #if os(macOS)
+        "expect (install it with `brew install expect`)"
+        #else
+        "expect (install it with your package manager, e.g. `sudo pacman -S expect` or `sudo apt install expect`)"
+        #endif
+    }
+
+    public static func tclQuoted(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "$", with: "\\$")
@@ -86,7 +114,7 @@ enum CommandRunner {
     /// Turns terminal output into safe, readable text for the menu UI. Commands
     /// launched through a PTY can emit cursor movement and bracketed-paste modes,
     /// which otherwise appear as strings such as `[?2004h[2K` in error cards.
-    static func sanitizeDiagnostic(_ input: String) -> String {
+    public static func sanitizeDiagnostic(_ input: String) -> String {
         var text = input
             .replacingOccurrences(of: "\u{1B}\\][^\u{7}]*(?:\u{7}|\u{1B}\\\\)", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
@@ -110,9 +138,9 @@ private final class LockedData: @unchecked Sendable {
     func set(_ data: Data) { lock.withLock { storage = data } }
 }
 
-enum ProbeError: LocalizedError {
+public enum ProbeError: LocalizedError {
     case missing(String), timeout, message(String), unsupported(String)
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .missing(let name): "\(name) is not installed"
         case .timeout: "The CLI did not respond in time"
