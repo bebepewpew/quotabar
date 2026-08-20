@@ -43,6 +43,14 @@ jobs:
       tag: ${{ steps.next.outputs.tag }}
       previous: ${{ steps.next.outputs.previous }}
     steps:
+      - name: Refuse to release from anything but main
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Releases are cut from main only; this run is on $GITHUB_REF." >&2
+            exit 1
+          fi
+
       - name: Check out repository
         uses: actions/checkout@v6
         with:
@@ -169,6 +177,12 @@ jobs:
       - name: Install nfpm
         run: |
           set -euo pipefail
+          # swift:6.3-noble purges curl in its final layer and ships no wget, so
+          # fetching anything here needs it installed first. Verified in the image:
+          # `curl` exits 127. Without this the job dies before packaging and the
+          # release never publishes.
+          apt-get -q update
+          apt-get -q install -y --no-install-recommends curl
           deb="/tmp/nfpm_${NFPM_VERSION}_amd64.deb"
           curl -fsSL --max-time 120 --retry 3 --retry-all-errors -o "$deb" \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
@@ -318,6 +332,10 @@ jobs:
         # No moving `v4` tag exists on this action, so the patch version is
         # pinned. It installs cosign v3 by default.
         uses: sigstore/cosign-installer@v4.1.2
+        with:
+          # Pinned: the signing flags below are deprecated in newer cosign, so a
+          # floating default would change release behaviour without a commit.
+          cosign-release: 'v3.0.6'
 
       - name: Sign every artifact keylessly
         run: |
@@ -350,6 +368,7 @@ jobs:
             ${{ runner.temp }}/dist/*.tar.gz
             ${{ runner.temp }}/dist/*.deb
             ${{ runner.temp }}/dist/*.rpm
+            ${{ runner.temp }}/dist/SHA256SUMS
 
       - name: Create the annotated tag
         run: |
@@ -381,7 +400,7 @@ jobs:
             echo "brew install ${GITHUB_REPOSITORY}/quotabar"
             echo
             echo "# Debian/Ubuntu"
-            echo "sudo dpkg -i quotabar_${VERSION}_amd64.deb"
+            echo "sudo apt install ./quotabar_${VERSION}_amd64.deb"
             echo
             echo "# Fedora/RHEL"
             echo "sudo rpm -i quotabar-${VERSION}.x86_64.rpm"
