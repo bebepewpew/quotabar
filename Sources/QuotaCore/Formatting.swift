@@ -88,10 +88,12 @@ public enum QuotaFormatting {
         return String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
     }
 
-    /// The single most urgent row, used for one-line status bars.
+    /// The single most urgent row, used for one-line status bars. Rows without a
+    /// reading are never the leader — a bar should say "n/a" rather than show a
+    /// provider name next to an empty percentage.
     public static func mostUrgent(_ rows: [QuotaRow]) -> QuotaRow? {
         rows.filter { $0.usedPercent != nil }
-            .max { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) } ?? rows.first
+            .max { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) }
     }
 }
 
@@ -107,6 +109,9 @@ public struct WaybarPayload: Encodable, Sendable {
         let leader = QuotaFormatting.mostUrgent(rows)
         text = leader.map { "\(QuotaBadge.preferred(for: $0.provider, window: $0.window)) \($0.percentText)" } ?? "n/a"
         tooltip = rows.map { row in
+            guard row.usedPercent != nil else {
+                return "\(row.provider.rawValue): \(row.error ?? "unavailable")"
+            }
             let detail = row.error.map { " (\($0))" } ?? (row.resetText.isEmpty ? "" : " — \(row.resetText)")
             return "\(row.provider.rawValue) \(row.window): \(row.percentText)\(detail)"
         }.joined(separator: "\n")

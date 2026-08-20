@@ -78,18 +78,16 @@ public enum CommandRunner {
     }
 
     public static func runExpect(_ script: String, timeout: TimeInterval = 18, currentDirectory: URL? = nil) throws -> String {
-        guard let expect = find("expect") else { throw ProbeError.missing(expectInstallHint) }
+        guard let expect = find("expect") else { throw ProbeError.unsupported(expectInstallHint) }
         let data = try run(expect, ["-c", script], timeout: timeout, currentDirectory: currentDirectory)
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// `ProbeError.missing` renders as "<value> is not installed", so this reads as
-    /// a complete sentence with the platform's install command appended.
     static var expectInstallHint: String {
         #if os(macOS)
-        "expect (install it with `brew install expect`)"
+        "expect is not installed. Install it with `brew install expect`."
         #else
-        "expect (install it with your package manager, e.g. `sudo pacman -S expect` or `sudo apt install expect`)"
+        "expect is not installed. Install it with `sudo pacman -S expect` or `sudo apt install expect`."
         #endif
     }
 

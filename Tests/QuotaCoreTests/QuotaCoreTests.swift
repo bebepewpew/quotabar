@@ -157,6 +157,14 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertTrue(payload.tooltip.contains("Claude Code Session: 12%"))
     }
 
+    func testWaybarTooltipNamesProvidersWithNoDataPlainly() {
+        let payload = WaybarPayload(rows: QuotaFormatting.rows(for: [
+            .init(provider: .gemini, error: "expect is not installed.", probeSucceeded: false)
+        ], now: Date(timeIntervalSince1970: 0)))
+        XCTAssertEqual(payload.tooltip, "Gemini CLI: expect is not installed.")
+        XCTAssertEqual(payload.text, "n/a")
+    }
+
     func testRetainingLastGoodKeepsPreviousWindowsAndFlagsTheFailure() {
         let previous: [QuotaSnapshot] = [
             .init(provider: .gemini, windows: [.init(label: "Pro", usedPercent: 40, resetAt: nil)])
