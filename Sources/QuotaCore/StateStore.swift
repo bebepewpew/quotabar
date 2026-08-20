@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Small persistence seam so the same caching and notification-dedup code runs on
 /// both platforms. macOS keeps using `UserDefaults` (preserving existing keys and
@@ -34,10 +39,17 @@ public final class UserDefaultsStateStore: StateStore, @unchecked Sendable {
 
 /// JSON-backed store at `${XDG_CONFIG_HOME:-~/.config}/quotabar/state.json`.
 /// `Data` values are base64-encoded so the file stays valid JSON.
+///
+/// A `--watch` process and a one-shot invocation can run at once, so writes
+/// re-read the file under an exclusive lock and apply only the keys this instance
+/// actually changed. Without that, a long-lived watcher would rewrite its
+/// start-of-process snapshot over the other process's keys and, in particular,
+/// discard the notification dedup map — re-delivering alerts already shown.
 public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
     private var contents: [String: JSONValue]
+    private var written: Set<String> = []
 
     public static func defaultURL() -> URL {
         let environment = ProcessInfo.processInfo.environment
@@ -52,8 +64,7 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
 
     public init(url: URL? = nil) {
         self.url = url ?? Self.defaultURL()
-        contents = (try? Data(contentsOf: self.url))
-            .flatMap { try? JSONDecoder().decode([String: JSONValue].self, from: $0) } ?? [:]
+        contents = Self.read(self.url)
     }
 
     public func data(forKey key: String) -> Data? {
@@ -66,6 +77,7 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     public func setData(_ data: Data?, forKey key: String) {
         lock.withLock {
             contents[key] = data.map { .string($0.base64EncodedString()) }
+            written.insert(key)
             persistLocked()
         }
     }
@@ -80,8 +92,14 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     public func setInteger(_ value: Int?, forKey key: String) {
         lock.withLock {
             contents[key] = value.map { .int($0) }
+            written.insert(key)
             persistLocked()
         }
+    }
+
+    private static func read(_ url: URL) -> [String: JSONValue] {
+        (try? Data(contentsOf: url))
+            .flatMap { try? JSONDecoder().decode([String: JSONValue].self, from: $0) } ?? [:]
     }
 
     /// Best effort: a state file we cannot write costs a cached snapshot, never a
@@ -89,8 +107,25 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     private func persistLocked() {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
-        guard let encoded = try? JSONEncoder().encode(contents) else { return }
-        try? encoded.write(to: url, options: .atomic)
+        withFileLock {
+            var merged = Self.read(url)
+            for key in written { merged[key] = contents[key] }
+            guard let encoded = try? JSONEncoder().encode(merged) else { return }
+            try? encoded.write(to: url, options: .atomic)
+            // Adopt the other process's keys so later reads are not stale.
+            contents = merged
+        }
+    }
+
+    /// Advisory lock on a sidecar file — the state file itself is replaced by an
+    /// atomic rename, which would leave each writer holding a different inode.
+    private func withFileLock(_ body: () -> Void) {
+        let descriptor = open(url.path + ".lock", O_CREAT | O_RDWR, 0o644)
+        guard descriptor >= 0 else { return body() }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX) == 0 else { return body() }
+        defer { flock(descriptor, LOCK_UN) }
+        body()
     }
 
     private enum JSONValue: Codable {

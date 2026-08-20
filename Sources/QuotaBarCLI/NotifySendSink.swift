@@ -5,10 +5,17 @@ import QuotaCore
 /// `org.freedesktop.Notifications` daemon the session provides — KDE Plasma,
 /// GNOME, dunst, mako and so on.
 struct NotifySendSink: QuotaNotificationSink {
-    static func isAvailable() -> Bool { CommandRunner.find("notify-send") != nil }
+    private let binary: String?
+
+    /// Resolved once. A failed lookup falls back to spawning a login shell, and
+    /// undelivered alerts are retried on every watch cycle, so doing this per
+    /// alert would spawn a shell per over-threshold window per cycle.
+    init() { binary = CommandRunner.find("notify-send") }
+
+    var isAvailable: Bool { binary != nil }
 
     func deliver(_ alert: QuotaAlert) async -> Bool {
-        guard let binary = CommandRunner.find("notify-send") else { return false }
+        guard let binary else { return false }
         let arguments = [
             "--app-name=QuotaBar",
             "--urgency=\(alert.level == .critical ? "critical" : "normal")",

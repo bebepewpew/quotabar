@@ -15,21 +15,31 @@ public enum CommandRunner {
         if let match = (explicit + fromPath).first(where: FileManager.default.isExecutableFile) { return match }
 
         guard executable.range(of: #"^[A-Za-z0-9._+-]+$"#, options: .regularExpression) != nil else { return nil }
-        guard let shell = loginShell(),
-              let data = try? run(shell.path, [shell.flags, "command -v -- \(executable)"], timeout: 4) else { return nil }
-        return String(decoding: data, as: UTF8.self)
-            .split(whereSeparator: \.isNewline).map(String.init).last(where: FileManager.default.isExecutableFile)
+        for shell in loginShells() {
+            guard let data = try? run(shell.path, [shell.flags, "command -v -- \(executable)"], timeout: 4) else { continue }
+            if let match = String(decoding: data, as: UTF8.self)
+                .split(whereSeparator: \.isNewline).map(String.init)
+                .last(where: FileManager.default.isExecutableFile) { return match }
+        }
+        return nil
     }
 
-    /// Interactive login shell so PATH additions made in `.zshrc`/`.bashrc` — where
-    /// version managers put CLI shims — are visible. `sh` gets `-lc`, since a POSIX
-    /// shell need not accept `-i` alongside `-c`.
-    static func loginShell() -> (path: String, flags: String)? {
-        let candidates = [ProcessInfo.processInfo.environment["SHELL"],
-                          "/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"].compactMap { $0 }
-        guard let path = candidates.first(where: FileManager.default.isExecutableFile) else { return nil }
-        let name = URL(fileURLWithPath: path).lastPathComponent
-        return (path, ["zsh", "bash"].contains(name) ? "-lic" : "-lc")
+    /// Interactive login shells, so PATH additions made in `.zshrc`/`.bashrc` —
+    /// where version managers put CLI shims — are visible. Candidates are tried in
+    /// turn rather than only the first: a `$SHELL` that rejects `-l` or `-i`
+    /// (nushell, elvish, restricted shells) must not make every provider look
+    /// uninstalled. `sh` gets `-lc`, since a POSIX shell need not accept `-i`
+    /// alongside `-c`.
+    static func loginShells() -> [(path: String, flags: String)] {
+        var seen = Set<String>()
+        return [ProcessInfo.processInfo.environment["SHELL"],
+                "/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"]
+            .compactMap { $0 }
+            .filter { FileManager.default.isExecutableFile(atPath: $0) && seen.insert($0).inserted }
+            .map { path in
+                let name = URL(fileURLWithPath: path).lastPathComponent
+                return (path, ["zsh", "bash"].contains(name) ? "-lic" : "-lc")
+            }
     }
 
     public static func run(_ executable: String, _ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12, currentDirectory: URL? = nil) throws -> Data {

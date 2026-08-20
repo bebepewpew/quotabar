@@ -200,6 +200,29 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertNil(reader.data(forKey: "absent"))
     }
 
+    /// A --watch process and a one-shot run share this file. Writes must not push
+    /// a start-of-process snapshot over keys another process has since written.
+    func testJSONFileStateStoreDoesNotClobberOtherWriters() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("quotabar-test-\(UUID().uuidString)")
+            .appendingPathComponent("state.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let watcher = JSONFileStateStore(url: url)
+        watcher.setInteger(1, forKey: "watcher")
+
+        let oneShot = JSONFileStateStore(url: url)
+        oneShot.setData(Data("dedup".utf8), forKey: "delivered")
+
+        // The watcher still holds its own pre-existing snapshot; writing again
+        // must merge rather than drop the one-shot's key.
+        watcher.setInteger(2, forKey: "watcher")
+
+        let fresh = JSONFileStateStore(url: url)
+        XCTAssertEqual(fresh.integer(forKey: "watcher"), 2)
+        XCTAssertEqual(fresh.data(forKey: "delivered"), Data("dedup".utf8))
+    }
+
     func testAlertEvaluatorDedupesPerWindowPeriodAndLevel() async throws {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("quotabar-test-\(UUID().uuidString)")

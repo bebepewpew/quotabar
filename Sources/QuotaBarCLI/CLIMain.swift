@@ -46,10 +46,14 @@ struct QuotaBarCLI {
             sawFailure = true
         }
         guard !targets.isEmpty else {
-            warn("No supported CLI found. Install codex, claude or gemini and authenticate it.")
+            // With --provider the per-provider warnings above already said which
+            // one is missing; repeating the generic message would contradict them.
+            if arguments.providers.isEmpty {
+                warn("No supported CLI found. Install codex, claude or gemini and authenticate it.")
+            }
             exit(1)
         }
-        if arguments.notify && !NotifySendSink.isAvailable() {
+        if arguments.notify && !sink.isAvailable {
             warn("notify-send was not found, so --notify will not deliver anything.")
         }
 

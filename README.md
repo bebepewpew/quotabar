@@ -51,7 +51,9 @@ error if a CLI is unavailable, unauthenticated, or returns unreadable data.
 - `expect` — required by the Gemini and Codex probes.
   (`brew install expect`, `sudo pacman -S expect`, `sudo apt install expect`)
 - **macOS:** macOS 14 or later, Swift 6.
-- **Linux:** Swift 6 — or just docker, see below. `libnotify` for `--notify`.
+- **Linux:** Swift 6 — or just docker, see below. `libnotify` for `--notify`, and
+  `zsh` if you use the `./quotabar` wrapper (`swift build` / `swift run quotabar`
+  work without it).
 
 ## Build and run
 
