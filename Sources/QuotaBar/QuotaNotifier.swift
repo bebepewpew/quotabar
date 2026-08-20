@@ -103,6 +103,10 @@ actor QuotaNotifier {
             content.title = title
             content.body = body
             content.sound = .default
+            if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
+               let attachment = try? UNNotificationAttachment(identifier: "quotabar-icon", url: iconURL) {
+                content.attachments = [attachment]
+            }
             do {
                 try await UNUserNotificationCenter.current().add(
                     UNNotificationRequest(identifier: identifier, content: content, trigger: nil)

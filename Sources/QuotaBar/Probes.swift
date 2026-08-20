@@ -29,7 +29,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         spawn -noecho \(CommandRunner.tclQuoted(binary)) --screen-reader
         stty rows 40 columns 160 < $spawn_out(slave,name)
         expect {
-            -re {(?i)(sign in|log in|waiting for authentication|authentication required|select.*auth|authenticate)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
+            -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
             -re {(^|\r\n)[ \t]*(User:|[>❯])[ \t]+} {}
             timeout {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
@@ -38,7 +38,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         set timeout 15
         expect {
             -re {(?i)(Model Usage|Usage left)} {}
-            -re {(?i)(sign in|log in|waiting for authentication|authentication required|authenticate)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
+            -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
