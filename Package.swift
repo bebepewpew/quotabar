@@ -10,8 +10,10 @@ var products: [Product] = [
 
 var targets: [Target] = [
     .target(name: "QuotaCore"),
+    .target(name: "QuotaTray", dependencies: ["QuotaCore"]),
     .executableTarget(name: "QuotaBarCLI", dependencies: ["QuotaCore"]),
-    .testTarget(name: "QuotaCoreTests", dependencies: ["QuotaCore"])
+    .testTarget(name: "QuotaCoreTests", dependencies: ["QuotaCore"]),
+    .testTarget(name: "QuotaTrayTests", dependencies: ["QuotaTray", "QuotaCore"])
 ]
 
 #if os(macOS)
