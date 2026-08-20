@@ -74,12 +74,17 @@ The guidance lives once, in `docs/agent-guides/`:
 - `probe-fixture.md` — what a parser change must cover, and the parsing traps
   this repository has already hit.
 - `review-checklist.md` — how a change is reviewed against this file.
+- `parallel-tasks.md` — running independent tasks at once in separate
+  worktrees, one pull request per task.
 
 Each tool gets a thin wrapper pointing at those, the same way `CLAUDE.md` and
 `GEMINI.md` point here instead of restating policy:
 
 - `.claude/` — `settings.json`, `skills/quotabar-dev`, `skills/quotabar-fixtures`
   and `agents/quotabar-reviewer`. Claude Code reads these from the repository.
+- `.claude/workflows/parallel-tasks.js` and `scripts/codex-parallel` — the
+  parallel runners for each toolchain. Both open a pull request only for a
+  task that passed the validation above.
 - `.codex/skills/` — the same three with `agents/openai.yaml` manifests. Codex
   discovers skills only under `$CODEX_HOME/skills` and does not read them from a
   repository, so run `scripts/install-codex-skills` once per clone and again

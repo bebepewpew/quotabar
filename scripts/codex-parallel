@@ -1,0 +1,175 @@
+#!/bin/sh
+set -eu
+
+# Run several independent QuotaBar tasks at once, each in its own git worktree,
+# and open a pull request for every one that passes the AGENTS.md gate.
+#
+# Codex has no workflow engine, so this is the shell equivalent of
+# .claude/workflows/parallel-tasks.js. Codex edits code inside its worktree under
+# the workspace-write sandbox; this script runs the build, the tests and
+# git diff --check itself, so the gate is enforced rather than self-reported.
+#
+#   scripts/codex-parallel "add a KDE tray icon" "cache provider discovery"
+#   scripts/codex-parallel --clean          # remove the worktrees it created
+#
+# QUOTABAR_CODEX_APPROVE=1 adds --approve-for-me, letting Codex proceed without
+# stopping for approval. Off by default: unattended auto-approval is your call.
+
+usage() {
+    sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+}
+
+repo_root=$(git rev-parse --show-toplevel)
+worktrees_root="$(dirname "$repo_root")/quotabar-worktrees"
+run_dir="$worktrees_root/.runs"
+
+if [ "${1:-}" = "--clean" ]; then
+    for path in "$worktrees_root"/*; do
+        [ -d "$path" ] || continue
+        case "$path" in *"/.runs") continue ;; esac
+        slug=$(basename "$path")
+        git -C "$repo_root" worktree remove --force "$path" 2>/dev/null || rm -rf "$path"
+        printf '%s\n' "removed $path"
+        # -d refuses unmerged work, which is what we want: a task branch nobody
+        # merged yet is kept and reported rather than silently discarded.
+        if git -C "$repo_root" show-ref --quiet "refs/heads/codex/$slug"; then
+            if git -C "$repo_root" branch -d "codex/$slug" >/dev/null 2>&1; then
+                printf '%s\n' "  deleted branch codex/$slug"
+            else
+                printf '%s\n' "  kept branch codex/$slug (unmerged work)"
+            fi
+        fi
+    done
+    git -C "$repo_root" worktree prune
+    rm -rf "$run_dir"
+    printf '%s\n' "done"
+    exit 0
+fi
+
+[ "$#" -gt 0 ] || usage
+command -v codex >/dev/null || { printf '%s\n' "codex is not installed" >&2; exit 1; }
+
+approve=""
+[ "${QUOTABAR_CODEX_APPROVE:-0}" = "1" ] && approve="--approve-for-me"
+
+mkdir -p "$run_dir"
+git -C "$repo_root" fetch --quiet origin main
+
+slug_of() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+        | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//' | cut -c1-40
+}
+
+prompt_for() {
+    cat <<PROMPT
+You are implementing ONE task in the QuotaBar repository, in a git worktree of
+your own. Another agent is doing a different task at the same time in a different
+worktree, so stay strictly inside this one.
+
+TASK: $1
+
+Read AGENTS.md first. It is the canonical policy and it binds you: never push to
+main, treat CLI output as untrusted, keep external processes bounded and terminate
+their complete process groups, keep persisted decoding backward compatible, and
+add fixtures for any parser change.
+
+Make the change and add or update the tests it needs. Keep it to this task only —
+if you notice something else wrong, say so in your final message rather than
+fixing it here.
+
+Do NOT commit, push, or open a pull request, and do not run the build or the test
+suite: the script that started you runs the gate itself and handles git. Just
+leave the working tree in the state you want reviewed, and finish with a short
+summary of what you changed and anything you deliberately left out.
+PROMPT
+}
+
+run_task() {
+    task=$1
+    slug=$2
+    branch="codex/$slug"
+    worktree="$worktrees_root/$slug"
+    status="$run_dir/$slug.status"
+
+    if ! git -C "$repo_root" worktree add --quiet -b "$branch" "$worktree" origin/main 2>"$run_dir/$slug.err"; then
+        printf 'worktree-failed\t%s\t%s\n' "$branch" "$(tr -d '\n' < "$run_dir/$slug.err")" > "$status"
+        return 0
+    fi
+
+    if ! codex exec -C "$worktree" -s workspace-write $approve \
+            -o "$run_dir/$slug.last" "$(prompt_for "$task")" \
+            > "$run_dir/$slug.log" 2>&1; then
+        printf 'codex-failed\t%s\tsee %s\n' "$branch" "$run_dir/$slug.log" > "$status"
+        return 0
+    fi
+
+    if [ -z "$(git -C "$worktree" status --porcelain)" ]; then
+        printf 'no-changes\t%s\tCodex left the tree unchanged\n' "$branch" > "$status"
+        return 0
+    fi
+
+    # The gate, run here rather than trusted from the agent.
+    if ! ( cd "$worktree" && ./quotabar build && ./quotabar test && git diff --check ) \
+            >> "$run_dir/$slug.log" 2>&1; then
+        printf 'gate-failed\t%s\tworktree kept at %s\n' "$branch" "$worktree" > "$status"
+        return 0
+    fi
+
+    git -C "$worktree" add -- . >/dev/null
+    git -C "$worktree" commit --quiet -m "$task" >/dev/null 2>&1 || true
+    if ! git -C "$worktree" push --quiet -u origin "$branch" >>"$run_dir/$slug.log" 2>&1; then
+        printf 'push-failed\t%s\tsee %s\n' "$branch" "$run_dir/$slug.log" > "$status"
+        return 0
+    fi
+
+    body="## Summary
+
+$task
+
+$(cat "$run_dir/$slug.last" 2>/dev/null)
+
+## Validation
+
+- [x] \`./quotabar build\`
+- [x] \`./quotabar test\`
+- [x] \`git diff --check\`
+
+Run by scripts/codex-parallel, which executed the gate itself rather than taking
+the agent's word for it. On Linux the suite covers QuotaCore and the CLI; the
+macOS app is covered by CI only.
+
+## Notes
+
+Written by Codex in an isolated worktree. Review before merging."
+
+    url=$(cd "$worktree" && gh pr create --base main --title "$task" --body "$body" 2>>"$run_dir/$slug.log" | tail -1) || url=""
+    if [ -n "$url" ]; then
+        printf 'opened\t%s\t%s\n' "$branch" "$url" > "$status"
+    else
+        printf 'pr-failed\t%s\tpushed, but gh pr create failed; see %s\n' "$branch" "$run_dir/$slug.log" > "$status"
+    fi
+}
+
+count=0
+for task in "$@"; do
+    slug=$(slug_of "$task")
+    [ -n "$slug" ] || { printf '%s\n' "skipping unnamed task" >&2; continue; }
+    count=$((count + 1))
+    printf '%s\n' "starting: $task  ->  $worktrees_root/$slug"
+    run_task "$task" "$slug" &
+done
+
+[ "$count" -gt 0 ] || { printf '%s\n' "nothing to do" >&2; exit 2; }
+wait
+
+printf '\n%s\n' "--- results ---"
+failed=0
+for status in "$run_dir"/*.status; do
+    [ -f "$status" ] || continue
+    state=$(cut -f1 "$status")
+    printf '%s\n' "$(cut -f1,2,3 "$status" | tr '\t' ' ')"
+    [ "$state" = "opened" ] || failed=1
+done
+printf '%s\n' "worktrees kept under $worktrees_root (scripts/codex-parallel --clean removes them)"
+exit "$failed"
