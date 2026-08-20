@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// A line-oriented conversation with a child process over ordinary pipes.
 ///
@@ -6,7 +11,7 @@ import Foundation
 /// JSON-RPC servers that ignore requests arriving before the previous response.
 /// `expect` solved that by driving a pseudo-terminal, but a PTY is the least
 /// portable thing in this package — it needs the `expect` binary installed, and
-/// has no equivalent on Windows. Anything that speaks line-delimited protocol
+/// has no equivalent on Windows. Anything that speaks a line-delimited protocol
 /// over stdin/stdout needs none of that.
 final class ProcessLineSession: @unchecked Sendable {
     private let process = Process()
@@ -44,6 +49,13 @@ final class ProcessLineSession: @unchecked Sendable {
         }
 
         try process.run()
+        #if !os(Windows)
+        // Own process group, so `close()` can take down children the CLI spawned
+        // rather than orphaning them. A Job Object is the Windows equivalent.
+        if process.processIdentifier > 1 {
+            _ = setpgid(process.processIdentifier, process.processIdentifier)
+        }
+        #endif
     }
 
     func send(_ line: String) throws {
@@ -73,10 +85,33 @@ final class ProcessLineSession: @unchecked Sendable {
         return pending.isEmpty ? nil : pending.removeFirst()
     }
 
+    /// Terminates the complete process group. A bare `terminate()` would leave
+    /// anything the child spawned running, and a child that ignores SIGTERM
+    /// would linger past the caller's deadline.
     func close() {
         output.fileHandleForReading.readabilityHandler = nil
         try? input.fileHandleForWriting.close()
-        if process.isRunning { process.terminate() }
+
+        let pid = process.processIdentifier
+        if process.isRunning {
+            #if !os(Windows)
+            if pid > 1 { _ = kill(-pid, SIGTERM) }
+            #endif
+            process.terminate()
+            if !waitForExit(within: 2) {
+                #if !os(Windows)
+                if pid > 1 { _ = kill(-pid, SIGKILL) }
+                #endif
+            }
+        }
         try? output.fileHandleForReading.close()
+    }
+
+    private func waitForExit(within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !process.isRunning
     }
 }
