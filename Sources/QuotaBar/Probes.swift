@@ -23,27 +23,28 @@ struct GeminiTerminalProbe: QuotaProbe {
     static func expectScript(binary: String) -> String {
         """
         proc stop_child {} { catch {send -- "\\003"}; catch {send -- "/quit\\r"}; catch {close}; catch {wait} }
-        set timeout 18
+        set timeout 12
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
         spawn -noecho \(CommandRunner.tclQuoted(binary)) --screen-reader
         stty rows 40 columns 160 < $spawn_out(slave,name)
         expect {
-            -re {(?i)(sign in|log in|authentication required|select.*auth)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
-            -re {(User:|[>❯]) *$} {}
+            -re {(?i)(sign in|log in|waiting for authentication|authentication required|select.*auth|authenticate)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
+            -re {(^|\r\n)[ \t]*(User:|[>❯])[ \t]+} {}
             timeout {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
         }
         send -- "/stats\\r"
-        set timeout 25
+        set timeout 15
         expect {
             -re {(?i)(Model Usage|Usage left)} {}
-            -re {(?i)(sign in|log in|authentication required)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
+            -re {(?i)(sign in|log in|waiting for authentication|authentication required|authenticate)} {puts "QUOTABAR_AUTH"; stop_child; exit 0}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
+        set timeout 12
         expect {
-            -re {(User:|[>❯]) *$} {puts "QUOTABAR_STATS_COMPLETE"}
+            -re {(^|\r\n)[ \t]*(User:|[>❯])[ \t]+} {puts "QUOTABAR_STATS_COMPLETE"}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
@@ -93,12 +94,12 @@ struct GeminiTerminalProbe: QuotaProbe {
     }
 
     static func parseReset(_ text: String, now: Date) -> Date? {
-        let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*([dhms])\b"#, options: .caseInsensitive)
+        let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*(d(?:ays?)?|h(?:ours?)?|m(?:inutes?)?|s(?:econds?)?)\b"#, options: .caseInsensitive)
         var interval: TimeInterval = 0
         for match in regex?.matches(in: text, range: NSRange(text.startIndex..., in: text)) ?? [] {
             guard let numberRange = Range(match.range(at: 1), in: text), let unitRange = Range(match.range(at: 2), in: text),
                   let number = Double(text[numberRange]) else { continue }
-            let multiplier: TimeInterval = ["d": 86_400, "h": 3_600, "m": 60, "s": 1][text[unitRange].lowercased()] ?? 0
+            let multiplier: TimeInterval = ["d": 86_400, "h": 3_600, "m": 60, "s": 1][String(text[unitRange].lowercased().prefix(1))] ?? 0
             interval += number * multiplier
         }
         return interval > 0 ? now.addingTimeInterval(interval) : nil
@@ -110,19 +111,23 @@ struct ClaudePrintProbe: QuotaProbe {
         guard let binary = CommandRunner.find("claude") else { throw ProbeError.missing("Claude Code") }
         let data = try CommandRunner.run(binary, ["-p", "/usage"], timeout: 45, currentDirectory: probeWorkingDirectory())
         let output = String(decoding: data, as: UTF8.self)
+        return try Self.parse(output, now: Date())
+    }
+
+    static func parse(_ output: String, now: Date) throws -> QuotaSnapshot {
         var windows: [QuotaWindow] = []
-        let rows: [(String, String)] = [
-            (#"(?im)^Current session:\s*(\d{1,3})%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)\s*$"#, "Session"),
-            (#"(?im)^Current week \(all models\):\s*(\d{1,3})%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)\s*$"#, "Weekly")
-        ]
-        for (pattern, label) in rows {
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
-                  let range = Range(match.range(at: 1), in: output),
-                  let percent = Double(output[range]) else { continue }
-            let resetText = Range(match.range(at: 2), in: output).map { String(output[$0]) }
-            let timeZoneName = Range(match.range(at: 3), in: output).map { String(output[$0]) }
-            let resetAt = resetText.flatMap { Self.parseReset($0, timeZoneName: timeZoneName, now: Date()) }
+        let pattern = #"(?im)^Current (session|week)(?: \(([^)]+)\))?:\s*(\d{1,3}(?:\.\d+)?)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)\s*$"#
+        let regex = try NSRegularExpression(pattern: pattern)
+        for match in regex.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
+            guard let kindRange = Range(match.range(at: 1), in: output),
+                  let percentRange = Range(match.range(at: 3), in: output),
+                  let percent = Double(output[percentRange]) else { continue }
+            let kind = String(output[kindRange]).lowercased()
+            let pool = Range(match.range(at: 2), in: output).map { String(output[$0]) }
+            let label = kind == "session" ? "Session" : (pool?.lowercased() == "all models" ? "Weekly" : "Weekly \(pool ?? "Models")")
+            let resetText = Range(match.range(at: 4), in: output).map { String(output[$0]) }
+            let timeZoneName = Range(match.range(at: 5), in: output).map { String(output[$0]) }
+            let resetAt = resetText.flatMap { Self.parseReset($0, timeZoneName: timeZoneName, now: now) }
             windows.append(.init(label: label, usedPercent: min(percent, 100), resetAt: resetAt))
         }
         guard !windows.isEmpty else {

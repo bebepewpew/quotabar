@@ -92,6 +92,7 @@ enum CommandRunner {
             .replacingOccurrences(of: "\u{1B}\\][^\u{7}]*(?:\u{7}|\u{1B}\\\\)", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}[@-_]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
         text = String(text.unicodeScalars.filter { scalar in
             scalar == "\n" || scalar == "\t" || (scalar.value >= 0x20 && scalar.value != 0x7f && !(0x80...0x9f).contains(scalar.value))

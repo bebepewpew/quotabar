@@ -80,6 +80,26 @@ struct QuotaSnapshot: Identifiable, Sendable, Codable {
     var probeSucceeded = true
     var updatedAt = Date()
 
+    private enum CodingKeys: String, CodingKey { case provider, windows, plan, error, probeSucceeded, updatedAt }
+    init(provider: Provider, windows: [QuotaWindow] = [], plan: String? = nil, error: String? = nil,
+         probeSucceeded: Bool = true, updatedAt: Date = Date()) {
+        self.provider = provider
+        self.windows = windows
+        self.plan = plan
+        self.error = error
+        self.probeSucceeded = probeSucceeded
+        self.updatedAt = updatedAt
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try values.decode(Provider.self, forKey: .provider)
+        windows = try values.decodeIfPresent([QuotaWindow].self, forKey: .windows) ?? []
+        plan = try values.decodeIfPresent(String.self, forKey: .plan)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+        probeSucceeded = try values.decodeIfPresent(Bool.self, forKey: .probeSucceeded) ?? true
+        updatedAt = try values.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+
     static func loading(_ provider: Provider) -> Self { .init(provider: provider) }
 }
 

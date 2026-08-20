@@ -25,6 +25,17 @@ final class QuotaBarTests: XCTestCase {
         XCTAssertEqual(calendar.component(.hour, from: reset), 2)
     }
 
+    func testParsesClaudeModelWindowsAndDecimalPercentages() throws {
+        let output = """
+        Current session: 38.5% used · resets Aug 20 at 5:20pm (Europe/Warsaw)
+        Current week (all models): 94% used · resets Aug 22 at 2am (Europe/Warsaw)
+        Current week (Fable): 100% used · resets Aug 22 at 2am (Europe/Warsaw)
+        """
+        let snapshot = try ClaudePrintProbe.parse(output, now: Date())
+        XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Weekly", "Weekly Fable"])
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [38.5, 94, 100])
+    }
+
     func testParsesAllGeminiQuotaRowsIncludingZeroAndFullyUsed() throws {
         let output = """
         Model Usage                 Reqs                  Usage left
@@ -64,6 +75,10 @@ final class QuotaBarTests: XCTestCase {
         XCTAssertFalse(script.contains("/stats model"))
         XCTAssertTrue(script.contains("rows 40 columns 160"))
         XCTAssertTrue(script.contains("--screen-reader"))
+        XCTAssertTrue(script.contains("waiting for authentication"))
+        XCTAssertTrue(script.contains("[>❯])[ \\t]+"))
+        XCTAssertTrue(script.contains("set timeout 12"))
+        XCTAssertTrue(script.contains("set timeout 15"))
     }
 
     func testOldSelectionAndWindowPayloadsMigrateToStableKeys() throws {
@@ -71,6 +86,8 @@ final class QuotaBarTests: XCTestCase {
         XCTAssertEqual(selection.windowKey, "weekly")
         let window = try JSONDecoder().decode(QuotaWindow.self, from: Data(#"{"label":"Weekly","usedPercent":20,"resetAt":null}"#.utf8))
         XCTAssertEqual(window.key, "weekly")
+        let snapshot = try JSONDecoder().decode(QuotaSnapshot.self, from: Data(#"{"provider":"Gemini CLI","windows":[]}"#.utf8))
+        XCTAssertTrue(snapshot.probeSucceeded)
     }
 
     @MainActor func testBadgesAndUrgencyThresholds() {
