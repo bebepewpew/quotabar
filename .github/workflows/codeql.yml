@@ -1,0 +1,51 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so newly published CodeQL queries reach the default branch even
+    # when nothing has been merged for a while.
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyse Swift
+    # The Swift toolchain is preinstalled on the macOS runners, and the
+    # SwiftUI/AppKit menu-bar target only exists there (see Package.swift), so
+    # macOS is the only host where one build covers QuotaCore, QuotaTray,
+    # QuotaBarCLI and the menu-bar app itself.
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: swift
+          build-mode: manual
+
+      # The Swift extractor only sees code that is really compiled, so the build
+      # has to run between init and analyze and must not be served from a cache
+      # of prebuilt artifacts.
+      - name: Build
+        run: swift build
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:swift
