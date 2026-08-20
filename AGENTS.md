@@ -54,6 +54,16 @@ is ready:
 git diff --check
 ```
 
+`./quotabar coverage` runs the same suite with instrumentation and prints a
+per-file report; `--lcov <path>` also writes an lcov file, and anything else is
+forwarded to `swift test`, so `--filter QuotaCore` still works. It measures
+`QuotaCore` and `QuotaTray` — the library targets the test binary links — and
+not the CLI or the macOS app, which are separate executables the tests do not
+link. Use it when adding or changing tests, to see what a change actually
+covers. It is not a merge gate; the three commands above are. Go through the
+wrapper rather than `scripts/coverage` directly: on Linux without a toolchain
+the wrapper runs the script inside the container that produced the profile.
+
 On macOS `./quotabar test` requires full Xcode. On Linux it runs natively, or in
 the upstream Swift container when no toolchain is installed, and covers
 `QuotaCore` and the CLI but not the macOS app. If a suite cannot be executed,
@@ -106,6 +116,9 @@ These describe the rules; they do not replace them. This file stays canonical.
 ## Repository hygiene
 
 - `README.md` describes current behavior and supported requirements.
+- Contributor and security policy live in `.github/CONTRIBUTING.md` and
+  `.github/SECURITY.md`. GitHub surfaces both from there, so the repository
+  root stays short; link to those paths rather than the old root ones.
 - `REVIEW.md` is a local/generated report and must not be committed.
 - App icons belong in `Resources`; `.icns` and source icon assets are intentional.
 - Use `scripts/install-hooks` once per clone to enable the repository hooks.
