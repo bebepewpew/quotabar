@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   build-and-test:
+    name: macOS (menu-bar app, core, CLI)
     runs-on: macos-15
     steps:
       - name: Check out repository
@@ -24,3 +25,19 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+
+  build-and-test-linux:
+    name: Linux (core, CLI)
+    runs-on: ubuntu-latest
+    container: swift:6.3-noble
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+      - name: CLI smoke test
+        run: |
+          swift run quotabar --version
+          swift run quotabar --help

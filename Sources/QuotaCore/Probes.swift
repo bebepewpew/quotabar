@@ -2,6 +2,28 @@ import Foundation
 
 protocol QuotaProbe: Sendable { func fetch() throws -> QuotaSnapshot }
 
+/// `JSONSerialization` bridges numbers to `NSNumber` on Darwin, but on
+/// swift-corelibs-foundation they arrive as plain `Int`/`Double`, so an
+/// `as? NSNumber` cast silently yields zero for every Codex quota on Linux.
+func jsonNumber(_ value: Any?) -> Double? {
+    switch value {
+    case let number as NSNumber: return number.doubleValue
+    case let number as Double: return number
+    case let number as Int: return Double(number)
+    case let text as String: return Double(text)
+    default: return nil
+    }
+}
+
+extension StringProtocol {
+    /// `localizedCaseInsensitiveContains` depends on ICU collation that
+    /// swift-corelibs-foundation does not always provide; plain case-insensitive
+    /// search is enough for matching CLI error text.
+    func containsCaseInsensitive(_ other: String) -> Bool {
+        range(of: other, options: [.caseInsensitive]) != nil
+    }
+}
+
 private func probeWorkingDirectory() -> URL {
     let candidate = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("tmp", isDirectory: true)
     var isDirectory: ObjCBool = false
@@ -131,7 +153,7 @@ struct ClaudePrintProbe: QuotaProbe {
             windows.append(.init(label: label, usedPercent: min(percent, 100), resetAt: resetAt))
         }
         guard !windows.isEmpty else {
-            if output.localizedCaseInsensitiveContains("login") || output.localizedCaseInsensitiveContains("authentication") {
+            if output.containsCaseInsensitive("login") || output.containsCaseInsensitive("authentication") {
                 throw ProbeError.unsupported("Claude authentication is required. Open Claude Code once and sign in.")
             }
             throw ProbeError.unsupported("Claude returned an unreadable /usage response.")
@@ -145,7 +167,10 @@ struct ClaudePrintProbe: QuotaProbe {
         calendar.timeZone = timeZone
         let year = calendar.component(.year, from: now)
         let input = "\(value) \(year)"
-        let date = ["MMM d 'at' h:mma yyyy", "MMM d 'at' ha yyyy"].lazy.compactMap { format -> Date? in
+        // Claude Code has shipped both "Aug 22 at 2am" and "Aug 22, 8:59am".
+        let formats = ["MMM d 'at' h:mma yyyy", "MMM d 'at' ha yyyy",
+                       "MMM d, h:mma yyyy", "MMM d, ha yyyy"]
+        let date = formats.lazy.compactMap { format -> Date? in
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.timeZone = timeZone
@@ -164,34 +189,56 @@ struct ClaudePrintProbe: QuotaProbe {
 }
 
 struct CodexProbe: QuotaProbe {
+    static let initializeRequest =
+        #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"QuotaBar","title":"QuotaBar","version":"0.1.0"},"capabilities":{}}}"#
+    static let initializedNotification = #"{"method":"initialized"}"#
+    static let rateLimitsRequest = #"{"id":2,"method":"account/rateLimits/read"}"#
+
     func fetch() throws -> QuotaSnapshot {
         guard let binary = CommandRunner.find("codex") else { throw ProbeError.missing("Codex") }
-        // app-server requires strict sequencing: it silently ignores requests sent
-        // before the initialize response. expect gives us that handshake without
-        // copying the CLI's OAuth credentials into this app.
-        let script = """
-        set timeout 12
-        spawn -noecho \(CommandRunner.tclQuoted(binary)) app-server --stdio
-        stty -echo < $spawn_out(slave,name)
-        send -- "{\\"id\\":1,\\"method\\":\\"initialize\\",\\"params\\":{\\"clientInfo\\":{\\"name\\":\\"QuotaBar\\",\\"title\\":\\"QuotaBar\\",\\"version\\":\\"0.1.0\\"},\\"capabilities\\":{}}}\\n"
-        expect { -re {"id":1} {} timeout {puts "QUOTABAR_ERROR=initialize timeout"; exit 2} eof {exit 2} }
-        send -- "{\\"method\\":\\"initialized\\"}\\n{\\"id\\":2,\\"method\\":\\"account/rateLimits/read\\"}\\n"
-        expect { -re {"id":2.*\\r\\n} {} timeout {puts "QUOTABAR_ERROR=quota timeout"; exit 2} eof {exit 2} }
-        close
-        """
-        let output = try CommandRunner.runExpect(script, timeout: 30)
-        let objects = output.components(separatedBy: .newlines).compactMap { line -> [String: Any]? in
-            guard let start = line.firstIndex(of: "{"), let end = line.lastIndex(of: "}") else { return nil }
-            return try? JSONSerialization.jsonObject(with: Data(line[start...end].utf8)) as? [String: Any]
+        // app-server speaks line-delimited JSON-RPC over stdio and silently ignores
+        // requests sent before the initialize response, so the exchange has to be
+        // sequenced — but plain pipes are enough for that. No pseudo-terminal, so
+        // no `expect` dependency and nothing platform-specific, and still no
+        // copying of the CLI's OAuth credentials into this app.
+        let session = try ProcessLineSession(executable: binary, arguments: ["app-server", "--stdio"],
+                                             currentDirectory: probeWorkingDirectory())
+        defer { session.close() }
+
+        let deadline = Date().addingTimeInterval(30)
+        var transcript: [String] = []
+
+        try session.send(Self.initializeRequest)
+        guard session.waitForLine(matching: { Self.identifier(of: $0) == 1 },
+                                  before: deadline, transcript: &transcript) != nil else {
+            throw Self.failure(transcript, detail: "Codex did not answer the initialize request.")
         }
-        guard let response = objects.first(where: { ($0["id"] as? NSNumber)?.intValue == 2 }),
-              let result = response["result"] as? [String: Any] else {
-            if output.localizedCaseInsensitiveContains("not logged in") || output.localizedCaseInsensitiveContains("authentication") {
-                throw ProbeError.unsupported("Codex authentication is required. Open Codex once and sign in.")
-            }
-            throw ProbeError.unsupported("Codex returned an unreadable quota response. Refresh after updating Codex.")
+
+        try session.send(Self.initializedNotification)
+        try session.send(Self.rateLimitsRequest)
+        guard let reply = session.waitForLine(matching: { Self.identifier(of: $0) == 2 },
+                                              before: deadline, transcript: &transcript),
+              let result = Self.jsonObject(reply)?["result"] as? [String: Any] else {
+            throw Self.failure(transcript, detail: "Codex returned an unreadable quota response. Refresh after updating Codex.")
         }
         return Self.parse(result)
+    }
+
+    static func jsonObject(_ line: String) -> [String: Any]? {
+        guard let start = line.firstIndex(of: "{"), let end = line.lastIndex(of: "}"), start < end else { return nil }
+        return try? JSONSerialization.jsonObject(with: Data(line[start...end].utf8)) as? [String: Any]
+    }
+
+    static func identifier(of line: String) -> Double? {
+        jsonObject(line).flatMap { jsonNumber($0["id"]) }
+    }
+
+    private static func failure(_ transcript: [String], detail: String) -> ProbeError {
+        let output = transcript.joined(separator: "\n")
+        if output.containsCaseInsensitive("not logged in") || output.containsCaseInsensitive("authentication") {
+            return .unsupported("Codex authentication is required. Open Codex once and sign in.")
+        }
+        return .unsupported(detail)
     }
 
     static func parse(_ result: [String: Any]) -> QuotaSnapshot {
@@ -200,9 +247,9 @@ struct CodexProbe: QuotaProbe {
         var windows: [QuotaWindow] = []
         func add(_ value: Any?, label: String) {
             guard let item = value as? [String: Any] else { return }
-            let used = (item["usedPercent"] as? NSNumber)?.doubleValue ?? (item["used_percent"] as? NSNumber)?.doubleValue ?? 0
-            let timestamp = (item["resetsAt"] as? NSNumber)?.doubleValue ?? (item["resets_at"] as? NSNumber)?.doubleValue
-            let minutes = (item["windowDurationMins"] as? NSNumber)?.intValue ?? (item["window_duration_mins"] as? NSNumber)?.intValue
+            let used = jsonNumber(item["usedPercent"]) ?? jsonNumber(item["used_percent"]) ?? 0
+            let timestamp = jsonNumber(item["resetsAt"]) ?? jsonNumber(item["resets_at"])
+            let minutes = (jsonNumber(item["windowDurationMins"]) ?? jsonNumber(item["window_duration_mins"])).map { Int($0) }
             let resolvedLabel = minutes.map { $0 >= 1_440 ? "Weekly" : ($0 <= 360 ? "Session" : label) } ?? label
             windows.append(.init(label: resolvedLabel, usedPercent: min(max(used, 0), 100), resetAt: timestamp.map(Date.init(timeIntervalSince1970:))))
         }

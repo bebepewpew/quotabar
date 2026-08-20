@@ -1,6 +1,10 @@
 import Foundation
 import Combine
+import QuotaCore
 
+/// SwiftUI-facing shell around `QuotaCore.QuotaEngine`. Everything that does not
+/// need `@Published` or `@MainActor` now lives in the shared core so the Linux CLI
+/// runs the same discovery, probing and retention logic.
 @MainActor
 final class QuotaStore: ObservableObject {
     @Published var snapshots: [QuotaSnapshot]
@@ -9,63 +13,44 @@ final class QuotaStore: ObservableObject {
     @Published var isRefreshing = false
     @Published var menuBarSelections: [QuotaSelection] {
         didSet {
-            if let data = try? JSONEncoder().encode(menuBarSelections) { defaults.set(data, forKey: Self.menuBarKey) }
+            if let data = try? JSONEncoder().encode(menuBarSelections) { store.setData(data, forKey: Self.menuBarKey) }
         }
     }
     @Published var refreshIntervalMinutes: Int {
         didSet {
             guard refreshIntervalMinutes != oldValue else { return }
-            defaults.set(refreshIntervalMinutes, forKey: Self.intervalKey)
+            store.setInteger(refreshIntervalMinutes, forKey: Self.intervalKey)
             if hasStarted { scheduleRefreshes() }
         }
     }
     private var schedulerTask: Task<Void, Never>?
     private var hasStarted = false
-    private let defaults: UserDefaults
-    private var persistedSnapshots: [Provider: QuotaSnapshot]
-    private static let cacheKey = "QuotaBar.cachedSnapshots.v1"
+    private let store: StateStore
+    private let cache: SnapshotCache
     private static let intervalKey = "QuotaBar.refreshIntervalMinutes"
     private static let menuBarKey = "QuotaBar.menuBarSelections.v1"
-    static let refreshIntervals = [0, 5, 15, 30, 60]
+    static let refreshIntervals = QuotaEngine.refreshIntervals
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    init(store: StateStore = StateStoreFactory.makeDefault()) {
+        self.store = store
+        cache = SnapshotCache(store: store)
         installedProviders = []
         snapshots = []
-        let savedInterval = defaults.object(forKey: Self.intervalKey) as? Int
+        let savedInterval = store.integer(forKey: Self.intervalKey)
         refreshIntervalMinutes = Self.refreshIntervals.contains(savedInterval ?? 15) ? (savedInterval ?? 15) : 15
-        menuBarSelections = defaults.data(forKey: Self.menuBarKey)
+        menuBarSelections = store.data(forKey: Self.menuBarKey)
             .flatMap { try? JSONDecoder().decode([QuotaSelection].self, from: $0) }
             .map { Array($0.prefix(3)) } ?? []
-        let cached = defaults.data(forKey: Self.cacheKey)
-            .flatMap { try? JSONDecoder().decode([QuotaSnapshot].self, from: $0) } ?? []
-        persistedSnapshots = Dictionary(cached.map { ($0.provider, $0) }, uniquingKeysWith: { _, newest in newest })
     }
 
     func refresh() {
         guard !isRefreshing else { return }
         isRefreshing = true
         Task {
-            let values = await withTaskGroup(of: QuotaSnapshot.self) { group in
-                for provider in installedProviders {
-                    group.addTask { await Self.loadAsync(provider) }
-                }
-                var output: [QuotaSnapshot] = []
-                for await value in group { output.append(value) }
-                return output.sorted {
-                    (Provider.allCases.firstIndex(of: $0.provider) ?? 0) < (Provider.allCases.firstIndex(of: $1.provider) ?? 0)
-                }
-            }
-            let previous = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.provider, $0) })
-            snapshots = values.map { fresh in
-                guard !fresh.probeSucceeded, let old = previous[fresh.provider], !old.windows.isEmpty else { return fresh }
-                var retained = old
-                retained.error = fresh.error.map { "Refresh failed: \($0)" }
-                retained.probeSucceeded = false
-                return retained
-            }
+            let values = await QuotaEngine.refresh(installedProviders)
+            snapshots = QuotaEngine.retainingLastGood(fresh: values, previous: snapshots)
             migrateMenuBarSelections()
-            persistSuccessfulSnapshots()
+            cache.update(with: snapshots)
             isRefreshing = false
             let successful = values.filter { $0.error == nil && !$0.windows.isEmpty }
             Task { await QuotaNotifier.shared.evaluate(successful) }
@@ -76,9 +61,9 @@ final class QuotaStore: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
         Task {
-            let providers = await Self.discoverProviders()
+            let providers = await QuotaEngine.discoverProviders()
             installedProviders = providers
-            snapshots = providers.map { persistedSnapshots[$0] ?? .loading($0) }
+            snapshots = providers.map { cache.snapshot(for: $0) ?? .loading($0) }
             isDiscoveringTools = false
             refresh()
             scheduleRefreshes()
@@ -107,7 +92,7 @@ final class QuotaStore: ObservableObject {
         let base = menuBarSelections.map { selection in
             let window = snapshots.first(where: { $0.provider == selection.provider })?
                 .windows.first(where: { $0.key == selection.windowKey || $0.label == selection.windowLabel })
-            return (selection, window?.usedPercent, Self.preferredBadge(for: selection))
+            return (selection, window?.usedPercent, QuotaBadge.preferred(for: selection))
         }
         // Provider symbols already distinguish identical window badges across
         // providers. Number only collisions within the same provider.
@@ -142,65 +127,12 @@ final class QuotaStore: ObservableObject {
         }
     }
 
-    private func persistSuccessfulSnapshots() {
-        for snapshot in snapshots where snapshot.probeSucceeded {
-            guard !snapshot.windows.isEmpty else {
-                persistedSnapshots.removeValue(forKey: snapshot.provider)
-                continue
-            }
-            var cached = snapshot
-            cached.error = nil
-            persistedSnapshots[snapshot.provider] = cached
-        }
-        guard let data = try? JSONEncoder().encode(Array(persistedSnapshots.values)) else { return }
-        defaults.set(data, forKey: Self.cacheKey)
-    }
-
     private func migrateMenuBarSelections() {
         menuBarSelections = menuBarSelections.map { saved in
             guard let window = snapshots.first(where: { $0.provider == saved.provider })?.windows.first(where: {
                 $0.key == saved.windowKey || $0.label == saved.windowLabel
             }) else { return saved }
             return QuotaSelection(provider: saved.provider, windowKey: window.key, windowLabel: window.label)
-        }
-    }
-
-    nonisolated private static func load(_ provider: Provider) -> QuotaSnapshot {
-        do {
-            switch provider {
-            case .codex: return try CodexProbe().fetch()
-            case .claude: return try ClaudePrintProbe().fetch()
-            case .gemini: return try GeminiTerminalProbe().fetch()
-            }
-        } catch { return .init(provider: provider, error: error.localizedDescription, probeSucceeded: false) }
-    }
-
-    nonisolated static func preferredBadge(for selection: QuotaSelection) -> String {
-        let value = "\(selection.windowKey) \(selection.windowLabel)".lowercased()
-        if selection.provider != .gemini { return value.contains("week") ? "W" : "S" }
-        if value.contains("flash-lite") || value.contains("flash lite") { return "L" }
-        if value.contains("flash") { return "F" }
-        if value.contains("pro") { return "P" }
-        return "G"
-    }
-
-    nonisolated private static func loadAsync(_ provider: Provider) async -> QuotaSnapshot {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: load(provider))
-            }
-        }
-    }
-
-    nonisolated private static func discoverProviders() async -> [Provider] {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let installed = Provider.allCases.filter { provider in
-                    let executable = switch provider { case .gemini: "gemini"; case .claude: "claude"; case .codex: "codex" }
-                    return CommandRunner.find(executable) != nil
-                }
-                continuation.resume(returning: installed)
-            }
         }
     }
 }

@@ -1,15 +1,20 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 set -euo pipefail
 
 project_dir="${0:A:h}"
 cd "$project_dir"
 
-# Some Command Line Tools updates temporarily pair a newer compiler with an
-# incompatible newest SDK. The 15.4 SDK remains compatible with QuotaBar's
-# macOS 14 deployment target and avoids that toolchain mismatch.
-compatible_sdk="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
-if [[ -d "$compatible_sdk" ]]; then
-  export SDKROOT="$compatible_sdk"
+platform="$(uname -s)"
+swift_image="${QUOTABAR_SWIFT_IMAGE:-swift:6.3-noble}"
+
+if [[ "$platform" == "Darwin" ]]; then
+  # Some Command Line Tools updates temporarily pair a newer compiler with an
+  # incompatible newest SDK. The 15.4 SDK remains compatible with QuotaBar's
+  # macOS 14 deployment target and avoids that toolchain mismatch.
+  compatible_sdk="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
+  if [[ -d "$compatible_sdk" ]]; then
+    export SDKROOT="$compatible_sdk"
+  fi
 fi
 
 task_cache="${TMPDIR:-/tmp}/quotabar-swift-cache"
@@ -20,6 +25,19 @@ export CLANG_MODULE_CACHE_PATH="$clang_cache"
 
 action="${1:-run}"
 if (( $# > 0 )); then shift; fi
+
+have() { command -v "$1" >/dev/null 2>&1 }
+
+# Distributions without an official Swift package (Arch among them) can build
+# through the upstream container instead. --user keeps .build owned by you.
+docker_swift() {
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    -e HOME=/tmp \
+    -v "$project_dir":/workspace \
+    -w /workspace \
+    "$swift_image" swift "$@"
+}
 
 build_app() {
   swift build "$@" >&2
@@ -35,23 +53,81 @@ build_app() {
   print "$app_dir"
 }
 
-case "$action" in
-  run)
-    app_dir="$(build_app "$@")"
-    # Launch the bundle through Launch Services so macOS assigns the process its
-    # bundle identity. Running the inner Mach-O directly makes UserNotifications
-    # treat QuotaBar as an unsupported command-line executable.
-    lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-    "$lsregister" -f "$app_dir"
-    exec /usr/bin/open -W "$app_dir"
+usage() {
+  print -u2 "Usage: ./quotabar [run|build|test|cli] [SwiftPM options]"
+  print -u2 ""
+  print -u2 "  run    macOS: build and launch the menu-bar app"
+  print -u2 "         Linux: run the quotabar CLI"
+  print -u2 "  build  compile everything this platform supports"
+  print -u2 "  test   run the test suite"
+  print -u2 "  cli    run the quotabar CLI (all platforms)"
+  print -u2 ""
+  print -u2 "On Linux without a Swift toolchain, \$QUOTABAR_SWIFT_IMAGE (default"
+  print -u2 "$swift_image) is used through docker."
+  exit 2
+}
+
+case "$platform" in
+  Darwin)
+    case "$action" in
+      run)
+        app_dir="$(build_app "$@")"
+        # Launch the bundle through Launch Services so macOS assigns the process its
+        # bundle identity. Running the inner Mach-O directly makes UserNotifications
+        # treat QuotaBar as an unsupported command-line executable.
+        lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        "$lsregister" -f "$app_dir"
+        # QuotaBar is a resident LSUIElement agent, so `open` would find the
+        # previous instance and merely reactivate it, leaving the freshly built
+        # binary unused. `-n` would start a second one instead, giving two menu
+        # bar icons; replacing the running instance is what a rebuild wants.
+        /usr/bin/pkill -x QuotaBar 2>/dev/null || true
+        exec /usr/bin/open -W "$app_dir"
+        ;;
+      build) build_app "$@" ;;
+      cli) exec swift run quotabar "$@" ;;
+      test)
+        if [[ ! -x /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild ]]; then
+          print -u2 "QuotaBar tests require the full Xcode toolchain (this Command Line Tools installation includes neither XCTest nor Swift Testing)."
+          exit 2
+        fi
+        exec swift test "$@"
+        ;;
+      *) usage ;;
+    esac
     ;;
-  build) build_app "$@" ;;
-  test)
-    if [[ ! -x /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild ]]; then
-      print -u2 "QuotaBar tests require the full Xcode toolchain (this Command Line Tools installation includes neither XCTest nor Swift Testing)."
+  Linux)
+    if have swift; then
+      case "$action" in
+        run|cli) exec swift run quotabar "$@" ;;
+        build) exec swift build "$@" ;;
+        test) exec swift test "$@" ;;
+        *) usage ;;
+      esac
+    elif have docker; then
+      case "$action" in
+        build) exec docker_swift build "$@" ;;
+        test) exec docker_swift test "$@" ;;
+        run|cli)
+          # The probes shell out to gemini/claude and notifications need the
+          # session bus, so the CLI itself has to run on the host. Build a
+          # statically linked binary in the container, then execute it here.
+          #
+          # Release only: a debug --static-swift-stdlib link fails on missing ICU
+          # symbols, which release builds drop as dead code.
+          docker_swift build -c release --static-swift-stdlib >&2
+          exec "$project_dir/.build/release/quotabar" "$@"
+          ;;
+        *) usage ;;
+      esac
+    else
+      print -u2 "No Swift toolchain and no docker found."
+      print -u2 "Install Swift from https://swift.org/install, or install docker to build in $swift_image."
       exit 2
     fi
-    exec swift test "$@"
     ;;
-  *) print -u2 "Usage: ./quotabar [run|build|test] [SwiftPM options]"; exit 2 ;;
+  *)
+    print -u2 "QuotaBar has no build recipe for $platform. Try 'swift build' directly."
+    exit 2
+    ;;
 esac

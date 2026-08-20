@@ -5,9 +5,12 @@ This file is the canonical instruction source for humans and AI coding agents.
 
 ## Project
 
-QuotaBar is a native macOS 14+ menu-bar application written in Swift 6. It reads
-quota data from locally installed Codex, Claude Code, and Gemini CLIs. It must
-not read, copy, log, or store provider credentials or complete login prompts.
+QuotaBar is written in Swift 6 and split into three targets. `QuotaCore` is a
+cross-platform library holding the probes, provider discovery, caching, and
+threshold alerts. `QuotaBar` is the native macOS 14+ menu-bar app. `QuotaBarCLI`
+builds the `quotabar` command on macOS and Linux. It reads quota data from
+locally installed Codex, Claude Code, and Gemini CLIs. It must not read, copy,
+log, or store provider credentials or complete login prompts.
 
 ## Required workflow
 
@@ -25,13 +28,16 @@ not read, copy, log, or store provider credentials or complete login prompts.
 
 - Prefer public, documented CLI interfaces. Gemini quota collection must remain
   terminal-only and use interactive `/stats`, never private JavaScript modules.
+  Codex uses `app-server --stdio` over pipes and Claude Code uses `-p /usage`;
+  neither should acquire a pseudo-terminal dependency.
 - Keep all external processes bounded by deadlines and terminate their complete
   process groups. Preserve cached quota values when a refresh fails.
 - Treat CLI output as untrusted: normalize terminal controls, clamp percentages,
   and return concise actionable errors without exposing raw sensitive output.
 - Keep UI and observable state on the main actor; do blocking CLI work off the
   cooperative executor.
-- Maintain backward-compatible decoding for persisted `UserDefaults` payloads.
+- Persist through `StateStore`: `UserDefaults` on macOS, an XDG JSON file on
+  Linux. Keep storage keys stable and decoding backward compatible.
 - Use stable quota-window keys; labels and reset timestamps are display data,
   not identity.
 
@@ -46,9 +52,11 @@ is ready:
 git diff --check
 ```
 
-`./quotabar test` requires full Xcode. If it is unavailable, state that clearly;
-GitHub Actions remains the required test authority. Never claim tests passed when
-they were not executed.
+On macOS `./quotabar test` requires full Xcode. On Linux it runs natively, or in
+the upstream Swift container when no toolchain is installed, and covers
+`QuotaCore` and the CLI but not the macOS app. If a suite cannot be executed,
+state that clearly; GitHub Actions remains the required test authority across
+both platforms. Never claim tests passed when they were not executed.
 
 Parser changes require fixtures for boundaries, malformed data, terminal redraws,
 and every supported row form. Process changes require timeout, authentication,

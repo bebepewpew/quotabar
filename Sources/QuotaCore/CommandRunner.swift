@@ -1,21 +1,48 @@
 import Foundation
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
-enum CommandRunner {
-    static func find(_ executable: String) -> String? {
+public enum CommandRunner {
+    public static func find(_ executable: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let explicit = ["\(home)/.local/bin/\(executable)", "\(home)/.volta/bin/\(executable)",
+                        "\(home)/.npm-global/bin/\(executable)", "\(home)/.bun/bin/\(executable)",
                         "/opt/homebrew/bin/\(executable)", "/usr/local/bin/\(executable)", "/usr/bin/\(executable)"]
         let fromPath = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { "\($0)/\(executable)" }
         if let match = (explicit + fromPath).first(where: FileManager.default.isExecutableFile) { return match }
 
         guard executable.range(of: #"^[A-Za-z0-9._+-]+$"#, options: .regularExpression) != nil else { return nil }
-        guard let data = try? run("/bin/zsh", ["-lic", "command -v -- \(executable)"], timeout: 4) else { return nil }
-        return String(decoding: data, as: UTF8.self)
-            .split(whereSeparator: \.isNewline).map(String.init).last(where: FileManager.default.isExecutableFile)
+        for shell in loginShells() {
+            guard let data = try? run(shell.path, [shell.flags, "command -v -- \(executable)"], timeout: 4) else { continue }
+            if let match = String(decoding: data, as: UTF8.self)
+                .split(whereSeparator: \.isNewline).map(String.init)
+                .last(where: FileManager.default.isExecutableFile) { return match }
+        }
+        return nil
     }
 
-    static func run(_ executable: String, _ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12, currentDirectory: URL? = nil) throws -> Data {
+    /// Interactive login shells, so PATH additions made in `.zshrc`/`.bashrc` —
+    /// where version managers put CLI shims — are visible. Candidates are tried in
+    /// turn rather than only the first: a `$SHELL` that rejects `-l` or `-i`
+    /// (nushell, elvish, restricted shells) must not make every provider look
+    /// uninstalled. `sh` gets `-lc`, since a POSIX shell need not accept `-i`
+    /// alongside `-c`.
+    static func loginShells() -> [(path: String, flags: String)] {
+        var seen = Set<String>()
+        return [ProcessInfo.processInfo.environment["SHELL"],
+                "/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"]
+            .compactMap { $0 }
+            .filter { FileManager.default.isExecutableFile(atPath: $0) && seen.insert($0).inserted }
+            .map { path in
+                let name = URL(fileURLWithPath: path).lastPathComponent
+                return (path, ["zsh", "bash"].contains(name) ? "-lic" : "-lc")
+            }
+    }
+
+    public static func run(_ executable: String, _ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12, currentDirectory: URL? = nil) throws -> Data {
         let process = Process()
         let output = Pipe(), errors = Pipe(), stdin = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -27,7 +54,12 @@ enum CommandRunner {
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
         try process.run()
+        #if !os(Windows)
+        // Give the child its own process group so a timeout can take the whole
+        // tree down — the provider CLIs spawn children of their own. The Windows
+        // equivalent is a Job Object, which belongs with a Windows front-end.
         if process.processIdentifier > 1 { _ = setpgid(process.processIdentifier, process.processIdentifier) }
+        #endif
 
         let stdout = LockedData(), stderr = LockedData(), readers = DispatchGroup()
         readers.enter()
@@ -44,7 +76,9 @@ enum CommandRunner {
         if finished.wait(timeout: .now() + timeout) == .timedOut {
             Self.terminate(process)
             _ = finished.wait(timeout: .now() + 1)
+            #if !os(Windows)
             if process.processIdentifier > 1 { _ = kill(-process.processIdentifier, SIGKILL) }
+            #endif
             _ = readers.wait(timeout: .now() + 2)
             throw ProbeError.message("The CLI did not respond in time")
         }
@@ -60,12 +94,23 @@ enum CommandRunner {
         return stdout.value
     }
 
-    static func runExpect(_ script: String, timeout: TimeInterval = 18, currentDirectory: URL? = nil) throws -> String {
-        let data = try run("/usr/bin/expect", ["-c", script], timeout: timeout, currentDirectory: currentDirectory)
+    public static func runExpect(_ script: String, timeout: TimeInterval = 18, currentDirectory: URL? = nil) throws -> String {
+        guard let expect = find("expect") else { throw ProbeError.unsupported(expectInstallHint) }
+        let data = try run(expect, ["-c", script], timeout: timeout, currentDirectory: currentDirectory)
         return String(decoding: data, as: UTF8.self)
     }
 
-    static func tclQuoted(_ value: String) -> String {
+    static var expectInstallHint: String {
+        #if os(macOS)
+        "expect is not installed. Install it with `brew install expect`."
+        #elseif os(Windows)
+        "expect is not installed, and there is no Windows build of it. The Gemini probe needs a pseudo-terminal and is not supported on Windows yet."
+        #else
+        "expect is not installed. Install it with `sudo pacman -S expect` or `sudo apt install expect`."
+        #endif
+    }
+
+    public static func tclQuoted(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "$", with: "\\$")
@@ -75,7 +120,9 @@ enum CommandRunner {
     private static func terminate(_ process: Process) {
         let pid = process.processIdentifier
         guard pid > 1 else { return }
+        #if !os(Windows)
         _ = kill(-pid, SIGTERM)
+        #endif
         process.terminate()
     }
 
@@ -86,7 +133,7 @@ enum CommandRunner {
     /// Turns terminal output into safe, readable text for the menu UI. Commands
     /// launched through a PTY can emit cursor movement and bracketed-paste modes,
     /// which otherwise appear as strings such as `[?2004h[2K` in error cards.
-    static func sanitizeDiagnostic(_ input: String) -> String {
+    public static func sanitizeDiagnostic(_ input: String) -> String {
         var text = input
             .replacingOccurrences(of: "\u{1B}\\][^\u{7}]*(?:\u{7}|\u{1B}\\\\)", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
@@ -110,9 +157,9 @@ private final class LockedData: @unchecked Sendable {
     func set(_ data: Data) { lock.withLock { storage = data } }
 }
 
-enum ProbeError: LocalizedError {
+public enum ProbeError: LocalizedError {
     case missing(String), timeout, message(String), unsupported(String)
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .missing(let name): "\(name) is not installed"
         case .timeout: "The CLI did not respond in time"
