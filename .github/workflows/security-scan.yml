@@ -1,0 +1,116 @@
+name: Security scan
+
+# QuotaBar has no third-party Swift package dependencies, so there is no
+# dependency graph worth scanning. The supply-chain risk that does exist lives
+# in three places, and this workflow covers each of them:
+#
+#   1. the working tree      - a credential or token committed by accident
+#   2. swift:6.3-noble       - the image both CI and ./quotabar build inside
+#   3. the GitHub Actions we depend on - kept patched by .github/dependabot.yml
+#
+# Actions are pinned by major version, matching ci.yml. aquasecurity/trivy-action
+# is the exception because it publishes no moving major tag - it is still 0.x, so
+# a release tag is the closest equivalent and Dependabot keeps it current.
+#
+# Findings are published to code scanning as SARIF rather than buried in a log.
+# Only a leaked secret fails a build; vulnerability and misconfiguration results
+# are informational and must never block a merge on their own.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays at 06:17 UTC. New CVEs land against a pinned base image long after
+    # the last commit, so the scan cannot only run when someone pushes.
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  repository:
+    name: Working tree (secrets, misconfiguration)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Scan the working tree
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig,vuln
+          format: sarif
+          output: trivy-working-tree.sarif
+          # trivy-action keeps its vulnerability database in
+          # $GITHUB_WORKSPACE/.cache/trivy, which a scan of "." would otherwise
+          # walk and report on.
+          skip-dirs: .cache
+          # Reporting run: informational findings are published, not enforced.
+          # The secret gate below is the only step allowed to fail this job.
+          exit-code: '0'
+
+      - name: Upload working-tree findings to code scanning
+        # A pull request from a fork gets a read-only token, so the upload would
+        # fail on something the contributor cannot fix. The scan itself still runs.
+        if: github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-working-tree.sarif
+          category: trivy-working-tree
+
+      - name: Fail on leaked secrets
+        # A committed credential is not advisory. This is the one Trivy result
+        # that stops the build, and it is deliberately a separate run so that
+        # the SARIF above is published even when this step goes red.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          skip-dirs: .cache
+          exit-code: '1'
+
+  toolchain-image:
+    name: Toolchain image (swift:6.3-noble)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        # upload-sarif resolves the commit it is annotating from the checkout.
+        uses: actions/checkout@v6
+
+      - name: Scan swift:6.3-noble
+        # The image CI builds in and the one ./quotabar runs on a Linux host
+        # without a Swift toolchain. Both are the same tag, so one scan covers
+        # the CI runner and the local build path.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: swift:6.3-noble
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-toolchain-image.sarif
+          # A distribution base image carries a long tail of CVEs with no
+          # released fix, and those are not actionable here: the only lever this
+          # repository has is a newer image, which needs a fix to exist first.
+          # Measured on swift:6.3-noble in August 2026, this turns 2202 raw
+          # findings into the 6 that a rebuilt image would actually clear. No
+          # severity filter on top of it - the fixable set is small, and it is
+          # currently all MEDIUM, which a CRITICAL,HIGH filter would hide.
+          ignore-unfixed: true
+          # Never fails the build. An upstream image CVE is news, not a defect
+          # in the pull request that happened to trigger the scan.
+          exit-code: '0'
+
+      - name: Upload toolchain-image findings to code scanning
+        if: github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-toolchain-image.sarif
+          # A distinct category keeps these alerts from overwriting the
+          # working-tree results uploaded by the other job.
+          category: trivy-toolchain-image
