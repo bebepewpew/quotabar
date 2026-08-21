@@ -255,6 +255,7 @@ detail, along with how to run the tests.
 quotabar                      human-readable table
 quotabar --json               machine readable snapshots
 quotabar --format waybar      {"text","tooltip","class","percentage"}
+quotabar --format csv         one row per window, in history's columns
 quotabar --provider claude    limit to one provider; repeatable
 quotabar --watch              keep running and re-probe on an interval
 quotabar --watch --interval 15 --notify
@@ -263,7 +264,7 @@ quotabar --no-color           disable ANSI colour ($NO_COLOR is honoured too)
 quotabar history              usage graph for the last 7 days
 quotabar history --since 30d  a longer window (90m, 24h, 7d, 3w all work)
 quotabar history --cycles     completed cycles with peak and coverage
-quotabar history --format csv export every recorded sample
+quotabar history --format csv export every recorded sample (same columns)
 quotabar history --clear      delete all recorded history
 quotabar advise               whether your subscriptions fit your usage
 quotabar advise --json        the same findings, machine readable

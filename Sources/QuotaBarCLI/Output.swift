@@ -7,15 +7,15 @@ enum Output {
         case green = "\u{1B}[32m"
     }
 
+    /// `csvHeader` is false for the later cycles of a `--watch` stream, so the
+    /// column names arrive once rather than between every batch of rows.
     static func render(_ snapshots: [QuotaSnapshot], format: Arguments.Format,
-                       now: Date = Date(), color: Bool) throws -> String {
+                       now: Date = Date(), color: Bool, csvHeader: Bool = true) throws -> String {
         switch format {
         case .text: return text(snapshots, now: now, color: color)
         case .json: return try json(snapshots)
         case .waybar: return try waybar(snapshots, now: now)
-        // `Arguments.validate` rejects csv for status, so this is unreachable;
-        // falling back to text keeps the switch honest without inventing a format.
-        case .csv: return text(snapshots, now: now, color: color)
+        case .csv: return UsageReport.csv(snapshots: snapshots, includeHeader: csvHeader)
         }
     }
 

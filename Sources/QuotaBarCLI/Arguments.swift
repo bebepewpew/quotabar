@@ -97,8 +97,10 @@ struct Arguments {
         if command != .status, format == .waybar {
             throw ArgumentError.invalidValue("--format", "waybar is only available for the default status output")
         }
-        if command != .history, format == .csv {
-            throw ArgumentError.invalidValue("--format", "csv is only available for `quotabar history`")
+        if command == .advise, format == .csv {
+            // Advice is prose with a severity and evidence lines, not a table of
+            // numbers; there is no honest row to write for it.
+            throw ArgumentError.invalidValue("--format", "csv is not available for `quotabar advise`")
         }
     }
 
@@ -128,7 +130,8 @@ struct Arguments {
 
     OPTIONS
       --json                 Emit as JSON
-      --format <fmt>         text (default), json, waybar (status), csv (history)
+      --format <fmt>         text (default), json, csv (status, history),
+                             waybar (status)
       --provider <name>      Limit to one provider; repeatable (gemini, claude, codex)
       --watch                Keep running and re-probe on an interval
       --interval <minutes>   Refresh interval for --watch (default 15)

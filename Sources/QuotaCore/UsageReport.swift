@@ -96,17 +96,67 @@ public enum UsageReport {
 
     // MARK: - CSV
 
-    /// One row per stored sample. Fields are numbers, keys and timestamps only —
-    /// nothing here needs quoting, and the header names what each column is.
+    /// The one column set both CSV writers below emit, so a recorded snapshot and
+    /// an export of the history it went into land in the same table.
+    public static let csvHeader = "provider,window_key,at,used_percent,reset_at"
+
+    /// One row per stored sample. The header names what each column is.
     public static func csv(samples: [UsageSample]) -> String {
         let rows = samples.sorted { $0.at < $1.at }.map { sample in
             [sample.series.provider.slug,
-             sample.series.windowKey,
+             csvField(sample.series.windowKey),
              iso(sample.at),
-             String(format: "%.2f", sample.usedPercent),
+             percentField(sample.usedPercent),
              sample.resetAt.map(iso) ?? ""].joined(separator: ",")
         }
-        return (["provider,window_key,at,used_percent,reset_at"] + rows).joined(separator: "\n")
+        return ([csvHeader] + rows).joined(separator: "\n")
+    }
+
+    /// One row per window of a live status snapshot, in `csvHeader`'s columns, so
+    /// a cron job can append `quotabar --format csv` to the same file it exports
+    /// history into instead of flattening `--json` itself.
+    ///
+    /// `at` is each snapshot's own `updatedAt` rather than the time of the call: a
+    /// reading retained after a failed refresh is stale, and the row has to say so
+    /// rather than restamp it as current. A window with no known reset leaves that
+    /// cell empty — a placeholder date would be read as a real one. A provider that
+    /// reported no window contributes no row, because there is no number to record;
+    /// the CLI has already named it on stderr and exits non-zero.
+    ///
+    /// `includeHeader` is false for every cycle of a `--watch` stream after the
+    /// first, so a header lands once at the top instead of between the rows.
+    public static func csv(snapshots: [QuotaSnapshot], includeHeader: Bool = true) -> String {
+        let rows = snapshots.flatMap { snapshot in
+            snapshot.windows.map { window in
+                [snapshot.provider.slug,
+                 csvField(window.key),
+                 iso(snapshot.updatedAt),
+                 percentField(window.usedPercent),
+                 window.resetAt.map(iso) ?? ""].joined(separator: ",")
+            }
+        }
+        return ((includeHeader ? [csvHeader] : []) + rows).joined(separator: "\n")
+    }
+
+    /// Quotes a cell only when it has to be. Every other column is a provider
+    /// slug, a formatted number or an ISO timestamp, but a window key arrives from
+    /// a cache file that anything could have written, and a comma or a newline in
+    /// one would otherwise split the row in two.
+    private static func csvField(_ value: String) -> String {
+        guard value.contains(where: { $0 == "," || $0 == "\"" || $0 == "\r" || $0 == "\n" }) else {
+            return value
+        }
+        return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    /// Two decimals, clamped. History records are clamped as they are read, but a
+    /// snapshot arrives from a cache file that anything could have written, and an
+    /// out-of-range or non-finite percentage must not reach a column a spreadsheet
+    /// reads as a number. Nothing survivable can be inferred from `nan`, so it
+    /// records as zero, the same reading a missing number would give.
+    private static func percentField(_ value: Double) -> String {
+        guard value.isFinite else { return "0.00" }
+        return String(format: "%.2f", min(max(value, 0), 100))
     }
 
     // MARK: - JSON
