@@ -52,6 +52,32 @@ final class ProcessLineSessionTests: XCTestCase {
                           "end of file ends the wait rather than the deadline doing it")
     }
 
+    /// Regression: the parent used to keep its own copy of the child's stdout
+    /// write end, and a pipe reader sees end of file only when *every* write end
+    /// is closed. Whether the wait ended at end of file or at the deadline then
+    /// depended on when ARC happened to release that handle — the test above
+    /// passed in about four milliseconds when it did and took the full deadline
+    /// when it did not, failing perhaps three runs in five.
+    ///
+    /// One iteration cannot catch a race that loses only sometimes, so this
+    /// repeats it: at eight iterations the old behaviour is caught essentially
+    /// every time, and the fixed one costs a few milliseconds in total.
+    func testEndOfFileEndsEveryWaitAndNotJustSomeOfThem() throws {
+        let shell = try systemBinary("sh")
+        for iteration in 1...8 {
+            let session = try ProcessLineSession(executable: shell, arguments: ["-c", "echo first"])
+            defer { session.close() }
+
+            var transcript: [String] = []
+            let started = Date()
+            _ = session.waitForLine(matching: { $0 == "never printed" },
+                                    before: Date().addingTimeInterval(1.5),
+                                    transcript: &transcript)
+            XCTAssertLessThan(Date().timeIntervalSince(started), 0.5,
+                              "iteration \(iteration) waited for the deadline rather than end of file")
+        }
+    }
+
     /// Regression: a child that exits without terminating its last line used to
     /// have that line dropped, because only the text before a newline was ever
     /// promoted out of the buffer. The last line is usually the response.

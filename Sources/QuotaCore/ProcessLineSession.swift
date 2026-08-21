@@ -58,6 +58,12 @@ final class ProcessLineSession: @unchecked Sendable {
         }
 
         try process.run()
+        // The child has its own copy of the pipe now, and a reader sees end of
+        // file only when *every* write end is closed. Holding this one leaves
+        // the child's exit invisible: `waitForLine` then runs to its deadline
+        // instead of returning at once, which is the whole point of the deadline
+        // being an upper bound rather than the normal cost of a dead CLI.
+        try? output.fileHandleForWriting.close()
         #if !os(Windows)
         // Own process group, so `close()` can take down children the CLI spawned
         // rather than orphaning them. A Job Object is the Windows equivalent.
