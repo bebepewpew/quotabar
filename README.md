@@ -33,7 +33,6 @@ and write its caption at the same time, and delete the placeholder it replaces.
 | --- | --- |
 | `Package.swift`, `Sources/`, `Tests/` | The SwiftPM package: every target and its tests |
 | `Resources/` | `Info.plist` and the icons the macOS app bundle is built from |
-| `Formula/` | The Homebrew formula for the `quotabar` command |
 | `packaging/` | The nfpm configuration the release workflow builds the `.deb` and `.rpm` from |
 | `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` |
 | `docs/agent-guides/` | The long-form guidance the agent tooling points at |
@@ -41,14 +40,16 @@ and write its caption at the same time, and delete the placeholder it replaces.
 | `.claude/`, `.codex/`, `.githooks/` | Per-tool wrappers and the repository hooks |
 | `quotabar` | The wrapper that picks a toolchain: `./quotabar build`, `test`, `coverage`, `run`, `cli` |
 
-Two of those cannot move, so please do not re-litigate them:
+One of those cannot move, so please do not re-litigate it:
 
-- **`Formula/` stays at the top level.** Homebrew discovers formulae only in
-  `Formula/`, `HomebrewFormula/`, or the repository root. Nesting it anywhere
-  else breaks `brew tap`.
 - **`Package.swift`, `Sources/`, `Tests/` and `Resources/` stay where they
   are.** SwiftPM requires the manifest at the package root and finds target
   sources by convention.
+
+The Homebrew formula is not here. It lives in
+[`bebepewpew/homebrew-tap`](https://github.com/bebepewpew/homebrew-tap),
+which the release workflow writes to directly — see
+[Homebrew](#macos--homebrew) below.
 
 `CONTRIBUTING.md` and `SECURITY.md` live under `.github/` deliberately: GitHub
 still surfaces both from there, and the root stays short enough to read.
@@ -105,13 +106,16 @@ build from a checkout instead, skip to [Build and run](#build-and-run).
 ### macOS — Homebrew
 
 ```sh
-brew tap bebepewpew/quotabar https://github.com/bebepewpew/quotabar
+brew tap bebepewpew/tap
 brew install quotabar
 ```
 
-The explicit URL is what lets the formula live in this repository instead of a
-separate `homebrew-quotabar` tap. If `quotabar` is ambiguous on your machine,
-name it in full: `brew install bebepewpew/quotabar/quotabar`.
+No URL is needed: Homebrew maps `user/name` to `github.com/user/homebrew-name`,
+which is the [`homebrew-tap`](https://github.com/bebepewpew/homebrew-tap)
+tap. The release workflow pushes each new formula there after installing and
+testing it on a macOS runner, so a release cannot publish a formula that does
+not build. If `quotabar` is ambiguous on your machine, name it in full:
+`brew install bebepewpew/tap/quotabar`.
 
 The formula builds from source on purpose. A downloaded Mach-O that Apple has
 not notarized picks up the `com.apple.quarantine` attribute and Gatekeeper
@@ -121,15 +125,23 @@ for the Swift 6 toolchain.
 
 ### Linux — `.deb` and `.rpm`
 
-Download the package for your distribution from the release, then:
-
 ```sh
+VERSION=0.1.0
+BASE=https://github.com/bebepewpew/quotabar/releases/download/v$VERSION
+
 # Debian, Ubuntu
-sudo apt install ./quotabar_<version>_amd64.deb
+curl -fLO "$BASE/quotabar_${VERSION}_amd64.deb"
+sudo apt install "./quotabar_${VERSION}_amd64.deb"
 
 # Fedora, RHEL
-sudo rpm -i quotabar-<version>.x86_64.rpm
+curl -fLO "$BASE/quotabar-${VERSION}.x86_64.rpm"
+sudo rpm -i "quotabar-${VERSION}.x86_64.rpm"
 ```
+
+Set `VERSION` to the release you want; the
+[releases page](https://github.com/bebepewpew/quotabar/releases/latest) has the
+current one. The filenames are not stable across versions, which is why there is
+no `releases/latest/download/…` shortcut here.
 
 Both install `/usr/bin/quotabar`. The binary is linked with
 `--static-swift-stdlib`, so it carries the Swift runtime and needs no Swift
@@ -139,15 +151,30 @@ the first is used only by the Gemini probe, the second only by `--notify`.
 ### Any platform — static tarball
 
 ```sh
-tar -xzf quotabar-<version>-linux-x86_64.tar.gz
-sudo install -m 0755 quotabar-<version>-linux-x86_64/quotabar /usr/local/bin/
+VERSION=0.1.0
+BASE=https://github.com/bebepewpew/quotabar/releases/download/v$VERSION
+
+curl -fLO "$BASE/quotabar-${VERSION}-linux-x86_64.tar.gz"
+tar -xzf "quotabar-${VERSION}-linux-x86_64.tar.gz"
+sudo install -m 0755 "quotabar-${VERSION}-linux-x86_64/quotabar" /usr/local/bin/
 ```
 
-The macOS build is published the same way as
-`quotabar-<version>-macos-universal.tar.gz`. Each tarball holds the `quotabar`
+The macOS build is published the same way, as
+`quotabar-${VERSION}-macos-universal.tar.gz`. Each tarball holds the `quotabar`
 binary alongside `README.md` and `LICENSE`. Prefer the Homebrew tap on macOS:
 a browser download picks up `com.apple.quarantine` and Gatekeeper then blocks
 the unnotarized binary on first run.
+
+### Container
+
+```sh
+docker run --rm ghcr.io/bebepewpew/quotabar:latest --json
+```
+
+Tagged with the release version as well as `latest`. The image is only useful
+for the CLI's own output — it cannot see provider CLIs or credentials on the
+host unless you mount them, which QuotaBar deliberately does not do for you.
+[`docs/container.md`](docs/container.md) covers what to mount and why.
 
 ### Verifying a release
 

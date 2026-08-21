@@ -3,10 +3,10 @@ name: Release
 # Manual only. A release is a deliberate act, so nothing here is triggered by a
 # push or a pull request.
 #
-# AGENTS.md forbids pushing to `main`, and this workflow never does. It pushes
-# exactly two kinds of ref: the annotated release tag, and a
-# `release/formula-*` branch that carries the Homebrew formula update as a pull
-# request. The version stamped into the sources for the build is left
+# AGENTS.md forbids pushing to `main`, and this workflow never does. The only
+# ref it pushes here is the annotated release tag. The Homebrew formula lives in
+# the bebepewpew/homebrew-tap tap and is pushed there, not to this
+# repository. The version stamped into the sources for the build is left
 # uncommitted in each build job's checkout, so the tag still points at the
 # untouched commit the run started from.
 
@@ -403,8 +403,8 @@ jobs:
             echo
             echo '```sh'
             echo "# macOS — built from source, so Gatekeeper never sees an unnotarized binary"
-            echo "brew tap ${GITHUB_REPOSITORY} https://github.com/${GITHUB_REPOSITORY}"
-            echo "brew install ${GITHUB_REPOSITORY}/quotabar"
+            echo "brew tap bebepewpew/tap"
+            echo "brew install quotabar"
             echo
             echo "# Debian/Ubuntu"
             echo "sudo apt install ./quotabar_${VERSION}_amd64.deb"
@@ -499,22 +499,42 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}
             ghcr.io/${{ github.repository }}:latest
 
-  formula:
-    name: Open the Homebrew formula pull request
+  tap:
+    name: Publish the Homebrew tap
     needs: [version, release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
+    # macOS because this job installs the formula before it publishes it. A
+    # Linux runner could push the commit but could not prove it works, which is
+    # how a placeholder checksum once reached users.
+    runs-on: macos-15
+    # Nothing in THIS repository is written here. The tap is a different
+    # repository and is written with TAP_TOKEN.
+    permissions: {}
     env:
       VERSION: ${{ needs.version.outputs.version }}
       TAG: ${{ needs.version.outputs.tag }}
-      GH_TOKEN: ${{ github.token }}
+      TAP_REPOSITORY: bebepewpew/homebrew-tap
+      HOMEBREW_NO_ANALYTICS: 1
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - name: Require the tap token
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            {
+              echo "::error::TAP_TOKEN is not set, so the Homebrew tap cannot be updated."
+              echo "::error::Create a fine-grained personal access token with Contents: read and write"
+              echo "::error::scoped to ${TAP_REPOSITORY} only, then:"
+              echo "::error::  gh secret set TAP_TOKEN --repo ${GITHUB_REPOSITORY}"
+            } >&2
+            exit 1
+          fi
 
       - name: Checksum the tagged source tarball
+        shell: bash
         run: |
           set -euo pipefail
           url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
@@ -537,53 +557,97 @@ jobs:
           tar -tzf "$tarball" > /dev/null
           {
             echo "SOURCE_URL=${url}"
-            echo "SOURCE_SHA256=$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+            echo "SOURCE_SHA256=$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)"
           } >> "$GITHUB_ENV"
 
-      - name: Update the formula
+      - name: Clone the tap and point the formula at this release
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          formula="Formula/quotabar.rb"
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPOSITORY}.git" \
+            "$RUNNER_TEMP/tap"
+          formula="$RUNNER_TEMP/tap/Formula/quotabar.rb"
           # Line-anchored so the `head` URL and any other quoted string are left
           # alone. Both keys appear exactly once, at the top of the class.
           perl -pi -e 's{^(\s*url\s+")[^"]*(")}{$1$ENV{SOURCE_URL}$2}' "$formula"
           perl -pi -e 's{^(\s*sha256\s+")[^"]*(")}{$1$ENV{SOURCE_SHA256}$2}' "$formula"
           grep -Fq "\"${SOURCE_URL}\"" "$formula"
           grep -Fq "\"${SOURCE_SHA256}\"" "$formula"
-          if git diff --quiet -- "$formula"; then
-            echo "::error::${formula} already points at ${TAG}"
-            exit 1
-          fi
-          git diff -- "$formula"
+          git -C "$RUNNER_TEMP/tap" diff -- Formula/quotabar.rb
 
-      - name: Open the pull request
+      - name: Register the clone as a tap
+        shell: bash
         run: |
           set -euo pipefail
-          # A branch and a pull request, never a push to main.
-          branch="release/formula-${TAG}"
+          # Homebrew finds taps by directory layout, so this verifies the edited
+          # working copy rather than whatever the remote currently holds.
+          taps="$(brew --repository)/Library/Taps/bebepewpew"
+          mkdir -p "$taps"
+          ln -sfn "$RUNNER_TEMP/tap" "$taps/homebrew-tap"
+          brew tap
+
+      - name: Verify the formula installs before publishing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The order here is the whole point of this job: audit, install and
+          # test run against the edited formula, and the push below only happens
+          # if they pass. A broken formula therefore fails the release instead of
+          # reaching users, which is what went wrong with v0.1.0.
+          brew audit --online bebepewpew/tap/quotabar
+          brew install --build-from-source --verbose bebepewpew/tap/quotabar
+          brew test bebepewpew/tap/quotabar
+          test "$(quotabar --version)" = "quotabar ${VERSION}"
+          quotabar --help | grep -q USAGE
+
+      - name: Publish the formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/tap"
+          if git diff --quiet -- Formula/quotabar.rb; then
+            # Re-running a release that already published. The verification above
+            # still ran, so this is a proven no-op rather than a silent skip.
+            echo "Formula already points at ${TAG}; nothing to push."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
           git add Formula/quotabar.rb
-          git commit -m "Point the Homebrew formula at ${TAG}"
-          git push origin "HEAD:refs/heads/${branch}"
-
-          body="$RUNNER_TEMP/pr.md"
+          # A file, not `-m`, so the body is not indented by this script's own
+          # indentation.
+          message="$RUNNER_TEMP/tap-commit.txt"
           {
-            echo "Release ${TAG} is published, so the formula now builds that tag from source."
+            echo "quotabar ${VERSION}"
             echo
-            echo "- \`url\`: ${SOURCE_URL}"
-            echo "- \`sha256\`: ${SOURCE_SHA256}"
-            echo
-            echo "Opened by the release workflow because AGENTS.md forbids pushing to \`main\`."
-            echo "Squash and merge, as the repository requires."
-            echo
-            echo "> Pull requests created with \`GITHUB_TOKEN\` do not start workflow runs, so"
-            echo "> CI has to be kicked off manually if you want it on this branch."
-          } > "$body"
+            echo "Published by the release workflow in ${GITHUB_REPOSITORY} for ${TAG}."
+            echo "Verified with brew audit, brew install --build-from-source and"
+            echo "brew test on macos-15 before this commit was created."
+          } > "$message"
+          git commit -F "$message"
+          # No pull request: the tap holds generated distribution metadata, not
+          # reviewable source, and gating it on review is what deadlocked the
+          # previous design.
+          git push origin HEAD:main
 
-          gh pr create \
-            --base main \
-            --head "$branch" \
-            --title "Point the Homebrew formula at ${TAG}" \
-            --body-file "$body"
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Homebrew tap"
+            echo
+            echo "\`\`\`sh"
+            echo "brew tap bebepewpew/tap"
+            echo "brew install quotabar"
+            echo "\`\`\`"
+            echo
+            echo "- tap: https://github.com/${TAP_REPOSITORY}"
+            echo "- url: ${SOURCE_URL:-not resolved}"
+            echo "- sha256: \`${SOURCE_SHA256:-not resolved}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
