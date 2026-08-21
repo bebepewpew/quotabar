@@ -228,6 +228,20 @@ final class DBusConnectionTests: XCTestCase {
         XCTAssertNil(try connection.receiveBuffered())
     }
 
+    /// A malformed frame must surface as itself. Swallowed, it becomes a stall
+    /// that later looks like a timeout and points at the peer.
+    func testReceiveReportsAProtocolErrorRatherThanStalling() throws {
+        let channel = MemoryChannel()
+        var bytes = try DBusMessage(kind: .signal, serial: 1, path: "/a",
+                                    interface: "i.f", member: "M").encoded()
+        bytes[3] = 9   // an impossible protocol version
+        channel.queue(bytes)
+        let connection = DBusConnection(channel: channel)
+        XCTAssertThrowsError(try connection.receive()) {
+            XCTAssertEqual($0 as? DBusWireError, .invalidPayload("protocol version 9"))
+        }
+    }
+
     func testCloseReachesTheChannel() {
         let channel = MemoryChannel()
         DBusConnection(channel: channel).close()
