@@ -80,6 +80,9 @@ A probe that leaks a process leaks whatever that process holds open.
   remote-code-execution path into CI.
 - Release artifacts are signed keyless with cosign and carry build provenance.
   Anything that weakens or bypasses that is blocking.
+- `security-scan.yml` scans three artefacts weekly: the working tree, the
+  `swift:6.3-noble` toolchain image, and `ghcr.io/<repo>:latest` — the container
+  users actually run, whose `debian:stable-slim` base is frozen at release time.
 
 ## How to report
 

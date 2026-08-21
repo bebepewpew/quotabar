@@ -293,6 +293,16 @@ jobs:
           for doc in $formula_docs; do
               grep -q 'packaging/homebrew/quotabar.rb' "$doc"
           done
+          # The weekly scan once covered only the image QuotaBar is built in and
+          # never the one users pull, and no updater watched the shipped base
+          # image at all. Both are structure, so both are asserted here.
+          # Nothing below may contain a workflow expression: Actions expands one
+          # inside `run:` before the shell sees it, and the grep would then look
+          # for the expanded text rather than the literal in the file.
+          grep -q 'category: trivy-shipped-image' .github/workflows/security-scan.yml
+          grep -q 'image-ref: ghcr.io/.*:latest' .github/workflows/security-scan.yml
+          grep -q 'package-ecosystem: docker' .github/dependabot.yml
+          grep -q 'directory: /packaging' .github/dependabot.yml
 
       # The Linux job is the expensive one, and both of these are about the one
       # step that now carries it. They need no toolchain, so they belong here
