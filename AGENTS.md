@@ -178,6 +178,11 @@ The wrappers:
 - `.claude/workflows/parallel-tasks.js` and `scripts/codex-parallel` — the
   parallel runners for each toolchain. Both open a pull request only for a
   task that passed the validation above.
+- `scripts/test-workflows` — the two workflows above, run against a stub engine.
+  It needs Node and nothing else, and the repository-policy CI job runs it for
+  every change. It pins the one behaviour whose failure is invisible: an angle
+  whose agent errored is reported as one that did not run, never as one that
+  looked and found nothing. Run it after editing either workflow.
 - `.codex/skills/` — the same roles with `agents/openai.yaml` manifests. Codex
   discovers skills only under `$CODEX_HOME/skills` and does not read them from a
   repository, so run `scripts/install-codex-skills` once per clone and again

@@ -150,6 +150,15 @@ have no `.claude/agents/` twin and the loops are right to stay quiet about them.
 Everything else is silent on a clean tree, so anything the snippet names is drift
 the change under review introduced.
 
+The workflow scripts go further than structure: `scripts/test-workflows` runs
+`review-swarm.js` and `e2e-task.js` against a stub engine and asserts what the
+table above calls the expensive defect — an angle that never ran, reported as
+clean. Run it for any change to those two files; the repository-policy CI job
+runs it for every change. It needs Node and nothing else. It does not cover
+`parallel-tasks.js`, which reports per task rather than per angle, and it proves
+nothing about the prompts themselves — only about the plumbing that carries a
+failed angle to the caller and to the sign-off.
+
 A role uses the same name on both sides. It did not always: the reviewing roles
 were `quotabar-review` and `quotabar-security-review` under `.codex/skills/`
 while `.claude/agents/` called them `quotabar-reviewer` and

@@ -97,8 +97,13 @@ a finding.`, {
 
   // Every finding is attacked before it is believed. A reviewer that is wrong
   // costs more than one that is silent, because someone acts on it.
-  ({ lens, findings }) =>
-    parallel(findings.map(f => () =>
+  //
+  // This stage forwards the run, not a bare array of verdicts. A lens that
+  // errored has nothing to attack, so it would arrive here as an empty array —
+  // the same empty array a lens that looked and found nothing produces. Dropping
+  // the flag here is what made the distinction above unobservable downstream.
+  (run) =>
+    parallel(run.findings.map(f => () =>
       agent(`
 Try to REFUTE this review finding about QuotaBar. Default to refuted when you are
 uncertain — the cost of a false finding is a person changing working code.
@@ -111,25 +116,23 @@ uncertain — the cost of a false finding is a person changing working code.
 Read the actual code and the surrounding context. Run something if it settles it.
 It survives only if the described failure genuinely occurs. Correct the severity
 if it was overstated or understated.`, {
-        label: `verify:${lens}`,
+        label: `verify:${run.lens}`,
         phase: 'Verify',
         schema: VERDICT,
       })
-        .then(v => ({ ...f, lens, verdict: v }))
+        .then(v => ({ ...f, lens: run.lens, verdict: v }))
         // An unverifiable finding is surfaced, not silently dropped.
-        .catch(e => ({ ...f, lens, verdict: null, verifyError: String((e && e.message) || e) }))
-    )).then(rows => rows.filter(Boolean)),
+        .catch(e => ({ ...f, lens: run.lens, verdict: null, verifyError: String((e && e.message) || e) }))
+    )).then(rows => ({ lens: run.lens, ran: run.ran, error: run.error, rows: rows.filter(Boolean) })),
 )
 
-const lensRuns = perLens.map((rows, i) => ({
-  key: LENSES[i].key,
+const lensRuns = perLens.map((run, i) => (run && run.ran)
+  ? { key: LENSES[i].key, ran: true, error: '' }
   // A stage that threw leaves nothing behind, so an absent entry is a failure too.
-  ran: Array.isArray(rows) ? rows.every(r => r && r.ran !== false) : false,
-  error: Array.isArray(rows) ? (rows.find(r => r && r.ran === false) || {}).error : 'the lens produced no result',
-}))
+  : { key: LENSES[i].key, ran: false, error: (run && run.error) || 'the lens produced no result' })
 const failedLenses = lensRuns.filter(l => !l.ran)
 
-const all = perLens.flat().filter(f => f && f.claim)
+const all = perLens.flatMap(run => (run && run.rows) || []).filter(f => f && f.claim)
 const survived = all.filter(f => f.verdict && f.verdict.survives)
 const refuted = all.filter(f => f.verdict && !f.verdict.survives)
 const unverified = all.filter(f => !f.verdict)

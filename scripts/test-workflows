@@ -1,0 +1,313 @@
+#!/usr/bin/env node
+'use strict'
+
+// Tests for the multi-agent workflows in .claude/workflows.
+//
+// A defect in a workflow fails the way a defect in a guide fails: silently, in
+// every future run, with nothing going red. The one behaviour that must never
+// fail that way is the per-angle `ran` flag — an angle whose agent errored has
+// to be reported as one that did not run, never as one that looked and found
+// nothing, because a sign-off that would hold on a missing angle otherwise
+// passes. That distinction is what this file exercises.
+//
+// It runs the real workflow sources against a stub engine, so a lens list or a
+// prompt can change freely; only the plumbing that carries the flag is pinned.
+// Node only, no dependencies: run `scripts/test-workflows`.
+
+const fs = require('node:fs')
+const path = require('node:path')
+
+const repoRoot = path.resolve(__dirname, '..')
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+
+// The engine evaluates a workflow as an async function body with its helpers
+// injected, which is why these files use top-level `await` and top-level
+// `return` — neither is legal in an ES module. `meta` is read separately, so
+// the harness drops the `export` keyword and passes the helpers as parameters.
+function loadWorkflow(name, engine) {
+  const source = fs
+    .readFileSync(path.join(repoRoot, '.claude', 'workflows', name), 'utf8')
+    .replace(/^export const meta =/m, 'const meta =')
+  const names = Object.keys(engine)
+  return new AsyncFunction(...names, source)(...names.map(key => engine[key]))
+}
+
+// The engine contract the workflows are written against. `pipeline` pushes each
+// item through the stages in order and collects one result per item; a stage
+// that throws leaves that item with no result at all, which is why the
+// workflows treat a missing entry as an angle that did not run.
+function makeEngine(args, agent) {
+  const logs = []
+  return {
+    logs,
+    engine: {
+      args,
+      log: line => { logs.push(String(line)) },
+      phase: () => {},
+      agent,
+      parallel: thunks => Promise.all(thunks.map(thunk => thunk())),
+      pipeline: (items, ...stages) => Promise.all(items.map(async (item, index) => {
+        let value = item
+        for (const stage of stages) {
+          try {
+            value = await stage(value, item, index)
+          } catch {
+            return null
+          }
+        }
+        return value
+      })),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Assertions
+// ---------------------------------------------------------------------------
+
+const tests = []
+const test = (name, run) => tests.push({ name, run })
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message)
+}
+
+function equal(actual, expected, what) {
+  if (actual !== expected) {
+    throw new Error(`${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
+  }
+}
+
+function sameSet(actual, expected, what) {
+  const left = [...actual].sort().join(', ')
+  const right = [...expected].sort().join(', ')
+  if (left !== right) throw new Error(`${what}: expected [${right}], got [${left}]`)
+}
+
+const finding = over => ({
+  severity: 'high',
+  file: 'Sources/QuotaCore/Probe.swift',
+  line: '42',
+  claim: 'the claim',
+  failure: 'these inputs -> that outcome',
+  fix: 'the smallest change',
+  ...over,
+})
+
+const SURVIVES = { survives: true, reason: 'reproduced it', severity: 'high' }
+
+// ---------------------------------------------------------------------------
+// review-swarm
+// ---------------------------------------------------------------------------
+
+async function runSwarm({ reject = [], findingsFor = {}, verify = () => SURVIVES } = {}) {
+  const calls = []
+  const agent = async (prompt, options) => {
+    const call = { prompt, ...options }
+    calls.push(call)
+    if (call.label.startsWith('review:')) {
+      const key = call.label.slice('review:'.length)
+      if (reject.includes(key)) throw new Error(`no agent type is registered for ${key}`)
+      return { findings: findingsFor[key] || [] }
+    }
+    if (call.label.startsWith('verify:')) return verify(call.label.slice('verify:'.length))
+    throw new Error(`the workflow made an unexpected agent call: ${call.label}`)
+  }
+
+  const { engine, logs } = makeEngine({ target: '17' }, agent)
+  const result = await loadWorkflow('review-swarm.js', engine)
+  const reviewed = calls
+    .filter(call => call.label.startsWith('review:'))
+    .map(call => call.label.slice('review:'.length))
+  return { result, calls, logs, reviewed }
+}
+
+test('review-swarm: a lens whose agent rejects is a failed lens, not a quiet one', async () => {
+  const { result, logs, reviewed } = await runSwarm({
+    reject: ['security'],
+    findingsFor: { correctness: [finding()] },
+  })
+
+  assert(reviewed.includes('security'), 'no security lens was invoked; the lens keys have changed')
+  equal(result.complete, false, 'complete')
+  sameSet(result.lensesThatFailed.map(lens => lens.key), ['security'], 'lensesThatFailed')
+  assert(
+    /is registered for security/.test(result.lensesThatFailed[0].error || ''),
+    `the failed lens must carry the agent's error, got ${JSON.stringify(result.lensesThatFailed[0].error)}`,
+  )
+  assert(
+    !result.lensesWithNothing.includes('security'),
+    'a lens that did not run was reported as one that ran and found nothing',
+  )
+  sameSet(
+    result.lensesWithNothing,
+    reviewed.filter(key => key !== 'security' && key !== 'correctness'),
+    'lensesWithNothing',
+  )
+  equal(result.findings.length, 1, 'surviving findings')
+  assert(
+    logs.some(line => line.startsWith('LENS DID NOT RUN — security:')),
+    'the run must say which lens did not run',
+  )
+})
+
+test('review-swarm: a lens that runs and finds nothing still counts as having run', async () => {
+  const { result, reviewed } = await runSwarm({})
+
+  equal(result.complete, true, 'complete')
+  equal(result.lensesThatFailed.length, 0, 'lensesThatFailed')
+  sameSet(result.lensesWithNothing, reviewed, 'lensesWithNothing')
+  equal(result.blocking, false, 'blocking')
+})
+
+test('review-swarm: a finding whose refutation fails is surfaced, and its lens still ran', async () => {
+  const { result, reviewed } = await runSwarm({
+    findingsFor: { docs: [finding({ severity: 'low' })] },
+    verify: () => { throw new Error('the verifier timed out') },
+  })
+
+  assert(reviewed.includes('docs'), 'no docs lens was invoked; the lens keys have changed')
+  equal(result.complete, true, 'complete')
+  equal(result.unverified.length, 1, 'unverified findings')
+  equal(result.unverified[0].lens, 'docs', 'the unverified finding keeps its lens')
+  assert(/timed out/.test(result.unverified[0].why || ''), 'the unverified finding carries the reason')
+  equal(result.findings.length, 0, 'an unverified finding is not reported as surviving')
+  assert(
+    !result.lensesWithNothing.includes('docs'),
+    'a lens that raised a finding is not a lens that found nothing',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// e2e-task
+// ---------------------------------------------------------------------------
+
+const SPEC_REPLY = {
+  buildable: true, reason: '', problem: 'a problem', surfaces: 'QuotaCore',
+  criteria: ['it is asserted'], outOfScope: [], label: 'tooling',
+  title: 'Do the thing', risks: 'none',
+}
+
+const DESIGN_REPLY = {
+  viable: true, reason: '', plan: 'change QuotaCore', seam: 'neither',
+  compatibility: 'no persisted field changes', testSurface: 'unit tests', risks: 'none',
+}
+
+const BUILD_REPLY = {
+  branch: 'fix/example', validated: true, summary: 'did the thing', details: 'built and tested',
+}
+
+async function runE2E({ reject = [], findingsFor = {}, verify = () => SURVIVES, decision = 'ship' } = {}) {
+  const calls = []
+  const agent = async (prompt, options) => {
+    const call = { prompt, ...options }
+    calls.push(call)
+    const label = call.label
+    if (label === 'shape') return SPEC_REPLY
+    if (label === 'design') return DESIGN_REPLY
+    if (label === 'build') return BUILD_REPLY
+    if (label.startsWith('assure:')) {
+      // The key carries the round tag, so a re-checked angle can behave
+      // differently on its second pass: "attack" then "attack (round 2)".
+      const key = label.slice('assure:'.length)
+      if (reject.includes(key)) throw new Error(`no agent type is registered for ${key}`)
+      return { findings: findingsFor[key] || [] }
+    }
+    if (label.startsWith('verify:')) return verify(label.slice('verify:'.length))
+    if (label.startsWith('remediate ')) {
+      return { fixed: ['the blocking one'], notFixed: [], validated: true, pushed: true, details: 'fixed and pushed' }
+    }
+    if (label === 'sign-off') return { decision, rationale: 'the rationale', conditions: [], acceptedRisks: [] }
+    if (label === 'ship') return { url: 'https://example.invalid/pull/1', reason: '' }
+    throw new Error(`the workflow made an unexpected agent call: ${label}`)
+  }
+
+  const { engine, logs } = makeEngine({ request: 'carry the ran flag' }, agent)
+  const result = await loadWorkflow('e2e-task.js', engine)
+  const assured = calls
+    .filter(call => call.label.startsWith('assure:'))
+    .map(call => call.label.slice('assure:'.length))
+  const signoff = calls.find(call => call.label === 'sign-off')
+  return { result, calls, logs, assured, signoffPrompt: signoff ? signoff.prompt : '' }
+}
+
+const promptLine = (prompt, heading) => {
+  const match = prompt.match(new RegExp(`^${heading}: (.*)$`, 'm'))
+  assert(match, `the sign-off prompt has no "${heading}" line`)
+  return match[1]
+}
+
+test('e2e-task: an angle whose agent rejects reaches the sign-off as an angle that did not run', async () => {
+  const { result, logs, assured, signoffPrompt } = await runE2E({ reject: ['attack'] })
+
+  assert(assured.includes('attack'), 'no attack angle was invoked; the angle keys have changed')
+  equal(result.complete, false, 'complete')
+  sameSet(result.anglesThatFailed.map(angle => angle.key), ['attack'], 'anglesThatFailed')
+  assert(
+    /is registered for attack/.test(result.anglesThatFailed[0].error || ''),
+    `the failed angle must carry the agent's error, got ${JSON.stringify(result.anglesThatFailed[0].error)}`,
+  )
+  assert(
+    !result.anglesWithNothing.includes('attack'),
+    'an angle that did not run was reported as one that ran and found nothing',
+  )
+
+  const didNotRun = promptLine(signoffPrompt, 'ANGLES THAT DID NOT RUN')
+  assert(/^attack \(/.test(didNotRun), `the sign-off must be told the attack angle did not run, got "${didNotRun}"`)
+  assert(
+    !promptLine(signoffPrompt, 'ANGLES COVERED').split(', ').includes('attack'),
+    'the sign-off must not be told an angle that failed was covered',
+  )
+  assert(
+    logs.some(line => line.startsWith('ANGLE DID NOT RUN — attack:')),
+    'the run must say which angle did not run',
+  )
+})
+
+test('e2e-task: every angle running is complete, and a silent angle is still a covered one', async () => {
+  const { result, assured, signoffPrompt } = await runE2E({})
+
+  equal(result.complete, true, 'complete')
+  equal(result.anglesThatFailed.length, 0, 'anglesThatFailed')
+  sameSet(result.anglesWithNothing, assured, 'anglesWithNothing')
+  equal(promptLine(signoffPrompt, 'ANGLES THAT DID NOT RUN'), 'none', 'the sign-off prompt')
+  sameSet(promptLine(signoffPrompt, 'ANGLES COVERED').split(', '), assured, 'ANGLES COVERED')
+  equal(result.state, 'opened', 'state')
+})
+
+test('e2e-task: an angle that fails on its re-check round is not left reported as its earlier pass', async () => {
+  const { result, assured, signoffPrompt } = await runE2E({
+    findingsFor: { attack: [finding({ severity: 'critical' })] },
+    reject: ['attack (round 2)'],
+  })
+
+  assert(assured.includes('attack (round 2)'), 'the attack angle was never re-checked after remediation')
+  equal(result.complete, false, 'complete')
+  sameSet(result.anglesThatFailed.map(angle => angle.key), ['attack'], 'anglesThatFailed')
+  assert(
+    !result.anglesWithNothing.includes('attack'),
+    'an angle that failed its re-check was reported as one that ran and found nothing',
+  )
+  assert(/^attack \(/.test(promptLine(signoffPrompt, 'ANGLES THAT DID NOT RUN')), 'the sign-off prompt')
+  equal(result.remediations.length, 1, 'remediation rounds')
+})
+
+// ---------------------------------------------------------------------------
+
+async function main() {
+  let failures = 0
+  for (const { name, run } of tests) {
+    try {
+      await run()
+      console.log(`ok   ${name}`)
+    } catch (error) {
+      failures += 1
+      console.log(`FAIL ${name}`)
+      console.log(`     ${(error && error.message) || error}`)
+    }
+  }
+  console.log(`Executed ${tests.length} workflow tests with ${failures} failures`)
+  process.exitCode = failures === 0 ? 0 : 1
+}
+
+main()

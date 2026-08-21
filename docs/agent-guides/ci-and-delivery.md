@@ -7,7 +7,7 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, the agent-workflow tests, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
@@ -47,6 +47,27 @@ would stay red until its next push, long after someone applied the label. And th
 lands moments after `opened` and each correction would otherwise leave a full
 macOS and Linux build running beside the one replacing it.
 
+## The agent-workflow tests
+
+The policy job also runs `scripts/test-workflows`, the one piece of the agent
+harness that can be executed rather than only read. It loads
+`.claude/workflows/review-swarm.js` and `.claude/workflows/e2e-task.js` against a
+stub engine, in Node, with no dependencies and no toolchain, and pins the
+behaviour whose failure is invisible: an angle whose agent errored is reported as
+one that **did not run**, never as one that looked and found nothing. Both
+workflows recorded that flag and then dropped it between two pipeline stages, so
+the mechanism added after a review reported five angles as six would not have
+caught the next one. `parallel-tasks.js` reports per task rather than per angle
+and is not covered here.
+
+It is deliberately not a coverage exercise. It stubs one agent call per angle and
+asserts on the workflow's own result and on the sign-off prompt, so the lens
+lists, the briefs and the prompts stay free to change; only the plumbing that
+carries the flag is fixed. Nothing it asserts needs the network or a provider
+CLI, which is why it sits in the policy job rather than behind the `changes`
+filter — a workflow edit compiles nothing and would otherwise be checked by no
+job at all.
+
 ## The Gate, and why the required check is not a build
 
 `ci.yml` has six jobs, and only one of them is a required status check.
@@ -64,10 +85,11 @@ point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, th
 `quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
 pipeline change is only ever proven by running it. **Skips:** `docs/`,
 `.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
-`.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
-that configure GitHub rather than the build. **Unclassified:** anything else — it
-builds, *and the job prints it by name*, which is the signal that the case
-statement needs a line rather than a silent guess in either direction.
+`.gitignore`, `.gitattributes`, the two Codex scripts, `scripts/test-workflows`,
+and the `.github` files that configure GitHub rather than the build.
+**Unclassified:** anything else — it builds, *and the job prints it by name*,
+which is the signal that the case statement needs a line rather than a silent
+guess in either direction.
 
 Both lists are explicit on purpose. An include-only list fails towards skipping,
 which is how a real change stops being tested; an exclude-only list fails towards
