@@ -45,8 +45,16 @@ public enum QuotaFormatting {
     ///
     /// `RelativeDateTimeFormatter` is absent from swift-corelibs-foundation, so the
     /// macOS and Linux front-ends share this instead of diverging on wording.
+    ///
+    /// The instant is display data — from a provider CLI, or from a cache an
+    /// older build wrote — so both ends of the axis are answered in words. The
+    /// conversion to `Int` used to sit above the `guard`, where an interval no
+    /// `Int` can hold trapped on every status render.
     public static func relativeReset(_ date: Date, from now: Date = Date()) -> String {
-        let seconds = Int(date.timeIntervalSince(now).rounded())
+        let interval = date.timeIntervalSince(now)
+        guard interval > 0 else { return "now" }
+        guard interval <= QuotaTime.reportingHorizon else { return "in over a year" }
+        let seconds = QuotaTime.wholeSeconds(interval)
         guard seconds > 0 else { return "now" }
         if seconds < 60 { return "in under a minute" }
 

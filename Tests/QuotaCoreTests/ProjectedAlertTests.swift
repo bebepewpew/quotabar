@@ -34,6 +34,16 @@ final class ProjectedAlertTests: XCTestCase {
         XCTAssertNotEqual(first.first?.identifier, next.first?.identifier)
     }
 
+    /// The cycle a forecast belongs to is a reset instant from a provider CLI,
+    /// so it can be a number no `Int` can hold. Clamped to the boundary, the
+    /// forecast is still identified rather than trapping on the way to a name.
+    func testTheIdentifierClampsACycleResetNoIntCanHold() throws {
+        let alert = try XCTUnwrap(AlertEvaluator.projectedAlerts(
+            for: [recommendation(kind: .projectedExhaustion,
+                                 resetAt: Date(timeIntervalSince1970: 1e19))]).first)
+        XCTAssertEqual(alert.identifier, "quota.Codex.session.\(Int.max).projected")
+    }
+
     /// Window keys, not labels: a provider renaming "Session" must not turn one
     /// cycle's forecast into two alerts.
     func testTheIdentifierUsesTheWindowKey() throws {
