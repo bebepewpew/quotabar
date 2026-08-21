@@ -160,3 +160,32 @@ public struct QuotaSnapshot: Identifiable, Sendable, Codable {
 
     public static func loading(_ provider: Provider) -> Self { .init(provider: provider) }
 }
+
+/// Resolving a saved menu-bar or tray selection against a fresh probe result.
+///
+/// Shared rather than duplicated in a front-end because it is an identity
+/// decision, not a presentation one: the window key identifies the quota and the
+/// label is display text a provider may reword between releases.
+extension QuotaSelection {
+    /// The window this selection points at, or `nil` when the provider is not
+    /// reporting that key right now.
+    ///
+    /// Matched on the window key alone. Two windows of one provider can share a
+    /// label — a Gemini stats view listing both `Flash` and `gemini-flash` yields
+    /// the keys `flash` and `gemini-flash` under the one display name — so a
+    /// label fallback binds a saved selection to a reading the user never chose.
+    /// A payload written before selections carried a key still resolves, because
+    /// `init(from:)` derives the key from the label on decode.
+    public func window(in snapshots: [QuotaSnapshot]) -> QuotaWindow? {
+        snapshots.first { $0.provider == provider }?.windows.first { $0.key == windowKey }
+    }
+
+    /// The same selection with its display label taken from the current probe
+    /// result, or unchanged when the provider is not reporting that key. The key
+    /// is never rewritten: a renamed window keeps the choice the user made, and an
+    /// absent one is left alone rather than repointed at some other window.
+    public func refreshingLabel(in snapshots: [QuotaSnapshot]) -> QuotaSelection {
+        guard let window = window(in: snapshots) else { return self }
+        return QuotaSelection(provider: provider, windowKey: window.key, windowLabel: window.label)
+    }
+}
