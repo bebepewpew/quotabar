@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Red Team"
+  short_description: "Build the hostile inputs and run them"
+  default_prompt: "Use $quotabar-red-team to attack this change following docs/agent-guides/red-team.md, landing each attack as a test under Tests/ and reporting landed and refuted separately."
+policy:
+  allow_implicit_invocation: false

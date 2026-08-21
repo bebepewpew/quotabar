@@ -45,9 +45,11 @@ sources under `Sources/`, ignoring `Tests/` and `.build/`.
 ./quotabar coverage --filter QuotaCore    # anything else goes to `swift test`
 ```
 
-At the time it was added the totals were **63.52% region / 73.19% line** (721
-regions, 1518 lines, on Linux). There is **no threshold**: CI reports the numbers
-and does not fail on them. Enforcement is a separate change.
+**The Linux CI job fails below 90% region.** The threshold was switched on only
+once the suite cleared it — 95.18% region and 98.27% line at the time — so it has
+never been a gate `main` could not pass. Raise it when the code genuinely supports
+a higher number; never exclude a file to reach one, and never lower it to land a
+change.
 
 Things worth knowing before you touch it:
 

@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar QA"
+  short_description: "Test the change and hunt tests that cannot fail"
+  default_prompt: "Use $quotabar-qa to plan and run the tests for this change against docs/agent-guides/qa-plan.md, and report what actually ran."
+policy:
+  allow_implicit_invocation: false

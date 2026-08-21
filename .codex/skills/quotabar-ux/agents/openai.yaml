@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Surface"
+  short_description: "Review what a user actually sees"
+  default_prompt: "Use $quotabar-ux to review the visible surface of this change against docs/agent-guides/ux-review.md, including the non-colour signal for every state."
+policy:
+  allow_implicit_invocation: false
