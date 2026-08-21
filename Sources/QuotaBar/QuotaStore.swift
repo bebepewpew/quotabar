@@ -178,7 +178,11 @@ final class QuotaStore: ObservableObject {
         }
     }
 
-    private func migrateMenuBarSelections() {
+    /// Re-points every saved selection at the window the latest refresh reported,
+    /// matching on the key or — for a choice saved before that key existed — the
+    /// label. Internal rather than private so the suite can exercise it without
+    /// driving a real refresh through the provider CLIs.
+    func migrateMenuBarSelections() {
         menuBarSelections = menuBarSelections.map { saved in
             guard let window = snapshots.first(where: { $0.provider == saved.provider })?.windows.first(where: {
                 $0.key == saved.windowKey || $0.label == saved.windowLabel
