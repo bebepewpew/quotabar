@@ -359,8 +359,10 @@ successful reading stays visible with the error beside it.
 
 All probes execute installed CLIs locally. Gemini runs inside a fixed-size
 pseudo-terminal with a bounded deadline; QuotaBar sends only `/stats` and
-terminates the complete process group afterward. Failed refreshes preserve the
-last successful values rather than clearing the corresponding card.
+terminates the complete process group afterward. How much a CLI can make
+QuotaBar hold is bounded too: a probe reads at most 8 MB from a stream before it
+abandons the run, and reports that rather than the flood. Failed refreshes
+preserve the last successful values rather than clearing the corresponding card.
 
 State is stored per platform: `UserDefaults` on macOS, and
 `${XDG_CONFIG_HOME:-~/.config}/quotabar/state.json` on Linux.

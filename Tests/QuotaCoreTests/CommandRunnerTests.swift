@@ -115,7 +115,7 @@ final class CommandRunnerTests: XCTestCase {
         }
     }
 
-    /// The message names the command, so the three failure kinds stay distinct,
+    /// The message names the command, so the failure kinds stay distinct,
     /// but it names it only when the name is plain: the path is resolved from
     /// `PATH` or from a login shell, so its last component is untrusted too.
     func testOnlyAPlainCommandNameIsQuotedBackInTheMessage() {
@@ -133,16 +133,88 @@ final class CommandRunnerTests: XCTestCase {
                      "a deadline's partial output is not a command failure's detail")
     }
 
-    /// Exit status, timeout and a stuck output stream have to stay tellable
-    /// apart: they need different things done about them.
-    func testTheThreeCommandFailuresKeepDistinctMessages() {
+    /// Exit status, timeout, a flood past the output ceiling and a stuck output
+    /// stream have to stay tellable apart: they need different things done
+    /// about them.
+    func testTheCommandFailuresKeepDistinctMessages() {
         let messages = [ProbeError.commandFailed(.init(command: "claude", status: 3, detail: "sk-live-key")),
                         .timeout(partialOutput: ""),
+                        .outputTooLarge,
                         .message("The CLI exited but left its output stream open")]
             .map { $0.errorDescription ?? "" }
-        XCTAssertEqual(Set(messages).count, 3, "\(messages)")
+        XCTAssertEqual(Set(messages).count, 4, "\(messages)")
         XCTAssertTrue(messages[0].contains("status 3"))
         XCTAssertFalse(messages[0].contains("sk-live-key"))
+    }
+
+    // MARK: - run: the output ceiling
+
+    /// A deadline bounds how long a child runs, not how much it writes, so
+    /// without a byte ceiling the child decides the resident size of a menu-bar
+    /// app that stays running. Past the cap the run is abandoned with its own
+    /// error rather than the flood being buffered and then thrown away.
+    func testAChildFloodingStandardOutputIsStoppedAtTheCap() throws {
+        let shell = try systemBinary("sh")
+        let started = Date()
+        XCTAssertThrowsError(try CommandRunner.run(
+            shell, ["-c", "head -c \(CommandRunner.maximumCapturedBytes + 1_048_576) /dev/zero"],
+            timeout: 8)) { error in
+            self.assertOutputTooLarge(error,
+                                      "a stream past the cap has its own error, not the exit code or the deadline")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4,
+                          "the cap has to end the run rather than the deadline doing it")
+    }
+
+    /// The same ceiling on the other stream, and it outranks the diagnostic: a
+    /// child that fails while writing megabytes of complaint must not have all
+    /// of it read just so the last 1_500 bytes can be reported.
+    func testAChildFloodingStandardErrorIsStoppedAtTheCap() throws {
+        let shell = try systemBinary("sh")
+        XCTAssertThrowsError(try CommandRunner.run(
+            shell, ["-c", "head -c \(CommandRunner.maximumCapturedBytes + 1_048_576) /dev/zero >&2; exit 1"],
+            timeout: 8)) { error in
+            self.assertOutputTooLarge(error)
+        }
+    }
+
+    /// The boundary: output of exactly the cap is ordinary output and comes back
+    /// whole. Only a child that writes *more* than the cap loses its run.
+    func testOutputOfExactlyTheCapIsReturnedIntact() throws {
+        let shell = try systemBinary("sh")
+        let output = try CommandRunner.run(
+            shell, ["-c", "head -c \(CommandRunner.maximumCapturedBytes) /dev/zero"], timeout: 20)
+        XCTAssertEqual(output.count, CommandRunner.maximumCapturedBytes)
+    }
+
+    /// Once the reader stops, nothing is draining that pipe: a child still
+    /// writing to it blocks in `write` and would sit there — with everything it
+    /// spawned — until something signals it. The cap has to take the complete
+    /// group down before it returns, the same way the deadline does.
+    func testTheCapTakesDownTheWholeProcessGroupIncludingAGrandchild() throws {
+        let shell = try systemBinary("sh")
+        let pidFile = scratch.appendingPathComponent("flood.pid").path
+        let heartbeat = scratch.appendingPathComponent("flood-heartbeat").path
+        let script = """
+        sleep 1
+        \(shell) -c 'while : ; do echo tick >> \(heartbeat) ; sleep 1 ; done' &
+        echo $! > \(pidFile)
+        head -c \(CommandRunner.maximumCapturedBytes * 8) /dev/zero
+        sleep 30
+        """
+
+        let started = Date()
+        XCTAssertThrowsError(try CommandRunner.run(shell, ["-c", script], timeout: 20)) { error in
+            self.assertOutputTooLarge(error)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "the teardown stays bounded")
+
+        let grandchild = try readPid(at: pidFile)
+        XCTAssertTrue(waitUntil(3) { self.hasExited(grandchild) },
+                      "the grandchild outlived the cap, so the process group was not terminated")
+        let ticks = fileSize(heartbeat)
+        Thread.sleep(forTimeInterval: 2.2)
+        XCTAssertEqual(fileSize(heartbeat), ticks, "something in the process group is still running")
     }
 
     // MARK: - run: deadlines and process groups
@@ -414,6 +486,13 @@ final class CommandRunnerTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func assertOutputTooLarge(_ error: Error, _ note: String = "",
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        guard case .outputTooLarge? = error as? ProbeError else {
+            return XCTFail("expected the output cap to fire, got: \(error). \(note)", file: file, line: line)
+        }
+    }
 
     private func systemBinary(_ name: String) throws -> String {
         let candidates = ["/bin/\(name)", "/usr/bin/\(name)"]

@@ -23,7 +23,8 @@ its whole mechanism, and it shapes the risk:
   stripped, percentages are clamped, and a command that fails is reported by name
   and exit status rather than by echoing what it printed.
 - External processes run under a deadline and are terminated as a complete process
-  group.
+  group, and how much output one can make QuotaBar buffer is capped as well, so a
+  chatty or malfunctioning CLI cannot decide how much memory the app holds.
 - Persisted state (quota percentages, window keys, notification markers) is stored
   in `UserDefaults` on macOS and `${XDG_CONFIG_HOME:-~/.config}/quotabar/state.json`
   on Linux. Nothing secret is written there.
