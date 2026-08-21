@@ -51,6 +51,11 @@ public final class UserDefaultsStateStore: StateStore, @unchecked Sendable {
 /// dropped from the set, because replaying it on the next unrelated write would
 /// push this instance's older value back over whatever the other process has
 /// stored since — the same clobber, one key at a time.
+///
+/// For the same reason a value this build cannot interpret — a bool, a null, a
+/// nested container, a key a newer build wrote — is carried through that write
+/// verbatim instead of being dropped along with every other key in the file.
+/// The accessors still report such a value as absent.
 public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
@@ -108,7 +113,7 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
 
     public init(url: URL? = nil) {
         self.url = url ?? Self.defaultURL()
-        contents = Self.read(self.url)
+        contents = Self.read(self.url) ?? [:]
     }
 
     public func data(forKey key: String) -> Data? {
@@ -141,9 +146,13 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
         }
     }
 
-    private static func read(_ url: URL) -> [String: JSONValue] {
+    /// The file as a dictionary, or `nil` when there is nothing to preserve:
+    /// no file, or bytes that are not a JSON object at all. A JSON object is
+    /// decoded whole even where this build cannot interpret the values, so one
+    /// unrecognised entry never costs the rest of the file.
+    private static func read(_ url: URL) -> [String: JSONValue]? {
         (try? Data(contentsOf: url))
-            .flatMap { try? JSONDecoder().decode([String: JSONValue].self, from: $0) } ?? [:]
+            .flatMap { try? JSONDecoder().decode([String: JSONValue].self, from: $0) }
     }
 
     /// Best effort: a state file we cannot write costs a cached snapshot, never a
@@ -152,7 +161,10 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
         withFileLock {
-            var merged = Self.read(url)
+            // A file that is not ours is not an empty one: fall back to what
+            // this instance holds rather than writing back a file stripped of
+            // every key it was carrying, the dedup map among them.
+            var merged = Self.read(url) ?? contents
             for key in written { merged[key] = contents[key] }
             guard let encoded = try? JSONEncoder().encode(merged) else { return }
             // Adopt the other process's keys so later reads are not stale.
@@ -180,13 +192,25 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
         FileLock.withExclusiveLock(at: FileLock.sidecarURL(for: url), body)
     }
 
+    /// `string` and `int` are the two shapes this store writes and the only two
+    /// its accessors return. The rest exist purely so any other JSON value
+    /// survives a decode-modify-encode cycle unchanged; matching on the first two
+    /// is what keeps an uninterpretable value reading as absent.
     private enum JSONValue: Codable {
-        case string(String), int(Int)
+        case string(String), int(Int), double(Double), bool(Bool), null
+        case array([JSONValue]), object([String: JSONValue])
 
         init(from decoder: Decoder) throws {
             let container = try decoder.singleValueContainer()
-            if let value = try? container.decode(Int.self) { self = .int(value) }
-            else { self = .string(try container.decode(String.self)) }
+            // Bool before Int: a JSON `true` is not the integer 1, and writing it
+            // back as one would corrupt a newer build's setting.
+            if container.decodeNil() { self = .null }
+            else if let value = try? container.decode(Bool.self) { self = .bool(value) }
+            else if let value = try? container.decode(Int.self) { self = .int(value) }
+            else if let value = try? container.decode(Double.self) { self = .double(value) }
+            else if let value = try? container.decode(String.self) { self = .string(value) }
+            else if let value = try? container.decode([JSONValue].self) { self = .array(value) }
+            else { self = .object(try container.decode([String: JSONValue].self)) }
         }
 
         func encode(to encoder: Encoder) throws {
@@ -194,6 +218,11 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
             switch self {
             case .string(let value): try container.encode(value)
             case .int(let value): try container.encode(value)
+            case .double(let value): try container.encode(value)
+            case .bool(let value): try container.encode(value)
+            case .null: try container.encodeNil()
+            case .array(let value): try container.encode(value)
+            case .object(let value): try container.encode(value)
             }
         }
     }

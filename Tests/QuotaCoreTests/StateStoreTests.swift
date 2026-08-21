@@ -284,12 +284,83 @@ final class StateStoreTests: XCTestCase {
         XCTAssertNil(store.data(forKey: "snapshot"))
     }
 
-    /// A JSON object whose values are neither strings nor integers is not a state
-    /// file this version wrote; it is discarded rather than trapping.
-    func testStateFileWithUnsupportedValueTypesIsIgnored() throws {
+    /// A value shape this build has no accessor for reads as absent — but the
+    /// file is still a state file, and the keys it can read are unaffected.
+    func testAValueThisBuildCannotInterpretReadsAsAbsent() throws {
         let url = stateURL()
-        try Data(#"{"interval":{"nested":true}}"#.utf8).write(to: url)
-        XCTAssertNil(JSONFileStateStore(url: url).integer(forKey: "interval"))
+        try Data(#"{"interval":{"nested":true},"flag":true,"nothing":null,"fraction":1.5,"snapshot":"Y2FjaGVk"}"#.utf8)
+            .write(to: url)
+
+        let store = JSONFileStateStore(url: url)
+        for key in ["interval", "flag", "nothing", "fraction"] {
+            XCTAssertNil(store.integer(forKey: key), "\(key) is not an integer this build wrote")
+            XCTAssertNil(store.data(forKey: key), "\(key) is not data this build wrote")
+        }
+        XCTAssertEqual(store.data(forKey: "snapshot"), Data("cached".utf8),
+                       "one unreadable value must not cost the readable keys")
+    }
+
+    /// The acceptance case: one key this build cannot decode must not take the
+    /// rest of the file with it on the next write. Settings, cached snapshots and
+    /// the dedup map all live here, and losing the last of those re-delivers
+    /// alerts the user has already seen.
+    func testAKeyThisBuildCannotDecodeKeepsItsSiblingsAcrossAWrite() throws {
+        let url = stateURL()
+        let snapshot = Data("cached snapshot".utf8).base64EncodedString()
+        try Data(#"{"QuotaBar.futureFlag":true,"QuotaBar.cachedSnapshots.v1":"\#(snapshot)"}"#.utf8)
+            .write(to: url)
+
+        JSONFileStateStore(url: url).setInteger(30, forKey: "QuotaBar.refreshIntervalMinutes")
+
+        let text = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        XCTAssertTrue(text.contains(#""QuotaBar.futureFlag":true"#),
+                      "a value written by a newer build survives verbatim, not as 1 and not at all: \(text)")
+        XCTAssertTrue(text.contains(#""QuotaBar.cachedSnapshots.v1":"\#(snapshot)""#),
+                      "the sibling key is byte for byte what it was: \(text)")
+
+        let reader = JSONFileStateStore(url: url)
+        XCTAssertEqual(reader.data(forKey: "QuotaBar.cachedSnapshots.v1"), Data("cached snapshot".utf8))
+        XCTAssertEqual(reader.integer(forKey: "QuotaBar.refreshIntervalMinutes"), 30)
+        XCTAssertNil(reader.integer(forKey: "QuotaBar.futureFlag"), "a bool is still not an integer")
+        XCTAssertNil(reader.data(forKey: "QuotaBar.futureFlag"))
+    }
+
+    /// Every JSON shape round-trips, so the rule holds whatever a newer build
+    /// chose to store — including inside arrays and nested objects.
+    func testEveryJSONShapeSurvivesAWriteUnchanged() throws {
+        let url = stateURL()
+        let shapes = [#""flag":true"#, #""off":false"#, #""nothing":null"#, #""fraction":1.5"#,
+                      #""text":"plain""#, #""list":[1,"two",false,null,{"deep":[]}]"#,
+                      #""nested":{"a":{"b":[1.25]}}"#]
+        try Data("{\(shapes.joined(separator: ","))}".utf8).write(to: url)
+
+        JSONFileStateStore(url: url).setData(Data("bytes".utf8), forKey: "snapshot")
+
+        let text = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        for shape in shapes {
+            XCTAssertTrue(text.contains(shape), "\(shape) did not survive the write: \(text)")
+        }
+        XCTAssertEqual(JSONFileStateStore(url: url).data(forKey: "snapshot"), Data("bytes".utf8))
+    }
+
+    /// Bytes that are not a JSON object at all carry nothing to preserve, but they
+    /// must not empty out what this process is already holding: adopting an
+    /// unreadable file as `[:]` would drop the dedup map and re-alert.
+    func testAFileThatIsNotAJSONObjectKeepsTheKeysThisProcessHolds() throws {
+        let url = stateURL()
+        let dedup = Data("delivered".utf8)
+        JSONFileStateStore(url: url).setData(dedup, forKey: AlertEvaluator.deliveredKey)
+
+        let store = JSONFileStateStore(url: url)
+        XCTAssertEqual(store.data(forKey: AlertEvaluator.deliveredKey), dedup)
+
+        try Data("[1,2,3]".utf8).write(to: url)
+        store.setInteger(30, forKey: "interval")
+
+        XCTAssertEqual(store.data(forKey: AlertEvaluator.deliveredKey), dedup,
+                       "an unreadable file must not cost this process its dedup map")
+        XCTAssertEqual(JSONFileStateStore(url: url).data(forKey: AlertEvaluator.deliveredKey), dedup,
+                       "and the write puts it back on disk")
     }
 
     /// Persistence is best effort: a state file that cannot be created costs a
