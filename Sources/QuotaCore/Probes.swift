@@ -371,6 +371,9 @@ struct CodexProbe: QuotaProbe {
         #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"QuotaBar","title":"QuotaBar","version":"0.1.0"},"capabilities":{}}}"#
     static let initializedNotification = #"{"method":"initialized"}"#
     static let rateLimitsRequest = #"{"id":2,"method":"account/rateLimits/read"}"#
+    /// One message for every shape of unreadable reply: a payload that is not a
+    /// result object, and a window inside one whose percentage is not a number.
+    static let unreadableReply = "Codex returned an unreadable quota response. Refresh after updating Codex."
 
     let runner: any ProbeRunner
 
@@ -401,9 +404,9 @@ struct CodexProbe: QuotaProbe {
         guard let reply = session.waitForLine(matching: { Self.identifier(of: $0) == 2 },
                                               before: deadline, transcript: &transcript),
               let result = Self.jsonObject(reply)?["result"] as? [String: Any] else {
-            throw Self.failure(transcript, detail: "Codex returned an unreadable quota response. Refresh after updating Codex.")
+            throw Self.failure(transcript, detail: Self.unreadableReply)
         }
-        return Self.parse(result)
+        return try Self.parse(result)
     }
 
     static func jsonObject(_ line: String) -> [String: Any]? {
@@ -423,23 +426,37 @@ struct CodexProbe: QuotaProbe {
         return .unsupported(detail)
     }
 
-    static func parse(_ result: [String: Any]) -> QuotaSnapshot {
+    /// Reads the quota windows out of an `account/rateLimits/read` result, or
+    /// throws the reason the payload could not be read.
+    ///
+    /// A window whose percentage is missing, quoted `"NaN"` or otherwise not a
+    /// finite number is a failed refresh, not a `0%` window. Inventing the zero
+    /// both reported a quota nobody measured and, because the snapshot then
+    /// looked successful, let it overwrite — or, with no windows at all, delete —
+    /// the last good reading the cache was holding. Throwing keeps the retention
+    /// seam in `QuotaEngine.load` and `SnapshotCache.update` in charge instead. A
+    /// percentage that *is* a number is still clamped rather than refused, since
+    /// `-5` and `250` are Codex rounding, not a broken payload.
+    static func parse(_ result: [String: Any]) throws -> QuotaSnapshot {
         let root = (result["rateLimits"] as? [String: Any]) ?? result
         let plan = root["planType"] as? String ?? root["plan_type"] as? String
         var windows: [QuotaWindow] = []
-        func add(_ value: Any?, label: String) {
+        func add(_ value: Any?, label: String) throws {
             guard let item = value as? [String: Any] else { return }
-            let used = jsonNumber(item["usedPercent"]) ?? jsonNumber(item["used_percent"]) ?? 0
+            guard let used = jsonNumber(item["usedPercent"]) ?? jsonNumber(item["used_percent"]) else {
+                throw ProbeError.unsupported(Self.unreadableReply)
+            }
             let timestamp = jsonNumber(item["resetsAt"]) ?? jsonNumber(item["resets_at"])
             let minutes = (jsonNumber(item["windowDurationMins"]) ?? jsonNumber(item["window_duration_mins"])).map { Int($0) }
             let resolvedLabel = minutes.map { $0 >= 1_440 ? "Weekly" : ($0 <= 360 ? "Session" : label) } ?? label
             windows.append(.init(label: resolvedLabel, usedPercent: min(max(used, 0), 100), resetAt: timestamp.map(Date.init(timeIntervalSince1970:))))
         }
-        add(root["primary"], label: "Session")
-        add(root["secondary"], label: "Weekly")
+        try add(root["primary"], label: "Session")
+        try add(root["secondary"], label: "Weekly")
         if windows.isEmpty, let limits = root["limits"] as? [[String: Any]] {
-            for (index, item) in limits.enumerated() { add(item, label: index == 0 ? "Session" : "Window \(index + 1)") }
+            for (index, item) in limits.enumerated() { try add(item, label: index == 0 ? "Session" : "Window \(index + 1)") }
         }
-        return .init(provider: .codex, windows: windows, plan: plan, error: windows.isEmpty ? "No active quota windows" : nil)
+        guard !windows.isEmpty else { throw ProbeError.unsupported("No active quota windows") }
+        return .init(provider: .codex, windows: windows, plan: plan)
     }
 }

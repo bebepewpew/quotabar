@@ -109,6 +109,32 @@ final class ProbeFetchTests: XCTestCase {
         }
     }
 
+    /// A reply that is shaped right but carries a window without a percentage is
+    /// the same failure as an unreadable one: `fetch()` refuses it instead of
+    /// handing back an invented 0%, and the child is still torn down.
+    func testCodexFetchRejectsAWindowWithoutAPercent() {
+        let server = FakeCodexServer()
+        server.rateLimitsReply = """
+        {"id":2,"result":{"rateLimits":{"planType":"plus",\
+        "primary":{"resetsAt":2000000000,"windowDurationMins":300},\
+        "secondary":{"usedPercent":71,"windowDurationMins":10080}}}}
+        """
+        let runner = FakeProbeRunner(executables: ["codex": "/usr/bin/codex"], session: server)
+
+        XCTAssertEqual(message(from: { try CodexProbe(runner: runner).fetch() }),
+                       "Codex returned an unreadable quota response. Refresh after updating Codex.")
+        XCTAssertEqual(server.closeCount, 1, "a malformed payload must not orphan the child")
+    }
+
+    func testCodexFetchRejectsAReplyHoldingNoQuotaWindows() {
+        let server = FakeCodexServer()
+        server.rateLimitsReply = #"{"id":2,"result":{"rateLimits":{"planType":"plus"}}}"#
+        let runner = FakeProbeRunner(executables: ["codex": "/usr/bin/codex"], session: server)
+
+        XCTAssertEqual(message(from: { try CodexProbe(runner: runner).fetch() }), "No active quota windows")
+        XCTAssertEqual(server.closeCount, 1)
+    }
+
     func testCodexFetchClosesTheSessionWhenSendingFails() {
         let server = FakeCodexServer()
         server.sendError = ProbeError.message("broken pipe")

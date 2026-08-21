@@ -3,13 +3,13 @@ import Foundation
 @testable import QuotaCore
 
 final class QuotaCoreTests: XCTestCase {
-    func testParsesCodexWindows() {
+    func testParsesCodexWindows() throws {
         let result: [String: Any] = ["rateLimits": [
             "planType": "plus",
             "primary": ["usedPercent": NSNumber(value: 23), "resetsAt": NSNumber(value: 2_000_000_000)],
             "secondary": ["usedPercent": NSNumber(value: 71), "resetsAt": NSNumber(value: 2_000_100_000)]
         ]]
-        let value = CodexProbe.parse(result)
+        let value = try CodexProbe.parse(result)
         XCTAssertEqual(value.plan, "plus")
         XCTAssertEqual(value.windows.count, 2)
         XCTAssertEqual(value.windows[0].usedPercent, 23)
@@ -17,13 +17,13 @@ final class QuotaCoreTests: XCTestCase {
 
     /// swift-corelibs-foundation hands back plain `Int`/`Double` rather than
     /// `NSNumber`, which used to collapse every Codex quota to 0% on Linux.
-    func testParsesCodexWindowsFromUnbridgedJSONNumbers() {
+    func testParsesCodexWindowsFromUnbridgedJSONNumbers() throws {
         let result: [String: Any] = ["rateLimits": [
             "planType": "pro",
             "primary": ["usedPercent": 42.5, "resetsAt": 2_000_000_000, "windowDurationMins": 300],
             "secondary": ["usedPercent": 88, "resetsAt": Double(2_000_100_000), "windowDurationMins": 10_080]
         ]]
-        let value = CodexProbe.parse(result)
+        let value = try CodexProbe.parse(result)
         XCTAssertEqual(value.plan, "pro")
         XCTAssertEqual(value.windows.map(\.usedPercent), [42.5, 88])
         XCTAssertEqual(value.windows.map(\.label), ["Session", "Weekly"])
