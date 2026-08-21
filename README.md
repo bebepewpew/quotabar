@@ -121,11 +121,21 @@ leaves your machine:
 | has gone unused | four or more cycles at 1% or less |
 | has headroom | one provider is full while another is half empty |
 
-Advice is withheld unless there are at least four complete cycles, each watched
-for at least 60% of its length. A laptop that was shut for four days understates
-that week, and `advise` says *"not enough history yet"* rather than reading the
-gap as a quiet week. History is only recorded while something is running to
-record it — the macOS app, `quotabar --watch`, or each one-shot invocation.
+Four of those rules read completed cycles, and are withheld unless there are at
+least four complete cycles, each watched for at least 60% of its length. A
+laptop that was shut for four days understates that week, so `advise` says
+*"not enough history yet"* for that window rather than reading the gap as a
+quiet week.
+
+The other two — *on course to run out before it resets* and *has headroom* — are
+computed from the latest readings instead, so they can appear on the first day:
+the projection extrapolates the trend of the last three hours, and the headroom
+note compares current levels alone. The `--notify` forecast rests on the first
+of those.
+
+A provider whose CLI has not reported for 45 days is left out of every rule; it
+was most likely uninstalled. History is only recorded while something is running
+to record it — the macOS app, `quotabar --watch`, or each one-shot invocation.
 
 ## Requirements
 
