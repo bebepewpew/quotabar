@@ -49,13 +49,21 @@ struct SystemProbeRunner: ProbeRunner {
 /// swift-corelibs-foundation they arrive as plain `Int`/`Double`, so an
 /// `as? NSNumber` cast silently yields zero for every Codex quota on Linux.
 func jsonNumber(_ value: Any?) -> Double? {
+    let number: Double?
     switch value {
-    case let number as NSNumber: return number.doubleValue
-    case let number as Double: return number
-    case let number as Int: return Double(number)
-    case let text as String: return Double(text)
-    default: return nil
+    case let value as NSNumber: number = value.doubleValue
+    case let value as Double: number = value
+    case let value as Int: number = Double(value)
+    case let value as String: number = Double(value)
+    default: number = nil
     }
+    // Untrusted CLI output can carry `"NaN"` or `1e400`, and `Double(_:)` parses
+    // both. NaN then survives `min(max(used, 0), 100)` unclamped — comparing it
+    // against anything is false, so neither bound applies — and a NaN percent
+    // makes `JSONEncoder` reject the whole cached snapshot. Neither is a number
+    // a quota or a reset timestamp can be built from.
+    guard let number, number.isFinite else { return nil }
+    return number
 }
 
 extension StringProtocol {
