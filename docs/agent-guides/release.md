@@ -27,7 +27,9 @@ Then choose `patch`, `minor` or `major`. There is no other input.
 ## What the run does, in order
 
 1. **version** — refuses a non-`main` ref, derives the next version from the newest
-   v-tag, and fails if that tag already exists.
+   v-tag, fails if that tag already exists, and refuses to bump from a tag that has
+   no published GitHub release, because that is an unfinished release to resume
+   rather than a version to bump from.
 2. **build-linux** and **build-macos** — stamp the version into
    `Sources/QuotaBarCLI/Arguments.swift` and `Resources/Info.plist`
    **without committing it**, so the tag still points at the untouched commit the
@@ -36,8 +38,10 @@ Then choose `patch`, `minor` or `major`. There is no other input.
    `ldd`. macOS builds `--arch arm64 --arch x86_64` and asserts both slices.
    Both assert `quotabar --version` equals the computed version.
 3. **tag** — **refuses to tag a dirty checkout**, then pushes only
-   `refs/tags/<tag>`, pointing at the commit the run started from. Its own job,
-   because the two jobs after it both need the tag to already exist.
+   `refs/tags/<tag>`, pointing at the commit the run started from — leaving a tag
+   that already resolves to this run's commit alone, so the job can be re-run, and
+   refusing one that resolves to anything else. Its own job, because the two jobs
+   after it both need the tag to already exist.
 4. **tap** — renders the formula from `packaging/homebrew/quotabar.rb` against the
    tagged source archive, then `brew audit`s, `brew install --build-from-source`s
    and `brew test`s it before pushing it to `bebepewpew/homebrew-tap`. The formula
@@ -113,30 +117,53 @@ already decided.
 
 ## When a release goes wrong
 
-- **Never re-tag, never force-push a tag, and never delete one.** A published tag
-  is what signatures and provenance are bound to, and the Homebrew formula may
-  already point at its source archive.
-- A failed run before the **tag** job: nothing happened. Fix forward on `main` and
-  dispatch again; the version number is still free.
-- A failed run after the tag exists is the case worth knowing, because the tag is
-  pushed two jobs before anything is published:
-  - **Nothing is published yet.** No GitHub release, no container image. What
-    exists is an annotated tag, its automatic source archive, and possibly a tap
-    commit. Users see none of it unless they were already looking at tags.
-  - **Transient failure** — a rate-limited `brew audit --online`, a network
-    timeout, a `brew install` that hit the 45-minute limit: use **Re-run failed
-    jobs** on the same run. The successful jobs keep their outputs, the artifacts
-    are still there, and `tag` is skipped rather than repeated. `tap` is written
-    to be re-runnable: it re-resolves the tag against `GITHUB_SHA` and treats an
-    unchanged formula as a proven no-op.
-  - **A real defect in the formula or the workflow** — re-running cannot help,
-    because every job checks out the commit the run started from. Fix it on
-    `main` and cut the **next patch**; the broken version number is spent. Leave
-    the orphan tag alone.
-- A `tap` job that pushed and a `release` job that then failed leaves the tap
-  serving a version with no GitHub release. `brew install` still works — the
-  formula builds from the tag's source archive — so fix forward rather than
-  reaching for the tag.
+**Never re-tag, never force-push a tag, and never delete one.** A published tag is
+what signatures and provenance are bound to, and the Homebrew formula may already
+point at its source archive.
+
+The **tag** job is the line that decides the recovery, because it runs two jobs
+before anything is published:
+
+- **A failure before it.** Nothing happened: no tag, no formula, no release. Fix
+  forward on `main` and dispatch again; the version number is still free.
+- **A failure at it or after it.** The version number is spent, but all that
+  exists is an annotated tag, its automatic source archive, and possibly a tap
+  commit. Users see none of that unless they were already looking at tags.
+
+For a failure at or after the tag, **resume the run — open it and choose "Re-run
+failed jobs" — rather than dispatching a new one.** A re-run reuses the outputs of
+the jobs that succeeded, so it carries on against the tag that already exists
+instead of cutting a version beside it, and the build artifacts are still on the
+run. Two jobs are written for exactly that and say so in their comments: `tag`
+re-resolves the tag and leaves one that already points at the released commit
+alone — refusing one that points anywhere else — and `tap` treats an unchanged
+formula as a proven no-op.
+
+The `version` job enforces it. If the tag it would treat as `previous` has no
+published GitHub release, it refuses to bump and names "Re-run failed jobs" as the
+recovery, because dispatching again would cut a new version on top of a
+half-released one and hand it an empty changelog — `--notes-start-tag` would then
+span no merged pull requests. Re-running does not re-run `version` at all, so the
+guard never stands in the way of resuming.
+
+A re-run only rescues a **transient** failure: a rate-limited `brew audit
+--online`, a network timeout, a `brew install` that hit the 45-minute bound. **A
+real defect in the formula, the workflow or the sources cannot be re-run away**,
+because every job checks out the commit the run started from. Fix it on `main`,
+and then close the orphan tag out before cutting the next patch — the guard above
+refuses the dispatch for as long as that tag has no release behind it. Publish a
+GitHub release for the orphan tag, saying in one line that the run failed and the
+version is spent, and leave the tag itself alone: the tap may already serve a
+formula that builds from its source archive.
+
+The one case a re-run cannot resolve on its own is a `gh release create` that
+published the release and then failed part-way through its uploads: re-running the
+job hits a release that already exists. Delete the **release**, never the tag, then
+re-run the job.
+
+A `tap` job that pushed and a `release` job that then failed leaves the tap serving
+a version with no GitHub release. `brew install` still works — the formula builds
+from the tag's source archive — so resume the run rather than reaching for the tag.
 
 ## Verification is part of the release
 

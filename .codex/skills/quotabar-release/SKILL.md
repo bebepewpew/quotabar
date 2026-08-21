@@ -16,8 +16,8 @@ since the last tag carrying exactly one category label, titles that read as
 changelog lines, and a newest tag that is a plain `vMAJOR.MINOR.PATCH` — a `-rc`
 suffix sorts above it and stops the run.
 
-**Never re-tag and never force-push a tag.** A failure after the tag exists is
-re-cut as the next patch; the broken version number is spent.
+**Never re-tag and never force-push a tag.** A failure at or after the tag push
+is resumed with "Re-run failed jobs", never re-dispatched.
 
 **The full guide — the run in order, the artifact and signature set, why the
 formula builds from source, and the recovery paths — is
