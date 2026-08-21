@@ -62,8 +62,10 @@ still surfaces both from there, and the root stays short enough to read.
 | Module | Platforms | What it is |
 | --- | --- | --- |
 | `QuotaCore` | macOS, Linux | Probes, discovery, caching, threshold alerts, formatting |
+| `QuotaTray` | macOS, Linux | The tray icon, its menu model and the D-Bus StatusNotifierItem client. Built and tested on both platforms; only the Linux tray ships it |
 | `QuotaBar` | macOS | SwiftUI menu-bar app |
 | `QuotaBarCLI` | macOS, Linux | The `quotabar` command |
+| `QuotaTrayApp` | Linux | The `quotabar-tray` command, the tray front end |
 
 ## Features
 
