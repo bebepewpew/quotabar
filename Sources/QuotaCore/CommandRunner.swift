@@ -129,7 +129,7 @@ public enum CommandRunner {
         if process.processIdentifier > 1 { _ = setpgid(process.processIdentifier, process.processIdentifier) }
         #endif
         // Same reason the stdin write end is closed below: the child holds its
-        // own copies, and `readDataToEndOfFile` returns only once every other
+        // own copies, and a reader reaches end of file only once every other
         // write end is gone. This one has never been observed to stall — unlike
         // `ProcessLineSession`, which held its pipe in a stored property and did
         // — so it is here to stop the invariant depending on when Foundation
@@ -139,25 +139,22 @@ public enum CommandRunner {
         Self.liveChildren.insert(process.processIdentifier)
         defer { Self.liveChildren.remove(process.processIdentifier) }
 
-        let stdout = LockedData(), stderr = LockedData(), readers = DispatchGroup()
         // `readDataToEndOfFile` would let the child decide how much memory this
-        // process holds, so each stream is drained in chunks up to a fixed cap.
-        // A reader that reaches the cap stops there and wakes the wait below,
+        // process holds, and could not be told to stop, so each stream gets a
+        // `PipeReader`: chunked, bounded by a fixed cap, and cancellable. A
+        // reader that reaches the cap stops there and wakes the wait below,
         // which takes the process group down and reports the cap rather than
         // whatever the deadline would have said several seconds later.
+        let readers = DispatchGroup()
         let overflowed = LockedFlag()
-        for (pipe, sink) in [(output, stdout), (errors, stderr)] {
-            readers.enter()
-            DispatchQueue.global(qos: .utility).async {
-                let capped = Self.readCapped(pipe.fileHandleForReading, limit: Self.maximumCapturedBytes)
-                sink.set(capped.data)
-                if capped.truncated {
-                    overflowed.raise()
-                    attention.signal()
-                }
-                readers.leave()
-            }
+        let reportOverflow: @Sendable () -> Void = {
+            overflowed.raise()
+            attention.signal()
         }
+        let stdout = PipeReader(output, in: readers,
+                                limit: Self.maximumCapturedBytes, onOverflow: reportOverflow)
+        let stderr = PipeReader(errors, in: readers,
+                                limit: Self.maximumCapturedBytes, onOverflow: reportOverflow)
         // A child that read no stdin and exited leaves this write failing with
         // `EPIPE`. That is not the interesting failure: the exit status and the
         // child's own stderr below say far more than "broken pipe", so the write
@@ -171,14 +168,21 @@ public enum CommandRunner {
             Self.terminate(process)
             _ = attention.wait(timeout: .now() + 1)
             Self.signalGroup(of: process, SIGKILL)
-            _ = readers.wait(timeout: .now() + 2)
-            // The readers above are waited on before giving up so that whatever
-            // the child printed still travels with the error. A CLI that says
-            // what went wrong and only then hangs — clearing up its own
-            // children, say — has already answered the caller's question.
+            // The readers are waited on before giving up so that whatever the
+            // child printed still travels with the error. A CLI that says what
+            // went wrong and only then hangs — clearing up its own children,
+            // say — has already answered the caller's question.
+            if readers.wait(timeout: .now() + 2) == .timedOut {
+                // Whatever still holds the write ends left the process group, so
+                // the kill above never reached it — a grandchild that called
+                // `setsid()` is exactly this case. Both readers would then sit on
+                // a thread and a descriptor apiece until the process exits, and a
+                // menu bar refreshing for weeks accumulates a pair per deadline.
+                Self.stopReading(stdout, stderr, in: readers)
+            }
             throw ProbeError.timeout(partialOutput: String(decoding: stdout.value, as: UTF8.self))
         }
-        if overflowed.isSet { throw Self.abandonAfterOverflow(process, readers, output, errors) }
+        if overflowed.isSet { throw Self.abandonAfterOverflow(process, readers, stdout, stderr) }
         if readers.wait(timeout: .now() + 2) == .timedOut {
             // The command itself is gone, so whatever still holds the pipes is
             // something it spawned. Leaving that behind would outlive the
@@ -186,15 +190,15 @@ public enum CommandRunner {
             Self.signalGroup(of: process, SIGTERM)
             if readers.wait(timeout: .now() + 1) == .timedOut {
                 Self.signalGroup(of: process, SIGKILL)
-                _ = readers.wait(timeout: .now() + 1)
+                if readers.wait(timeout: .now() + 1) == .timedOut {
+                    Self.stopReading(stdout, stderr, in: readers)
+                }
             }
-            try? output.fileHandleForReading.close()
-            try? errors.fileHandleForReading.close()
             throw ProbeError.message("The CLI exited but left its output stream open")
         }
         // The child can exit long before whatever it spawned fills a stream, so
         // the cap is checked again now the readers are done.
-        if overflowed.isSet { throw Self.abandonAfterOverflow(process, readers, output, errors) }
+        if overflowed.isSet { throw Self.abandonAfterOverflow(process, readers, stdout, stderr) }
         guard process.terminationStatus == 0 else {
             // What the child printed goes into the failure as `detail`, never
             // into the message: it is untrusted text to be classified, not
@@ -229,39 +233,24 @@ public enum CommandRunner {
             .replacingOccurrences(of: "[", with: "\\[") + "\""
     }
 
-    /// Drains a stream to end of file, keeping at most `limit` bytes and
-    /// reporting whether the child wrote more than that. Reading in chunks
-    /// rather than through `readDataToEndOfFile` is the whole point: the loop
-    /// can stop, and what it holds is bounded by the cap plus the chunk that
-    /// crossed it.
-    private static func readCapped(_ handle: FileHandle, limit: Int) -> (data: Data, truncated: Bool) {
-        var captured = Data()
-        var seen = 0
-        while true {
-            let chunk = handle.availableData
-            if chunk.isEmpty { return (captured, false) }
-            seen += chunk.count
-            guard seen <= limit else {
-                captured.append(chunk.prefix(max(0, limit - captured.count)))
-                return (captured, true)
-            }
-            captured.append(chunk)
-        }
-    }
-
     /// Ends a run the byte cap cut short. Nothing is draining that stream any
     /// more, so a child still writing to it would block in `write` and outlive
     /// this call: the complete group goes down, with the usual escalation, before
     /// the error is returned.
+    ///
+    /// The other reader may still be waiting on a stream that never ends, so it
+    /// is cancelled rather than left holding a thread and a descriptor — the
+    /// same reason the deadline path does. Neither pipe is closed from here: a
+    /// `PipeReader` is the only thing that closes the handle it reads.
     private static func abandonAfterOverflow(_ process: Process, _ readers: DispatchGroup,
-                                             _ output: Pipe, _ errors: Pipe) -> ProbeError {
+                                             _ stdout: PipeReader, _ stderr: PipeReader) -> ProbeError {
         terminate(process)
         if readers.wait(timeout: .now() + 1) == .timedOut {
             signalGroup(of: process, SIGKILL)
-            _ = readers.wait(timeout: .now() + 1)
+            if readers.wait(timeout: .now() + 1) == .timedOut {
+                stopReading(stdout, stderr, in: readers)
+            }
         }
-        try? output.fileHandleForReading.close()
-        try? errors.fileHandleForReading.close()
         return .outputTooLarge
     }
 
@@ -269,6 +258,21 @@ public enum CommandRunner {
         guard process.processIdentifier > 1 else { return }
         signalGroup(of: process, SIGTERM)
         process.terminate()
+    }
+
+    /// Ends readers that are still waiting on output nobody is going to send,
+    /// and waits — bounded, like everything else here — for them to hand their
+    /// threads and descriptors back before the caller is told the run failed.
+    ///
+    /// Cancellation is cooperative because the obvious alternative is worse:
+    /// closing a descriptor out from under a blocked reader does not wake it on
+    /// Linux, and the reader then trips the `try!` inside Foundation the next
+    /// time it touches that descriptor — a leaked pipe traded for a crashed menu
+    /// bar. A `PipeReader` closes its own handle instead, so no descriptor is
+    /// ever pulled out from under the only thread that reads it.
+    private static func stopReading(_ readers: PipeReader..., in group: DispatchGroup) {
+        for reader in readers { reader.cancel() }
+        _ = group.wait(timeout: .now() + 1)
     }
 
     /// Process groups of children that are running right now.
@@ -439,11 +443,109 @@ final class DiscoveryMemo: @unchecked Sendable {
     }
 }
 
-private final class LockedData: @unchecked Sendable {
+/// Collects everything a child writes to one of its output pipes, on a thread of
+/// its own, up to a byte ceiling, and can be told to stop and let the pipe go.
+///
+/// `readDataToEndOfFile()` can be told neither of those things. It returns only
+/// once every write end is closed — which a grandchild that escaped the process
+/// group can prevent for as long as the app runs — and it lets the child decide
+/// how much memory this process holds on the way. There is no safe way to take
+/// the descriptor away from it either: closing the handle leaves the reader
+/// blocked on Linux and then traps the whole process on Foundation's `try!` when
+/// it reads again. So the descriptor is read directly, in short waits and
+/// bounded chunks, and the reader — the only thing that ever closes this handle
+/// — closes it on the way out.
+private final class PipeReader: @unchecked Sendable {
+    /// How long a reader waits for output before looking at `stopped` again.
+    /// Short enough not to hold up a deadline that is already overdue, long
+    /// enough to cost nothing on a run that behaves.
+    private static let waitMilliseconds: Int32 = 100
+    private static let bufferSize = 32 * 1_024
+
+    private let handle: FileHandle
+    /// The most this reader will retain before it gives up on the stream.
+    private let limit: Int
+    /// Told once, when the child writes past `limit`, so the caller's wait can
+    /// end there rather than running the deadline out on a flood.
+    private let onOverflow: @Sendable () -> Void
     private let lock = NSLock()
     private var storage = Data()
+    private var stopped = false
+
+    /// Starts reading straight away and leaves `group` when the pipe is done
+    /// with, whether that is end of file, the byte ceiling or a cancellation.
+    init(_ pipe: Pipe, in group: DispatchGroup, limit: Int, onOverflow: @escaping @Sendable () -> Void) {
+        handle = pipe.fileHandleForReading
+        self.limit = limit
+        self.onOverflow = onOverflow
+        group.enter()
+        DispatchQueue.global(qos: .utility).async { [self] in
+            drain()
+            group.leave()
+        }
+    }
+
+    /// Everything read so far.
     var value: Data { lock.withLock { storage } }
-    func set(_ data: Data) { lock.withLock { storage = data } }
+
+    /// Asks the reader to give up. It closes the pipe on its way out, within one
+    /// wait interval of this call.
+    func cancel() { lock.withLock { stopped = true } }
+
+    /// Keeps what fits under the ceiling and reports whether reading may go on.
+    /// A chunk that crosses the ceiling is kept only as far as the ceiling, so
+    /// what this holds is bounded by `limit` exactly rather than by `limit` plus
+    /// however large the crossing read happened to be.
+    private func accept(_ bytes: UnsafePointer<UInt8>, count: Int) -> Bool {
+        lock.lock()
+        let room = max(0, limit - storage.count)
+        storage.append(bytes, count: Swift.min(count, room))
+        let past = count > room
+        lock.unlock()
+        return !past
+    }
+
+    private func drain() {
+        #if os(Windows)
+        // `poll` is POSIX-only; the cancellable equivalent is an overlapped read,
+        // and it belongs with a Windows front-end.
+        let data = handle.readDataToEndOfFile()
+        let fits = data.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return true }
+            return accept(base, count: raw.count)
+        }
+        try? handle.close()
+        if !fits { onOverflow() }
+        #else
+        let descriptor = handle.fileDescriptor
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: Self.bufferSize, alignment: 1)
+        var overflowed = false
+        defer {
+            buffer.deallocate()
+            try? handle.close()
+            // After the handle is gone: the caller wakes on this and takes the
+            // process group down, and a descriptor it has been told to stop
+            // reading must not still be open when it does.
+            if overflowed { onOverflow() }
+        }
+        guard descriptor >= 0 else { return }
+        while !lock.withLock({ stopped }) {
+            var watched = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&watched, 1, Self.waitMilliseconds)
+            if ready < 0 && errno != EINTR { return }
+            guard ready > 0 else { continue }
+            let count = read(descriptor, buffer, Self.bufferSize)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { return }
+            guard accept(buffer.assumingMemoryBound(to: UInt8.self), count: count) else {
+                // Past the ceiling. Nothing more is worth reading: the run is
+                // about to be abandoned and the group taken down.
+                overflowed = true
+                return
+            }
+        }
+        #endif
+    }
 }
 
 /// A one-way flag a reader thread raises and the caller reads.

@@ -55,6 +55,16 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(String(decoding: output, as: UTF8.self), "first\nsecond\n")
     }
 
+    /// More than one pipe buffer and more than one read: the child blocks part
+    /// way through writing, so the reader has to assemble the answer from
+    /// several reads and hand back every byte in order.
+    func testCapturesOutputLargerThanASinglePipeBuffer() throws {
+        let shell = try systemBinary("sh")
+        let output = try CommandRunner.run(shell, ["-c", "printf '%200000s' '' | tr ' ' A"], timeout: 10)
+        XCTAssertEqual(output.count, 200_000)
+        XCTAssertTrue(output.allSatisfy { $0 == UInt8(ascii: "A") }, "the stream came back reordered or corrupted")
+    }
+
     func testRunsInTheRequestedWorkingDirectory() throws {
         let pwd = try systemBinary("pwd")
         let output = try CommandRunner.run(pwd, [], timeout: 5, currentDirectory: scratch)
@@ -318,6 +328,59 @@ final class CommandRunnerTests: XCTestCase {
                       "the runaway grandchild was left running after the runner gave up on its output")
     }
 
+    /// A deadline has to hand back what it borrowed. A grandchild that left the
+    /// process group — `setsid` — survives the deadline's `SIGKILL` still
+    /// holding the write ends it inherited, so the two readers never reach end
+    /// of file: before the fix they stayed blocked for the life of the process,
+    /// each pinning a thread and a pipe descriptor, and a menu bar that refreshes
+    /// for weeks collected a pair every time a CLI hung.
+    ///
+    /// The holder keeps writing after the deadline as well, which is the other
+    /// half of it. Closing a descriptor out from under a reader that is still
+    /// using it does not release the reader on Linux, and traps the whole
+    /// process on the `try!` inside Foundation as soon as the next byte lands —
+    /// so a reader has to be asked to stop and close its own pipe, not have the
+    /// pipe taken away from it. That failure would show up here as a crashed
+    /// suite rather than a failed assertion.
+    func testADeadlineReleasesThePipesWhenAGrandchildEscapesTheProcessGroup() throws {
+        let shell = try systemBinary("sh")
+        let detach = try detachedLauncher()
+        var holders: [pid_t] = []
+        defer { holders.forEach(killGroup) }
+
+        func timeOutOnce(_ index: Int) throws -> pid_t {
+            let pidFile = scratch.appendingPathComponent("holder-\(index).pid").path
+            // Bounded, so a holder that somehow outruns the cleanup above cannot
+            // outlive the suite, and noisy, so both readers are still being fed
+            // when the deadline gives up on them.
+            let noise = "i=0; while [ $i -lt 60 ]; do echo tick; echo tick >&2; sleep 0.5; i=$((i+1)); done"
+            let script = """
+            \(detach) \(shell) -c '\(noise)' &
+            echo $! > \(pidFile)
+            sleep 25
+            """
+            XCTAssertThrowsError(try CommandRunner.run(shell, ["-c", script], timeout: 1)) { error in
+                XCTAssertEqual((error as? ProbeError)?.errorDescription, "The CLI did not respond in time")
+            }
+            return try readPid(at: pidFile)
+        }
+
+        holders.append(try timeOutOnce(0))
+        try XCTSkipUnless(!hasExited(holders[0]),
+                          "nothing escaped the process group here, so there is no held pipe to release")
+
+        // Counted from the first call rather than from before it, so anything
+        // this process allocates once — the reader threads' first use of the
+        // global queue among them — is already paid for.
+        let afterFirst = openPipeCount()
+        holders.append(try timeOutOnce(1))
+        holders.append(try timeOutOnce(2))
+        let afterThird = openPipeCount()
+
+        XCTAssertLessThanOrEqual(afterThird, afterFirst,
+                                 "a deadline left its pipes open: \(afterFirst) after one call, \(afterThird) after three")
+    }
+
     func testMissingExecutableFailsInsteadOfBlocking() {
         let absent = scratch.appendingPathComponent("not-a-binary").path
         XCTAssertThrowsError(try CommandRunner.run(absent, [], timeout: 5))
@@ -553,6 +616,40 @@ final class CommandRunnerTests: XCTestCase {
         }
         #endif
         return false
+    }
+
+    /// A command prefix that starts what follows it in a session of its own,
+    /// which is the one way a grandchild survives a `SIGKILL` sent to the child's
+    /// process group while still holding the pipes it inherited. macOS ships no
+    /// `setsid` binary, so the same call is made through perl there.
+    private func detachedLauncher() throws -> String {
+        if let setsid = ["/usr/bin/setsid", "/bin/setsid"].first(where: FileManager.default.isExecutableFile) {
+            return setsid
+        }
+        if let perl = ["/usr/bin/perl", "/bin/perl"].first(where: FileManager.default.isExecutableFile) {
+            return "\(perl) -e 'use POSIX; POSIX::setsid(); exec @ARGV' --"
+        }
+        throw XCTSkip("neither setsid nor perl is installed here, so nothing can leave the process group")
+    }
+
+    /// Pipe descriptors this process has open, which is what a pipe left behind
+    /// costs. Counting every descriptor instead would measure the sockets and
+    /// event descriptors that libdispatch and the test runner open on their own
+    /// schedule, and read as a leak that is not one.
+    ///
+    /// `fstat` rather than `/proc/self/fd`, which does not exist on macOS.
+    private func openPipeCount() -> Int {
+        (0..<4_096).reduce(into: 0) { total, descriptor in
+            var status = stat()
+            guard fstat(Int32(descriptor), &status) == 0 else { return }
+            if mode_t(status.st_mode) & mode_t(S_IFMT) == mode_t(S_IFIFO) { total += 1 }
+        }
+    }
+
+    private func killGroup(_ pid: pid_t) {
+        guard pid > 1 else { return }
+        _ = kill(-pid, SIGKILL)
+        _ = kill(pid, SIGKILL)
     }
 
     private func fileSize(_ path: String) -> Int {
