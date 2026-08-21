@@ -40,8 +40,9 @@ Then choose `patch`, `minor` or `major`. There is no other input.
    `ghcr.io/<repo>:<version>` and `:latest`. The build context is `dist/` only,
    because `.dockerignore` excludes the repository root where an executable zsh
    dev wrapper shares the name `quotabar`.
-5. **tap** — publishes the Homebrew formula to `bebepewpew/homebrew-tap`. The
-   formula does **not** live in this repository.
+5. **tap** — renders `packaging/homebrew/quotabar.rb`, the formula source held in
+   this repository, into `bebepewpew/homebrew-tap` as `Formula/quotabar.rb`. The
+   tap is generated output; an edit made there is overwritten by the next release.
 
 The workflow pushes exactly one ref here: the annotated tag. **It never pushes to
 `main`.**

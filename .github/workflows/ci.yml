@@ -223,6 +223,17 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+          # The Homebrew formula is held here and says so in its own header;
+          # `Formula/` is a path in the generated tap and never one in this
+          # repository. A document claiming the formula is absent sends a writer
+          # to delete the accurate passages, so every document that describes
+          # where it lives has to name the real file.
+          test -s packaging/homebrew/quotabar.rb
+          formula_docs="README.md docs/agent-guides/docs-writing.md"
+          formula_docs="$formula_docs docs/agent-guides/release.md"
+          for doc in $formula_docs; do
+              grep -q 'packaging/homebrew/quotabar.rb' "$doc"
+          done
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)
