@@ -15,6 +15,11 @@ name: Security scan
 # Findings are published to code scanning as SARIF rather than buried in a log.
 # Only a leaked secret fails a build; vulnerability and misconfiguration results
 # are informational and must never block a merge on their own.
+#
+# The secret scan that blocks a *merge* is ci.yml's `secret-scan` job: branch
+# protection requires `Gate`, and `gate` can only `needs:` jobs in its own
+# workflow. The failing scan below stays all the same, because this workflow also
+# runs on a schedule, where there is no pull request and no Gate.
 
 on:
   push:
