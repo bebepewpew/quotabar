@@ -253,16 +253,59 @@ final class DBusWireTests: XCTestCase {
         }
     }
 
+    /// Pinned to the specification's literal rather than to our own constant. A
+    /// test that builds its input out of the value it is policing passes however
+    /// that value drifts.
+    func testTheLimitsAreTheOnesTheSpecificationSets() {
+        XCTAssertEqual(DBusWire.maximumArrayBytes, 67_108_864)   // 64 MiB
+        XCTAssertEqual(DBusWire.maximumDepth, 64)
+    }
+
     /// The length prefix is attacker-controlled on any bus and decides how long
     /// the decode loop runs, so it is bounded before it is trusted.
     func testDecodingRejectsAnArrayLengthBeyondTheSpecLimit() {
         var offset = 0
         var bytes = [UInt8]()
-        let huge = UInt32(DBusWire.maximumArrayBytes + 1)
-        withUnsafeBytes(of: huge.littleEndian) { bytes.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(67_108_865).littleEndian) { bytes.append(contentsOf: $0) }
         XCTAssertThrowsError(try DBusWire.decode(signature: "ay", from: bytes, offset: &offset)) {
-            XCTAssertEqual($0 as? DBusWireError, .invalidPayload("array claims \(huge) bytes"))
+            XCTAssertEqual($0 as? DBusWireError, .invalidPayload("array claims 67108865 bytes"))
         }
+    }
+
+    /// The other side of the boundary, which pins the comparison as `<=` rather
+    /// than `<`: a length of exactly the limit is allowed past the bound and then
+    /// fails on the buffer instead.
+    func testALengthOfExactlyTheLimitIsNotItselfRejected() {
+        var offset = 0
+        var bytes = [UInt8]()
+        withUnsafeBytes(of: UInt32(67_108_864).littleEndian) { bytes.append(contentsOf: $0) }
+        XCTAssertThrowsError(try DBusWire.decode(signature: "ay", from: bytes, offset: &offset)) {
+            XCTAssertEqual($0 as? DBusWireError, .truncated)
+        }
+    }
+
+    /// Without a depth bound, a body of nested variants recurses once per three
+    /// payload bytes, so a few kilobytes from any peer overflows the stack — and
+    /// that is a crash, not a thrown error.
+    func testDecodingRefusesContainersNestedTooDeeply() {
+        // Each level is a variant whose payload is another variant: `1 'v' 0`.
+        var bytes = [UInt8]()
+        for _ in 0...(DBusWire.maximumDepth + 2) {
+            bytes.append(contentsOf: [1, UInt8(ascii: "v"), 0])
+        }
+        bytes.append(contentsOf: [1, UInt8(ascii: "y"), 0, 0])
+        var offset = 0
+        XCTAssertThrowsError(try DBusWire.decode(signature: "v", from: bytes, offset: &offset)) {
+            XCTAssertEqual($0 as? DBusWireError,
+                           .invalidPayload("nested deeper than \(DBusWire.maximumDepth)"))
+        }
+    }
+
+    /// And nesting within the bound still decodes, so the guard is not simply
+    /// refusing everything nested.
+    func testNestingWithinTheBoundStillDecodes() throws {
+        let nested = DBusValue.variant(.variant(.variant(.string("deep"))))
+        XCTAssertEqual(try roundTrip(nested), nested)
     }
 
     func testDecodingRejectsAnArrayLongerThanItsBuffer() {

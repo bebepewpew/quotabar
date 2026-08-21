@@ -32,6 +32,14 @@ public enum DBusWire {
     /// bound that stops a hostile length prefix from being used to allocate.
     public static let maximumArrayBytes = 67_108_864
 
+    /// How deeply containers may nest before a message is refused.
+    ///
+    /// The specification caps nesting at 32 arrays and 32 structs. Without a
+    /// bound, a body of nested variants recurses once per three payload bytes,
+    /// so a few kilobytes from any peer on the session bus overflows the stack —
+    /// and a stack overflow is a crash, not a thrown error.
+    public static let maximumDepth = 64
+
     // MARK: Encoding
 
     /// Appends `value` to `bytes`, padding to its alignment first.
@@ -135,7 +143,10 @@ public enum DBusWire {
     /// `offset` is an offset into the whole message for the same reason encoding
     /// appends to the whole message: padding is measured from the message start.
     public static func decode(signature: String, from bytes: [UInt8], offset: inout Int,
-                              littleEndian: Bool = true) throws -> DBusValue {
+                              littleEndian: Bool = true, depth: Int = 0) throws -> DBusValue {
+        guard depth <= maximumDepth else {
+            throw DBusWireError.invalidPayload("nested deeper than \(maximumDepth)")
+        }
         try skipPadding(&offset, to: DBusSignature.alignment(of: signature), in: bytes)
         guard let kind = signature.first else { throw DBusWireError.malformedSignature(signature) }
         switch kind {
@@ -173,14 +184,15 @@ public enum DBusWire {
             return .signature(text)
         case "a":
             return try decodeArray(signature: signature, from: bytes, offset: &offset,
-                                   littleEndian: littleEndian)
+                                   littleEndian: littleEndian, depth: depth)
         case "(":
             let inner = String(signature.dropFirst().dropLast())
             guard let members = DBusSignature.split(inner), !members.isEmpty else {
                 throw DBusWireError.malformedSignature(signature)
             }
             return .struct(try members.map {
-                try decode(signature: $0, from: bytes, offset: &offset, littleEndian: littleEndian)
+                try decode(signature: $0, from: bytes, offset: &offset,
+                           littleEndian: littleEndian, depth: depth + 1)
             })
         case "{":
             let inner = String(signature.dropFirst().dropLast())
@@ -188,28 +200,29 @@ public enum DBusWire {
                 throw DBusWireError.malformedSignature(signature)
             }
             let key = try decode(signature: members[0], from: bytes, offset: &offset,
-                                 littleEndian: littleEndian)
+                                 littleEndian: littleEndian, depth: depth + 1)
             let value = try decode(signature: members[1], from: bytes, offset: &offset,
-                                   littleEndian: littleEndian)
+                                   littleEndian: littleEndian, depth: depth + 1)
             return .dictEntry(key: key, value: value)
         case "v":
             guard case .signature(let inner) = try decode(signature: "g", from: bytes,
                                                           offset: &offset,
-                                                          littleEndian: littleEndian) else {
+                                                          littleEndian: littleEndian,
+                                                          depth: depth + 1) else {
                 throw DBusWireError.malformedSignature("v")
             }
             guard DBusSignature.split(inner)?.count == 1 else {
                 throw DBusWireError.malformedSignature(inner)
             }
             return .variant(try decode(signature: inner, from: bytes, offset: &offset,
-                                       littleEndian: littleEndian))
+                                       littleEndian: littleEndian, depth: depth + 1))
         default:
             throw DBusWireError.malformedSignature(signature)
         }
     }
 
     private static func decodeArray(signature: String, from bytes: [UInt8], offset: inout Int,
-                                    littleEndian: Bool) throws -> DBusValue {
+                                    littleEndian: Bool, depth: Int) throws -> DBusValue {
         guard let element = DBusSignature.elementType(of: signature),
               DBusSignature.split(element)?.count == 1 else {
             throw DBusWireError.malformedSignature(signature)
@@ -227,7 +240,7 @@ public enum DBusWire {
         var values = [DBusValue]()
         while offset < end {
             values.append(try decode(signature: element, from: bytes, offset: &offset,
-                                     littleEndian: littleEndian))
+                                     littleEndian: littleEndian, depth: depth + 1))
         }
         // A final element that read past the declared end means the payload and
         // its length disagree; trusting the length would desynchronise the rest
