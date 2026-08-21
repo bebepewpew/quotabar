@@ -1,0 +1,376 @@
+#!/bin/sh
+set -eu
+
+# Check the packaging inputs against the release workflow that consumes them.
+#
+#   scripts/check-packaging              # check this repository
+#   scripts/check-packaging --self-test  # also prove every check can fail
+#
+# `packaging/` is read only by `.github/workflows/release.yml`, which is
+# `workflow_dispatch` only, so nothing on a pull request executes it. Three
+# couplings decide what users install and every one of them is green while
+# broken:
+#
+#   1. `nfpm.yaml`'s `src:` paths must match the directory the release job
+#      stages the binaries into (`pkgroot`), and its non-staged sources
+#      (README, LICENSE) must still exist in the repository.
+#   2. `Dockerfile`'s `ARG BINARY=` default must match where the container job
+#      installs the released binary, and `.dockerignore` must keep that
+#      directory in the build context or `COPY` misses.
+#   3. The Homebrew formula's `url` and `sha256` must each sit alone on a
+#      line-anchored line, because the release job rewrites them with a
+#      line-anchored `perl -pi -e`. Getting this wrong is red only after
+#      publication.
+#
+# These are static checks and cost about a second, so `ci.yml`'s policy job
+# runs them for every change. Actually running `nfpm package` and building the
+# image live in the packaging job, behind the changed-paths filter.
+
+usage() {
+    sed -n '4,7p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+}
+
+self_test=false
+for argument in "$@"; do
+    case "$argument" in
+        --self-test) self_test=true ;;
+        -h|--help) usage ;;
+        *)
+            printf 'check-packaging: unknown argument: %s\n' "$argument" >&2
+            usage
+            ;;
+    esac
+done
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+if ! command -v perl > /dev/null 2>&1; then
+    echo "check-packaging: perl is required; the release workflow rewrites the formula with it." >&2
+    exit 1
+fi
+
+# Reported through a counter rather than an immediate exit, so one run names
+# every broken coupling instead of only the first.
+failures=0
+
+# Arguments are joined with a space, so a long message can be wrapped in the
+# source without a line continuation inside the string.
+fail() {
+    failures=$((failures + 1))
+    printf 'check-packaging: %s\n' "$*" >&2
+}
+
+# Escape a literal for use inside a POSIX extended regular expression. The `$`
+# and the rest are the characters being escaped, not expansions.
+# shellcheck disable=SC2016
+ere_quote() {
+    printf '%s' "$1" | sed 's/[].[^$(){}?+*\\|]/\\&/g'
+}
+
+# The `- src:` values from an nfpm contents list, in file order.
+nfpm_sources() {
+    sed -n 's/^[[:space:]]*-[[:space:]]*src:[[:space:]]*//p' "$1"
+}
+
+# 1. Every packaged source is either staged by the release job or committed.
+check_nfpm_sources() {
+    nfpm="$1/packaging/nfpm.yaml"
+    release="$1/.github/workflows/release.yml"
+
+    if [ ! -f "$nfpm" ] || [ ! -f "$release" ]; then
+        fail "packaging/nfpm.yaml and .github/workflows/release.yml must both exist"
+        return 0
+    fi
+
+    sources=$(nfpm_sources "$nfpm")
+    if [ -z "$sources" ]; then
+        fail "packaging/nfpm.yaml lists no contents; nfpm would package nothing"
+        return 0
+    fi
+
+    for source in $sources; do
+        # Strip the leading `./` nfpm writes, so `dirname` and the workflow's
+        # `pkgroot` are spelled the same way.
+        relative=${source#./}
+        case "$relative" in
+            dist/*)
+                directory=$(dirname "$relative")
+                base=$(basename "$relative")
+                if ! grep -Fq "pkgroot=\"$directory\"" "$release"; then
+                    fail "packaging/nfpm.yaml packages $source, but" \
+                        ".github/workflows/release.yml never sets" \
+                        "pkgroot=\"$directory\""
+                fi
+                if ! grep -Fq "\${pkgroot}/$base\"" "$release"; then
+                    fail "packaging/nfpm.yaml packages $source, but" \
+                        ".github/workflows/release.yml never installs" \
+                        "\${pkgroot}/$base"
+                fi
+                ;;
+            *)
+                if [ ! -f "$1/$relative" ]; then
+                    fail "packaging/nfpm.yaml packages $source, which is not in the repository"
+                fi
+                ;;
+        esac
+    done
+}
+
+# 2. The image copies the binary from where the container job puts it.
+check_dockerfile_binary() {
+    dockerfile="$1/packaging/Dockerfile"
+    dockerignore="$1/.dockerignore"
+    release="$1/.github/workflows/release.yml"
+
+    if [ ! -f "$dockerfile" ] || [ ! -f "$dockerignore" ] || [ ! -f "$release" ]; then
+        fail "packaging/Dockerfile, .dockerignore and .github/workflows/release.yml must all exist"
+        return 0
+    fi
+
+    binaries=$(sed -n 's/^ARG[[:space:]]\{1,\}BINARY=//p' "$dockerfile")
+    count=$(printf '%s' "$binaries" | grep -c '' || true)
+    if [ "$binaries" = "" ] || [ "$count" -ne 1 ]; then
+        fail "packaging/Dockerfile must declare exactly one" \
+            "\`ARG BINARY=<path>\` default; found ${count}"
+        return 0
+    fi
+
+    case "$binaries" in
+        dist/*) ;;
+        *)
+            fail "packaging/Dockerfile's ARG BINARY=$binaries is outside" \
+                "dist/, the only directory .dockerignore keeps in the" \
+                "build context"
+            return 0
+            ;;
+    esac
+
+    pattern=$(ere_quote "$binaries")
+    if ! grep -Eq "install -m 0755 .* $pattern\$" "$release"; then
+        fail "packaging/Dockerfile copies $binaries, but" \
+            ".github/workflows/release.yml never installs the released" \
+            "binary there"
+    fi
+
+    context=$(printf '%s' "$binaries" | cut -d / -f 1)
+    if ! grep -Fxq "!$context/" "$dockerignore"; then
+        fail ".dockerignore must un-ignore $context/ or COPY $binaries misses"
+    fi
+}
+
+# 3. The release-time rewrite of the formula still hits exactly one line each.
+check_formula_rewrite() {
+    formula="$1/packaging/homebrew/quotabar.rb"
+    release="$1/.github/workflows/release.yml"
+
+    if [ ! -f "$formula" ] || [ ! -f "$release" ]; then
+        fail "packaging/homebrew/quotabar.rb and .github/workflows/release.yml must both exist"
+        return 0
+    fi
+
+    if command -v ruby > /dev/null 2>&1; then
+        if ! ruby -c "$formula" > /dev/null 2>&1; then
+            fail "packaging/homebrew/quotabar.rb is not valid Ruby"
+        fi
+    fi
+
+    check_formula_key "$formula" "$release" url \
+        "https://example.invalid/check-packaging.tar.gz"
+    check_formula_key "$formula" "$release" sha256 \
+        "0000000000000000000000000000000000000000000000000000000000000000"
+}
+
+# Apply the release job's own substitution for one key to a throwaway copy and
+# require that it changed exactly one line, and that the line is the key's.
+# A second `url`, or one that is not line-anchored, fails here rather than
+# after the tap is published.
+check_formula_key() {
+    formula=$1
+    release=$2
+    key=$3
+    replacement=$4
+
+    substitution="s{^(\\s*${key}\\s+\")[^\"]*(\")}{\$1\$ENV{CHECK_PACKAGING_VALUE}\$2}"
+    if ! grep -Fq "s{^(\\s*${key}\\s+\")" "$release"; then
+        fail ".github/workflows/release.yml no longer rewrites the formula's" \
+            "$key with a line-anchored substitution, which is the thing this" \
+            "check simulates"
+        return 0
+    fi
+
+    rewritten="$work/formula-$key.rb"
+    cp "$formula" "$rewritten"
+    CHECK_PACKAGING_VALUE=$replacement perl -pi -e "$substitution" "$rewritten"
+
+    changed=$(awk '
+        NR == FNR { before[FNR] = $0; lines = FNR; next }
+        { if (FNR > lines || $0 != before[FNR]) differing++ }
+        END {
+            if (lines > FNR) { differing += lines - FNR }
+            print differing + 0
+        }' "$formula" "$rewritten")
+
+    if [ "$changed" != "1" ]; then
+        fail "rewriting $key in packaging/homebrew/quotabar.rb changed" \
+            "$changed lines, not 1; keep exactly one line-anchored" \
+            "\`$key \"...\"\`"
+        return 0
+    fi
+
+    anchored="^[[:space:]]*${key}[[:space:]]\{1,\}\"${replacement}\"\$"
+    if [ "$(grep -c "$anchored" "$rewritten" || true)" != "1" ]; then
+        fail "rewriting $key in packaging/homebrew/quotabar.rb did not" \
+            "produce a single \`$key \"...\"\` line"
+    fi
+}
+
+# Every check against one tree. Run in a subshell so the failure counter never
+# leaks between the real repository and a self-test case.
+check_tree() {
+    (
+        failures=0
+        check_nfpm_sources "$1"
+        check_dockerfile_binary "$1"
+        check_formula_rewrite "$1"
+        [ "$failures" -eq 0 ]
+    )
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/quotabar-packaging.XXXXXX")
+trap 'rm -rf "$work"' EXIT INT TERM
+
+if ! check_tree "$root"; then
+    echo "check-packaging: the packaging inputs and the release workflow have drifted." >&2
+    exit 1
+fi
+echo "check-packaging: packaging inputs agree with .github/workflows/release.yml."
+
+[ "$self_test" = true ] || exit 0
+
+# --- Falsification --------------------------------------------------------
+#
+# A check nobody has watched fail is not a check. Each case copies the real
+# inputs, breaks one coupling the way a plausible edit would, and requires the
+# check to reject it.
+
+fixture=0
+self_test_failures=0
+
+# Copy the inputs these checks read into a fresh directory and echo its path.
+packaging_fixture() {
+    fixture=$((fixture + 1))
+    directory="$work/case-$fixture"
+    mkdir -p "$directory/packaging/homebrew" "$directory/.github/workflows"
+    cp "$root/packaging/nfpm.yaml" "$root/packaging/Dockerfile" "$directory/packaging/"
+    cp "$root/packaging/homebrew/quotabar.rb" "$directory/packaging/homebrew/"
+    cp "$root/.github/workflows/release.yml" "$directory/.github/workflows/"
+    cp "$root/.dockerignore" "$directory/.dockerignore"
+    cp "$root/README.md" "$root/LICENSE" "$directory/"
+    printf '%s' "$directory"
+}
+
+# A case rejected by an unrelated check is no better than one not rejected at
+# all, so each names the message it must produce.
+expect_rejected() {
+    description=$1
+    directory=$2
+    expected=$3
+    if check_tree "$directory" > /dev/null 2> "$work/case.log"; then
+        self_test_failures=$((self_test_failures + 1))
+        printf 'check-packaging: self-test: NOT caught: %s\n' "$description" >&2
+        return 0
+    fi
+    if ! grep -Fq "$expected" "$work/case.log"; then
+        self_test_failures=$((self_test_failures + 1))
+        printf 'check-packaging: self-test: caught, but not by the check under test: %s\n' \
+            "$description" >&2
+        printf 'check-packaging: self-test: expected a message containing: %s\n' \
+            "$expected" >&2
+        sed 's/^/  /' "$work/case.log" >&2
+        return 0
+    fi
+    printf '  rejected: %s\n' "$description"
+}
+
+echo "check-packaging: self-test, each case must be rejected:"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(\s*- src: \./dist/)linux-x86_64(/quotabar\b)}{$1linux-amd64$2}' \
+    "$case_directory/packaging/nfpm.yaml"
+expect_rejected "nfpm.yaml stages from a directory the release job never creates" \
+    "$case_directory" 'never sets pkgroot="dist/linux-amd64"'
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(\s*- src: \./)README\.md$}{$1README.markdown}' \
+    "$case_directory/packaging/nfpm.yaml"
+expect_rejected "nfpm.yaml packages a file that is not in the repository" \
+    "$case_directory" "packages ./README.markdown, which is not in the repository"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(\s*)pkgroot="dist/linux-x86_64"$}{$1pkgroot="dist/linux"}' \
+    "$case_directory/.github/workflows/release.yml"
+expect_rejected "the release job stages into a directory nfpm.yaml does not read" \
+    "$case_directory" 'never sets pkgroot="dist/linux-x86_64"'
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^ARG BINARY=dist/quotabar$}{ARG BINARY=dist/quotabar-linux-x86_64}' \
+    "$case_directory/packaging/Dockerfile"
+expect_rejected "the Dockerfile copies a binary the container job never installs" \
+    "$case_directory" "copies dist/quotabar-linux-x86_64"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^ARG BINARY=.*$}{}' "$case_directory/packaging/Dockerfile"
+expect_rejected "the Dockerfile has no ARG BINARY default at all" \
+    "$case_directory" "exactly one \`ARG BINARY=<path>\` default; found 0"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(ARG BINARY=.*)$}{$1\n$1}' "$case_directory/packaging/Dockerfile"
+expect_rejected "the Dockerfile declares ARG BINARY twice, so which one wins is a guess" \
+    "$case_directory" "exactly one \`ARG BINARY=<path>\` default; found 2"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^!dist/$}{}' "$case_directory/.dockerignore"
+expect_rejected ".dockerignore leaves the staged binary out of the build context" \
+    "$case_directory" "must un-ignore dist/ or COPY dist/quotabar misses"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(\s*sha256 ".*")$}{$1\n$1}' "$case_directory/packaging/homebrew/quotabar.rb"
+expect_rejected "the formula carries two sha256 lines for one line-anchored rewrite" \
+    "$case_directory" "rewriting sha256 in packaging/homebrew/quotabar.rb changed 2 lines"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(\s*)url (".*")$}{$1license "MIT"; url $2}' \
+    "$case_directory/packaging/homebrew/quotabar.rb"
+expect_rejected "the formula's url is no longer alone at the start of its line" \
+    "$case_directory" "rewriting url in packaging/homebrew/quotabar.rb changed 0 lines"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(\s*)sha256 "([^"]*)"$}{$1sha256("$2")}' \
+    "$case_directory/packaging/homebrew/quotabar.rb"
+expect_rejected "the formula's sha256 uses a call syntax the rewrite cannot match" \
+    "$case_directory" "rewriting sha256 in packaging/homebrew/quotabar.rb changed 0 lines"
+
+case_directory=$(packaging_fixture)
+perl -pi -e 's{^(\s*)perl -pi -e .s\{\^\(\\s\*url.*$}{$1true}' \
+    "$case_directory/.github/workflows/release.yml"
+expect_rejected "the release job stopped rewriting the url this check simulates" \
+    "$case_directory" "no longer rewrites the formula's url"
+
+# `install` and `test` in the formula run on every user's machine, so a syntax
+# error there is a broken `brew install`. Only assertable where ruby exists,
+# which is the same condition the check itself carries.
+if command -v ruby > /dev/null 2>&1; then
+    case_directory=$(packaging_fixture)
+    perl -pi -e 's{^end$}{}' "$case_directory/packaging/homebrew/quotabar.rb"
+    expect_rejected "the formula no longer parses as Ruby" \
+        "$case_directory" "packaging/homebrew/quotabar.rb is not valid Ruby"
+else
+    echo "  skipped, no ruby on PATH: the formula no longer parses as Ruby"
+fi
+
+if [ "$self_test_failures" -ne 0 ]; then
+    printf 'check-packaging: %s self-test case(s) were not caught.\n' "$self_test_failures" >&2
+    exit 1
+fi
+echo "check-packaging: every self-test case was rejected."

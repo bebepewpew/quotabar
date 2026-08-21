@@ -101,15 +101,17 @@ jobs:
           } >&2
           exit 1
 
-  # Which of the two expensive jobs this change actually needs. A documentation
+  # Which of the expensive jobs this change actually needs. A documentation
   # change compiles nothing, so it should not hold a macOS runner -- but the
   # checks that are *about* documentation and repository structure still run,
-  # because `policy` above has no such guard.
+  # because `policy` above has no such guard. Two independent answers come out
+  # of one pass: `code` for the build jobs, `packaging` for the packaging one.
   changes:
     name: Changed paths
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      packaging: ${{ steps.filter.outputs.packaging }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -128,6 +130,7 @@ jobs:
           # nothing about main is worth trimming.
           if [ "$EVENT" != "pull_request" ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "packaging=true" >> "$GITHUB_OUTPUT"
             echo "Not a pull request: running the full suite."
             exit 0
           fi
@@ -140,6 +143,7 @@ jobs:
           # because `printf` of an empty string still feeds `grep` a blank line.
           if [ -z "$files" ]; then
             echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "packaging=false" >> "$GITHUB_OUTPUT"
             echo "No files changed against the base."
             exit 0
           fi
@@ -148,8 +152,15 @@ jobs:
           # both explicit, so a path that matches neither is *unclassified* --
           # it builds, and it says so by name, which is the signal that this
           # list needs a line rather than a silent guess either way.
+          #
+          # `packaging` is a second, independent answer over the same paths: the
+          # packaging inputs compile nothing, so they must not hold a macOS
+          # runner, but they are also the only thing the `packaging` job below
+          # can prove anything about.
           build=false
+          packaging=false
           because=""
+          packaging_because=""
           unclassified=""
 
           while IFS= read -r file; do
@@ -162,8 +173,17 @@ jobs:
               # The pipeline itself. A workflow change is only ever proven by
               # running it, so it earns a full suite even though it compiles
               # nothing. This is the line to cut if that stops being worth it.
+              # release.yml is what consumes `packaging/`, and this file decides
+              # whether the packaging job runs at all, so both ends run too.
               .github/workflows/*)
-                build=true; because="$because $file" ;;
+                build=true; because="$because $file"
+                packaging=true; packaging_because="$packaging_because $file" ;;
+
+              # What users actually install, and what decides the build context
+              # it is assembled from. None of it reaches swiftc; all of it is
+              # otherwise executed only by a release.
+              packaging/*|.dockerignore|scripts/check-packaging)
+                packaging=true; packaging_because="$packaging_because $file" ;;
 
               # Prose, per-tool wrappers and repository furniture. None of it
               # reaches swiftc, and `policy` below checks the parts that matter
@@ -186,12 +206,23 @@ jobs:
             printf 'Needs the build, because of:\n'
             printf '  %s\n' $because
           fi
+          if [ -n "$packaging_because" ]; then
+            printf 'Needs the packaging job, because of:\n'
+            printf '  %s\n' $packaging_because
+          fi
 
           if [ "$build" = true ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
             echo "Nothing compiled changed: skipping macOS, Linux and CodeQL."
+          fi
+
+          if [ "$packaging" = true ]; then
+            echo "packaging=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "packaging=false" >> "$GITHUB_OUTPUT"
+            echo "No packaging input changed: skipping the packaging job."
           fi
 
   # Structure rather than behaviour, so it costs seconds and runs for every
@@ -209,6 +240,7 @@ jobs:
           test -x scripts/install-codex-skills
           test -x scripts/codex-parallel
           test -x scripts/coverage
+          test -x scripts/check-packaging
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
@@ -223,6 +255,104 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+      # Static, and about a second, so it runs for every change rather than
+      # only for one that touches packaging/ -- deleting LICENSE or renaming
+      # README.md breaks the .deb from a path this workflow files under prose.
+      - name: Check the packaging inputs against the release workflow
+        run: scripts/check-packaging
+      - name: Prove those checks can still fail
+        run: scripts/check-packaging --self-test
+
+  # `packaging/` decides what users install, and it is read only by
+  # `release.yml`, which is workflow_dispatch only. Without this job a broken
+  # nfpm config or a Dockerfile that copies from the wrong path is green on
+  # every pull request and red only during a release.
+  packaging:
+    name: Packaging inputs
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # The same pin as `build-linux` in release.yml. Two copies, deliberately:
+      # this job proves the config against the version a release will use, so
+      # bumping one without the other is what this comment exists to prevent.
+      NFPM_VERSION: 2.47.0
+      NFPM_DEB_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      # Nothing here builds Swift: a stub stands in for the release binary, so
+      # this job proves the packaging inputs and not the compiler. The stub is a
+      # shell script rather than an ELF binary because the image's last layer
+      # runs `quotabar --version`, so it only has to execute.
+      - name: Build the image from a stub binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          printf '#!/bin/sh\nprintf "quotabar 0.0.0-ci\\n"\n' > dist/quotabar
+          chmod 0755 dist/quotabar
+          # `.` and not `dist/`: .dockerignore is part of what is under test,
+          # and it is what keeps the repo root's zsh dev wrapper named
+          # `quotabar` out of the context.
+          docker build --file packaging/Dockerfile --tag quotabar:ci .
+          docker run --rm quotabar:ci --version
+
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          deb="$RUNNER_TEMP/nfpm_${NFPM_VERSION}_amd64.deb"
+          curl -fsSL --max-time 120 --retry 3 --retry-all-errors -o "$deb" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          echo "${NFPM_DEB_SHA256}  ${deb}" | sha256sum --check --strict -
+          sudo dpkg --install "$deb"
+          nfpm --version
+
+      - name: Package a .deb and an .rpm from stub binaries
+        env:
+          # nfpm expands this from the environment when it reads the config, the
+          # same way release.yml supplies the real version.
+          QUOTABAR_VERSION: 0.0.0
+        run: |
+          set -euo pipefail
+          # The path release.yml stages into. scripts/check-packaging above is
+          # what keeps this spelling, nfpm.yaml's `src:` and the release job's
+          # `pkgroot` as one decision; if this staging stops matching, nfpm
+          # fails here with the file it could not find.
+          pkgroot="dist/linux-x86_64"
+          mkdir -p "$pkgroot"
+          for stub in quotabar quotabar-tray; do
+            printf '#!/bin/sh\nprintf "%s 0.0.0-ci\\n"\n' "$stub" > "${pkgroot}/${stub}"
+            chmod 0755 "${pkgroot}/${stub}"
+          done
+
+          nfpm package --config packaging/nfpm.yaml --packager deb --target dist/quotabar.deb
+          nfpm package --config packaging/nfpm.yaml --packager rpm --target dist/quotabar.rpm
+          test -s dist/quotabar.deb
+          test -s dist/quotabar.rpm
+
+      - name: Check the .deb payload
+        run: |
+          set -euo pipefail
+          # Written out rather than piped into grep: `grep -q` closes the pipe on
+          # its first match and, under pipefail, the producer's SIGPIPE would
+          # fail the step for a payload that is correct.
+          dpkg-deb --contents dist/quotabar.deb | awk '{ print $NF }' > "$RUNNER_TEMP/deb-contents"
+          cat "$RUNNER_TEMP/deb-contents"
+          for path in \
+            ./usr/bin/quotabar \
+            ./usr/bin/quotabar-tray \
+            ./usr/share/doc/quotabar/README.md \
+            ./usr/share/doc/quotabar/LICENSE
+          do
+            if ! grep -Fxq "$path" "$RUNNER_TEMP/deb-contents"; then
+              echo "::error::the .deb does not contain ${path}"
+              exit 1
+            fi
+          done
+          # `type: doc` would make nfpm's deb packager drop these entirely, which
+          # is why the config uses plain files and why this asserts them.
+          echo "The .deb carries both binaries and both documents."
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)
@@ -386,7 +516,9 @@ jobs:
     # check for a run nobody was waiting on. `!cancelled()` keeps the skip-is-a-
     # pass behaviour and lets a cancelled run stay cancelled.
     if: ${{ !cancelled() }}
-    needs: [labels, policy, changes, codeql, build-and-test, build-and-test-linux, tray]
+    needs:
+      [labels, policy, changes, packaging, codeql, build-and-test,
+       build-and-test-linux, tray]
     runs-on: ubuntu-latest
     steps:
       - name: Require every job to have passed or been skipped

@@ -7,7 +7,7 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, the 90% region coverage gate, and the packaging inputs `release.yml` would otherwise be the first thing to execute |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
@@ -49,7 +49,9 @@ macOS and Linux build running beside the one replacing it.
 
 ## The Gate, and why the required check is not a build
 
-`ci.yml` has six jobs, and only one of them is a required status check.
+`ci.yml` has several jobs, and only one of them is a required status check. The
+count is deliberately not written here: it went stale twice, and `gate`'s `needs`
+below is the list that actually decides.
 
 `changes` diffs the pull request against its base and decides whether anything
 compiled was touched. If not — documentation, `.claude/`, `.codex/`, the issue
@@ -68,6 +70,12 @@ pipeline change is only ever proven by running it. **Skips:** `docs/`,
 that configure GitHub rather than the build. **Unclassified:** anything else — it
 builds, *and the job prints it by name*, which is the signal that the case
 statement needs a line rather than a silent guess in either direction.
+
+The same pass answers a second, independent question in the `packaging` output:
+`packaging/`, `.dockerignore` and `scripts/check-packaging` compile nothing and so
+must not hold a macOS runner, but they are the only thing the `packaging` job can
+prove anything about. `.github/workflows/` sets both, because `release.yml` is
+what consumes `packaging/` and this file is what decides whether the job runs.
 
 Both lists are explicit on purpose. An include-only list fails towards skipping,
 which is how a real change stops being tested; an exclude-only list fails towards
@@ -97,6 +105,43 @@ the two build jobs and not `CodeQL`. Renaming a job in this file without renamin
 a merge blocks on a check that no longer exists; adding a job means adding it to
 `gate`'s `needs`, or it cannot fail a merge.
 
+## Validating what users install
+
+`packaging/` decides what a `.deb`, an `.rpm`, a container image and a Homebrew
+install contain, and it is read by `release.yml` alone — which is
+`workflow_dispatch` only. Left to itself, a packaging change earns a full macOS
+and Linux Swift build that proves nothing about it and breaks during a release.
+Two places close that:
+
+- **`policy` runs `scripts/check-packaging` for every change**, including one that
+  touches no packaging file. It is static and costs about a second, and it checks
+  the three couplings between `packaging/` and `release.yml`: `nfpm.yaml`'s `src:`
+  paths against the release job's `pkgroot`, `Dockerfile`'s `ARG BINARY=` default
+  against where the container job installs the binary and against `.dockerignore`,
+  and the formula's `url` and `sha256` — by running the release job's own
+  line-anchored `perl -pi -e` on a throwaway copy and requiring that it changed
+  **exactly one line each**. Deleting `LICENSE` or renaming `README.md` breaks the
+  `.deb` from paths this workflow otherwise files under prose, which is why this
+  one is not behind the filter.
+- **`scripts/check-packaging --self-test`**, in the same job, breaks each coupling
+  in a copy of the tree and requires the check to reject it. A check nobody has
+  watched fail is not a check.
+- **The `packaging` job actually packages**, behind `changes.outputs.packaging`. It
+  stages shell-script stubs — nothing here compiles Swift — builds
+  `packaging/Dockerfile` from `dist/quotabar` and runs the image, then runs
+  `nfpm package` for both packagers from `dist/linux-x86_64/` and asserts the
+  `.deb` carries both binaries and both documents. That last assertion exists
+  because `type: doc` makes nfpm's deb packager drop an entry entirely.
+
+Two things it deliberately does not do: publish anything, and prove the formula
+installs. `brew install --build-from-source` compiles Swift on a macOS runner and
+belongs where it already is, in the release job that gates the tap push on it.
+
+The nfpm version and its checksum are pinned in **two** places now — this job and
+`release.yml`'s `build-linux`. That is the point: the pull request proves the
+config against the version the release will use, so bumping one without the other
+is the thing to catch in review.
+
 ## Traps this repository has already paid for
 
 - **A container job defaults to `sh -e`, which has no `pipefail`.** Both container
@@ -116,6 +161,10 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
 - **`scripts/` and `.githooks/` entries are asserted executable** by the policy
   job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
   line in that job.
+- **`packaging/` is executed by no triggered workflow.** `release.yml` is
+  `workflow_dispatch` only, so anything reached only from there is proven by the
+  `packaging` job and `scripts/check-packaging` or by nothing at all. A formula
+  whose `url` is not line-anchored is red only *after* publication.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
 - **`always()` on the gate reports a red check for a cancelled run.** The
