@@ -5,12 +5,24 @@ This file is the canonical instruction source for humans and AI coding agents.
 
 ## Project
 
-QuotaBar is written in Swift 6 and split into three targets. `QuotaCore` is a
-cross-platform library holding the probes, provider discovery, caching, and
-threshold alerts. `QuotaBar` is the native macOS 14+ menu-bar app. `QuotaBarCLI`
-builds the `quotabar` command on macOS and Linux. It reads quota data from
-locally installed Codex, Claude Code, and Gemini CLIs. It must not read, copy,
-log, or store provider credentials or complete login prompts.
+QuotaBar is written in Swift 6. It reads quota data from locally installed Codex,
+Claude Code, and Gemini CLIs. It must not read, copy, log, or store provider
+credentials or complete login prompts.
+
+`Package.swift` declares five targets besides the tests. Only four of them exist
+on any one host, because each front end is conditional on the platform whose
+frameworks or protocols it needs:
+
+- `QuotaCore` — cross-platform library holding the probes, provider discovery,
+  caching, threshold alerts, and formatting. No UI framework.
+- `QuotaTray` — cross-platform library holding the tray rendering: the RGBA icon
+  it draws pixel by pixel, the toolkit-independent menu model, and the D-Bus
+  StatusNotifierItem client. Built and tested on both platforms; only the Linux
+  tray ships it.
+- `QuotaBarCLI` — the `quotabar` command, on macOS and Linux.
+- `QuotaTrayApp` — the `quotabar-tray` StatusNotifierItem tray icon. Linux only:
+  macOS has no session bus and has the menu-bar app instead.
+- `QuotaBar` — the native macOS 14+ SwiftUI menu-bar app. macOS only.
 
 ## Required workflow
 
