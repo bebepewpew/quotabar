@@ -3,9 +3,16 @@ import Foundation
 public enum QuotaUrgency: String, Sendable, Codable {
     case normal, warning, critical
 
+    /// The exact reading each band starts at. Named rather than inlined because
+    /// `QuotaFormatting.percent` reads them too, so a rounded percentage can
+    /// never land on a threshold the reading itself has not reached.
+    static let warningAt = 80.0
+    static let criticalAt = 95.0
+    static let boundaries: [Double] = [warningAt, criticalAt]
+
     public init(usedPercent: Double) {
-        if usedPercent >= 95 { self = .critical }
-        else if usedPercent >= 80 { self = .warning }
+        if usedPercent >= Self.criticalAt { self = .critical }
+        else if usedPercent >= Self.warningAt { self = .warning }
         else { self = .normal }
     }
 }
@@ -34,11 +41,30 @@ public struct QuotaRow: Sendable, Equatable {
 }
 
 public enum QuotaFormatting {
+    /// A reading as text: whole when it is within 0.05 of a whole number, one
+    /// decimal otherwise — but never rounded up onto or past an urgency
+    /// threshold the reading has not reached. 79.96 rendered as "80%" beside a
+    /// `.normal` tint and no notification, contradicting both, so it renders as
+    /// "79.9%" instead.
     public static func percent(_ value: Double) -> String {
         let clamped = min(max(value, 0), 100)
-        return abs(clamped - clamped.rounded()) < 0.05
-            ? "\(Int(clamped.rounded()))%"
-            : String(format: "%.1f%%", clamped)
+        let whole = clamped.rounded()
+        if abs(clamped - whole) < 0.05, !overstates(clamped, shownAs: whole) {
+            return "\(Int(whole))%"
+        }
+        // `%.1f` rounds as well, so a reading a hair under a threshold has to be
+        // floored at the precision it is displayed with, not merely left to it.
+        let tenths = clamped * 10
+        guard overstates(clamped, shownAs: tenths.rounded() / 10) else {
+            return String(format: "%.1f%%", clamped)
+        }
+        return String(format: "%.1f%%", tenths.rounded(.down) / 10)
+    }
+
+    /// Whether displaying `value` as `shown` would put it in a higher urgency
+    /// band than the reading is actually in.
+    private static func overstates(_ value: Double, shownAs shown: Double) -> Bool {
+        QuotaUrgency.boundaries.contains { value < $0 && shown >= $0 }
     }
 
     /// Compact, locale-free "resets in" text.
