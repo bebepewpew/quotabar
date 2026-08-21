@@ -103,7 +103,8 @@ Open a pull request for the branch ${impl.branch}.
 
 Use the repository template at .github/pull_request_template.md. Squash-and-merge
 is the only merge method here, so the title must be concise and imperative — it
-becomes the commit subject on main.
+becomes the commit subject on main AND the line that appears in the release
+notes, so write it for someone reading a changelog, not a diff.
 
 Task: ${task}
 What the implementer reported: ${impl.summary}
@@ -119,7 +120,17 @@ If the change adds or edits a GitHub Actions workflow, say plainly in Notes that
 this pull request is that workflow's first execution, so a reviewer knows the run
 on this PR is the evidence rather than something that already happened.
 
-Run: gh pr create --base main --title "..." --body "..."
+Every pull request must carry exactly ONE category label, and CI fails without
+one. Pick the label that matches what the change actually is:
+
+  feature | fix | security | performance | tooling | ci | documentation
+  dependencies | skip changelog
+
+Choose by the change, not by convenience: a fix to a security surface is
+security, a new test with no behaviour change is 'skip changelog', and tooling
+is for agent runners, scripts and developer workflow.
+
+Run: gh pr create --base main --title "..." --body "..." --label "<category>"
 Return the URL. If it fails, return an empty url and the reason.`
 
 const results = await pipeline(
@@ -180,7 +191,7 @@ log(`${byState.opened.length} opened · ${byState.awaitingPublish.length} awaiti
 for (const row of byState.awaitingPublish) {
   log(`WORK IS COMPLETE, PULL REQUEST NOT OPENED: ${row.impl.branch}`)
   log(`  reason: ${row.published ? firstLine(row.published.reason) : 'the publish step did not run'}`)
-  log(`  do not re-run the task — open it with: gh pr create --base main --head ${row.impl.branch}`)
+  log(`  do not re-run the task — open it with: gh pr create --base main --head ${row.impl.branch} --label <category>`)
 }
 for (const row of byState.reviewBlocked) {
   log(`blocked by review: ${row.impl.branch} — ${firstLine(row.review.findings)}`)
