@@ -98,11 +98,19 @@ public enum TrayAutostart {
 
     /// The production runner. `CommandRunner` bounds the child by a deadline and
     /// gives it its own process group, so a hung `systemctl` cannot outlive us.
-    public static let systemctlRunner: Runner = { arguments in
-        guard let executable = CommandRunner.find("systemctl") else {
-            throw ProbeError.missing("systemctl")
+    public static let systemctlRunner: Runner = makeSystemctlRunner(locate: CommandRunner.find)
+
+    /// The body of `systemctlRunner`, with binary discovery injected. A machine
+    /// running the suite usually does have a real `systemctl`, so the
+    /// "not installed" answer is only reachable — and only assertable — through
+    /// this seam, and asserting it here never starts a process.
+    static func makeSystemctlRunner(locate: @escaping @Sendable (String) -> String?) -> Runner {
+        { arguments in
+            guard let executable = locate("systemctl") else {
+                throw ProbeError.missing("systemctl")
+            }
+            _ = try CommandRunner.run(executable, arguments, timeout: 10)
         }
-        _ = try CommandRunner.run(executable, arguments, timeout: 10)
     }
 
     /// systemd's own quoting. An unquoted path with a space would split into an
