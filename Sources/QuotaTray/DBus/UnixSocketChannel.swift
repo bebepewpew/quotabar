@@ -94,9 +94,15 @@ public final class UnixSocketChannel: DBusChannel, @unchecked Sendable {
         // "block forever" in POSIX — so truncating here does not shorten the
         // deadline, it removes it. Rounded up so a sub-microsecond value can
         // never land on zero either.
+        //
+        // Assigned through `.init` rather than written as literals: tv_usec is
+        // `__darwin_suseconds_t` (Int32) on Darwin and `__suseconds_t` (Int) on
+        // Linux, so a literal that compiles on one platform fails on the other.
         let seconds = timeout.rounded(.down)
-        var window = timeval(tv_sec: Int(seconds),
-                             tv_usec: Int(((timeout - seconds) * 1_000_000).rounded(.up)))
+        let microseconds = ((timeout - seconds) * 1_000_000).rounded(.up)
+        var window = timeval()
+        window.tv_sec = .init(seconds)
+        window.tv_usec = .init(microseconds)
         for option in [SO_RCVTIMEO, SO_SNDTIMEO] {
             _ = withUnsafePointer(to: &window) {
                 setsockopt(descriptor, SOL_SOCKET, option, $0,
