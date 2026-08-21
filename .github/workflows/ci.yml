@@ -212,6 +212,20 @@ jobs:
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
+          # The build and test commands agents may run without a prompt go
+          # through `./quotabar`, which picks the toolchain, keeps `.build`
+          # owned by the invoking user, and on macOS refuses a suite that only
+          # Command Line Tools could run. A bare `swift test` skips that refusal
+          # and reports green for a run the wrapper declined, so an allowlist
+          # entry for one is an unprompted bypass for every agent, forever.
+          if grep -Eq '"Bash\(swift (build|test)' .claude/settings.json; then
+              echo '.claude/settings.json allow-lists a raw swift build or swift test;' >&2
+              echo 'use the ./quotabar wrapper entries instead. See AGENTS.md.' >&2
+              exit 1
+          fi
+          grep -qF '"Bash(./quotabar build)"' .claude/settings.json
+          grep -qF '"Bash(./quotabar test)"' .claude/settings.json
+          grep -qF '"Bash(./quotabar cli)"' .claude/settings.json
           # Blank issues are disabled, so a form that is gone or truncated takes
           # the web chooser down with it and a person has no way in. This proves
           # the files are there and still have their top-level keys; it does not

@@ -195,10 +195,16 @@ that implements a change and uses it. Keep the two straight when adding either.
 backlog — filing what nobody is building yet and answering what arrives — and the
 second scopes a change that is about to be built.
 
-`.claude/settings.json` allows `./quotabar ...` rather than raw `docker run ...`
-deliberately: the wrapper selects the right toolchain and keeps `.build` owned by
-the invoking user. Its deny entries for pushes to `main` are a speed bump only;
-`.githooks/pre-push` and branch protection are the enforcement.
+`.claude/settings.json` allows `./quotabar build|test|cli` and no raw
+`swift build`, `swift test` or `docker run ...` at all, deliberately: the wrapper
+selects the right toolchain, keeps `.build` owned by the invoking user, and on
+macOS refuses a suite that only Command Line Tools could run. A bare `swift test`
+skips that refusal and reports green for a run the wrapper declined, so an
+allowlist entry for it is an unprompted bypass for every agent, forever. The only
+`swift` entries left are `swift run quotabar ...`, which runs the built CLI rather
+than the gate; the `Repository policy` job in `ci.yml` fails if a `swift build` or
+`swift test` entry comes back. The deny entries for pushes to `main` are a speed
+bump only; `.githooks/pre-push` and branch protection are the enforcement.
 
 These describe the rules; they do not replace them. This file stays canonical.
 

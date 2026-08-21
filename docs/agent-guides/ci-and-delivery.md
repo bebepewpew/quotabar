@@ -114,8 +114,8 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
   A `pull_request`-triggered workflow cannot have run before its PR existed. Say
   that in the PR rather than letting a reviewer read the absence as a failure.
 - **`scripts/` and `.githooks/` entries are asserted executable** by the policy
-  job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
-  line in that job.
+  job, along with `test ! -e REVIEW.md` and the `.claude/settings.json` allowlist
+  check. A new script needs `chmod +x` *and* a line in that job.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
 - **`always()` on the gate reports a red check for a cancelled run.** The
@@ -167,9 +167,14 @@ Do not exclude files to reach one, and do not lower it to land a change.
 pushes to `main`. Both are speed bumps for fast feedback. **Branch protection and
 CI are the enforcement**, and neither may be weakened to make a change pass.
 
-`.claude/settings.json` allows `./quotabar ...` rather than raw `docker run ...`
-deliberately: the wrapper picks the toolchain and keeps `.build` owned by the
-invoking user.
+`.claude/settings.json` allows `./quotabar build|test|cli`, `scripts/install-hooks`
+and `swift run quotabar ...`, plus read-only `git` and `gh` verbs — and no raw
+`swift build`, `swift test` or `docker run ...`. The wrapper picks the toolchain
+and keeps `.build` owned by the invoking user, and on macOS it refuses a suite that
+only Command Line Tools could run; a bare `swift test` skips that refusal and
+reports green for a run the wrapper declined. The policy job asserts those two
+entries are gone, because an allowlist entry applies to every agent forever and
+nothing else would notice one coming back.
 
 ## What to report
 
