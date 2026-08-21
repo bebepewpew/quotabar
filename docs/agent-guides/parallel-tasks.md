@@ -73,6 +73,17 @@ Four outcomes, and the difference matters:
 expired mid-run and three complete branches were reported the same way as broken
 ones.
 
+## Labels are not optional
+
+Every pull request the runner opens carries exactly one category label, because a
+label check fails the PR without one and the label decides which section of the
+release notes the change appears in. The publish step passes `--label`, and the
+PR title is written as a changelog line rather than a diff summary — squash-merge
+means that title is what a reader sees.
+
+If a PR ever arrives unlabelled, the check is doing its job: fix the label rather
+than the check.
+
 ## What it leaves behind
 
 The two runners keep worktrees in different places:
