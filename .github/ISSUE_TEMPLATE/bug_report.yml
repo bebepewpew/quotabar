@@ -40,6 +40,7 @@ body:
         - claude
         - gemini
         - more than one
+        - none — QuotaBar itself (install, launch, settings, history)
     validations:
       required: true
   - type: dropdown
@@ -99,8 +100,10 @@ body:
       label: The provider's own output, if the numbers are wrong
       description: |
         A parsing fix needs a fixture, and this is what one is built from: what the
-        provider itself printed. `/stats` inside `gemini`, `claude -p /usage`, or
-        the Codex usage view. Redact account identifiers before pasting.
+        provider itself printed. `/stats` inside `gemini`, or `claude -p /usage`.
+        There is no Codex equivalent to paste — QuotaBar reads Codex over the
+        app-server protocol rather than printed text, so the `--json` box above is
+        what helps there. Redact account identifiers before pasting.
       render: shell
     validations:
       required: false

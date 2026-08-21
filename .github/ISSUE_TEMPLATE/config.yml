@@ -1,6 +1,10 @@
 # Blank issues are disabled so every report arrives through a form, and so a
 # vulnerability cannot be filed as a public issue by default. The advisory link
 # below is the route for those.
+#
+# Agents file through `gh issue create --body-file` rather than `--template`,
+# which opens an editor; docs/agent-guides/backlog.md has the invocation and the
+# task.yml form for a scoped backlog item.
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability

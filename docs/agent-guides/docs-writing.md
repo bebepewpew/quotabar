@@ -18,6 +18,7 @@ on it.
 | `docs/development.md` | building, running and developing on a checkout |
 | `docs/container.md` | the Linux container path |
 | `.github/release.yml` | which label lands a change in which release-notes section |
+| `.github/ISSUE_TEMPLATE/` | the three issue forms; blank issues are off, so a new kind of entry means a new template |
 
 The wrapper pattern is deliberate and applies to new tooling too: a
 `.claude/agents/*.md`, a `.claude/skills/*/SKILL.md` and a `.codex/skills/*/SKILL.md`

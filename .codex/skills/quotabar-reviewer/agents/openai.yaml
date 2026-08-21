@@ -1,6 +1,6 @@
 interface:
   display_name: "QuotaBar Review"
   short_description: "Review a change against the QuotaBar contributor rules"
-  default_prompt: "Use $quotabar-review to review the current change against the rules in AGENTS.md."
+  default_prompt: "Use $quotabar-reviewer to review the current change against the rules in AGENTS.md."
 policy:
   allow_implicit_invocation: false

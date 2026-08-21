@@ -28,6 +28,9 @@
       "Bash(git fetch *)",
       "Bash(gh pr view *)",
       "Bash(gh pr list *)",
+      "Bash(gh issue view *)",
+      "Bash(gh issue list *)",
+      "Bash(gh search issues *)",
       "Bash(gh pr checks *)",
       "Bash(gh run list *)",
       "Bash(gh run view *)"

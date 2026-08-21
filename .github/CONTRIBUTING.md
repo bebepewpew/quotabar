@@ -63,6 +63,14 @@ Two constraints shape what is acceptable, and both are non-negotiable:
 handling, persistence compatibility, and the fixture rules a parser change has
 to satisfy. Read it before you start.
 
+Work that has already been through that discussion goes in as a
+[backlog item](https://github.com/bebepewpew/quotabar/issues/new?template=task.yml)
+instead: problem, surfaces, assertable acceptance criteria, out of scope, and the
+one category label the closing pull request will carry. AI agents file and answer
+issues through [`docs/agent-guides/backlog.md`](../docs/agent-guides/backlog.md),
+which has the non-interactive `gh issue create` invocation and what a reply may
+not claim.
+
 ## Development environment
 
 [docs/development.md](../docs/development.md) has the build, run and test
@@ -139,6 +147,18 @@ list readable, not requirements.
 | `docs` | `#0075ca` | Documentation |
 | `dependencies` | `#0366d6` | Dependencies |
 | `skip changelog` | `#cfd3d7` | none — the pull request is left out entirely |
+
+An issue carries the same category label the pull request that closes it will
+carry, so the backlog sorts the way the release notes do. Triage adds two labels
+that never reach a pull request:
+
+| Label | Colour | Means |
+| --- | --- | --- |
+| `needs-info` | `#d4c5f9` | One fact is missing and has been asked for. Closed if it never arrives |
+| `provider-limited` | `#c2e0c6` | Not buildable until a provider CLI prints the data. Nothing on our side unblocks it |
+
+Like the category labels, a maintainer creates these once under **Issues →
+Labels**.
 
 `documentation` and `dependencies` already exist in most repositories:
 GitHub creates the first with a new repository and Dependabot applies the second
