@@ -19,7 +19,7 @@ class Quotabar < Formula
   desc "Quota monitor for the Codex, Claude Code and Gemini CLIs"
   homepage "https://github.com/bebepewpew/quotabar"
   url "https://github.com/bebepewpew/quotabar/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "1d621b318af73a3c093c7bfe9a1461dc39df5917d771ec33a63c5b58b95a0c31"
   license "MIT"
   head "https://github.com/bebepewpew/quotabar.git", branch: "main"
 
