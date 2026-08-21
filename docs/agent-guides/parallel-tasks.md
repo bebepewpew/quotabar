@@ -9,6 +9,7 @@ so agents never touch each other's files. Both toolchains do the same thing:
 | Isolation | `isolation: 'worktree'` per agent | `git worktree add` per task |
 | Who runs the gate | the implementing agent, then a reviewer | the script itself |
 | Worktrees | `.claude/worktrees/` | `../quotabar-worktrees/` |
+| Who picks the category label | the publish agent | the implementing agent, on a `PR-LABEL:` line |
 | Result | a pull request per task that passes | the same |
 
 ## When this is the right tool
@@ -42,6 +43,7 @@ gate and the review. Anything held back is reported with the reason.
 
 ```sh
 scripts/codex-parallel "add a KDE tray icon" "cache provider discovery"
+scripts/codex-parallel --label tooling "teach the runner to label its PRs"
 scripts/codex-parallel --clean
 ```
 
@@ -55,12 +57,24 @@ Codex has no workflow engine, so this is a shell fan-out over `codex exec -C
 - Codex is told **not** to commit, push or open a PR. The script does that, only
   after the gate passes.
 
+Each agent is asked to end its report with two trailer lines, which the script
+reads back — `PR-TITLE:` for the changelog line and `PR-LABEL:` for the category.
+`--label <category>` supplies the label for a task whose agent named none.
+
 `QUOTABAR_CODEX_APPROVE=1` adds `--approve-for-me` so Codex does not stop for
 approval. It is off by default — unattended auto-approval should be a choice.
 
+`scripts/test-codex-parallel` is the script's own suite. `swift test` never sees
+shell, so it runs in the `Repository policy` CI job instead; it sources the
+runner without side effects, stubs `gh`, and checks the label handling below.
+
 ## Reading the result
 
-Four outcomes, and the difference matters:
+The two runners report in their own vocabularies, but the distinction that
+matters is the same one: work that is finished and pushed is not a failure, even
+when no pull request exists for it.
+
+`parallel-tasks.js` returns four states:
 
 | State | Meaning |
 | --- | --- |
@@ -73,13 +87,45 @@ Four outcomes, and the difference matters:
 expired mid-run and three complete branches were reported the same way as broken
 ones.
 
+`scripts/codex-parallel` prints one line per task, `state branch reason`, and
+exits non-zero unless every task reached `opened`. It runs no review stage, so it
+has no `reviewBlocked`; it splits the failures instead:
+
+| State | Meaning |
+| --- | --- |
+| `opened` | gate passed, pull request is open, and the label it carries is named in the reason |
+| `label-missing` | **finished and pushed**, but no category label was chosen, so no PR was opened. The reason has the `gh pr create` line to run |
+| `pr-failed` | **finished and pushed**; `gh pr create` itself failed. Same treatment |
+| `gate-failed` | build, tests or `git diff --check` failed. The worktree is kept |
+| `push-failed`, `codex-failed`, `worktree-failed` | never got that far; the log is named in the reason |
+| `no-changes` | Codex finished and edited nothing |
+
+`label-missing` and `pr-failed` are that runner's `awaitingPublish`: the branch
+is on the remote and re-running the task would duplicate the work.
+
 ## Labels are not optional
 
-Every pull request the runner opens carries exactly one category label, because a
-label check fails the PR without one and the label decides which section of the
-release notes the change appears in. The publish step passes `--label`, and the
-PR title is written as a changelog line rather than a diff summary — squash-merge
+Every pull request either runner opens carries exactly one category label,
+because the `Labels` CI job fails a pull request without one and the label
+decides which section of the release notes the change appears in. Both also
+treat the PR title as a changelog line rather than a diff summary — squash-merge
 means that title is what a reader sees.
+
+They get there differently, and the difference shows up when something is
+missing:
+
+- **`parallel-tasks.js`** picks the label in its publish step, which is an agent
+  told to choose by what the change is and to run `gh pr create … --label
+  "<category>"`.
+- **`scripts/codex-parallel`** asks each implementing agent to end its report
+  with `PR-TITLE:` and `PR-LABEL:` lines, then reads them back. The label is
+  matched against the same allowlist the `Labels` job enforces and the matched
+  literal is what reaches `gh` — agent text is untrusted, and an unrecognised
+  one is no label at all. `--label <category>` on the command line covers a task
+  whose agent named none. If nothing valid is found the branch is still pushed,
+  but the pull request is **not** opened: it would arrive red. That is the
+  `label-missing` state above, and the reason line carries the command to
+  finish it by hand.
 
 If a PR ever arrives unlabelled, the check is doing its job: fix the label rather
 than the check.

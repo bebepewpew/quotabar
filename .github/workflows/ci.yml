@@ -171,6 +171,7 @@ jobs:
               docs/*|.claude/*|.codex/*|.github/ISSUE_TEMPLATE/*|.githooks/*) ;;
               *.md|LICENSE|.gitignore|.gitattributes) ;;
               scripts/install-codex-skills|scripts/codex-parallel) ;;
+              scripts/test-codex-parallel) ;;
               .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
 
               *)
@@ -208,6 +209,7 @@ jobs:
           test -x scripts/install-hooks
           test -x scripts/install-codex-skills
           test -x scripts/codex-parallel
+          test -x scripts/test-codex-parallel
           test -x scripts/coverage
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
@@ -223,6 +225,13 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+      # The Codex runner is shell, so `swift test` never sees it. Its own suite
+      # runs here: it sources the runner without side effects and stubs `gh`,
+      # and it checks that the category label the job above demands is on every
+      # pull request the runner opens. Cheap, and it guards the list of allowed
+      # labels in this file against drifting from the runner's copy.
+      - name: Test the Codex parallel runner
+        run: scripts/test-codex-parallel
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)
