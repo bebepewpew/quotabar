@@ -164,12 +164,17 @@ public enum UsageAnalysis {
 
     // MARK: - Burn rate
 
+    /// How far back a burn rate looks. Named because it is also how far back a
+    /// forecast has to read: nothing older than this can move the rate, and
+    /// without a rate there is no projection.
+    public static let burnRateWindow: TimeInterval = 3 * 3_600
+
     /// Percentage points consumed per hour, or nil when there is not enough to
     /// say. Theil–Sen — the median of every pairwise slope — because the deadband
     /// turns usage into steps and plateaus, and a single step dominates least
     /// squares while barely moving a median.
     public static func burnRate(_ samples: [UsageSample], now: Date,
-                                window: TimeInterval = 3 * 3_600,
+                                window: TimeInterval = UsageAnalysis.burnRateWindow,
                                 maximumSamples: Int = 32) -> Double? {
         let recent = samples.filter { $0.at > now.addingTimeInterval(-window) && $0.at <= now }
             .sorted { $0.at < $1.at }

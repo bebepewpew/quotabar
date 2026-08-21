@@ -8,6 +8,19 @@ import Foundation
 /// everything here runs with stubs and never launches a subprocess.
 final class QuotaEngineTests: XCTestCase {
 
+    // MARK: - Refresh interval
+
+    /// One floor for every polling front-end. The menu bar has always offered
+    /// five minutes as its shortest choice; `quotabar --watch --interval` used to
+    /// accept any positive number, so this pins the two together rather than
+    /// leaving the CLI free to drift below what the app allows.
+    func testTheMinimumRefreshIsTheShortestTheMenuBarOffers() {
+        // Zero is the menu bar's "manual only", which a watch loop cannot honour.
+        let polling = QuotaEngine.refreshIntervals.filter { $0 > 0 }
+        XCTAssertEqual(QuotaEngine.minimumRefreshMinutes, polling.min())
+        XCTAssertGreaterThan(QuotaEngine.minimumRefreshMinutes, 0)
+    }
+
     // MARK: - discoverProviders
 
     func testDiscoverProvidersKeepsOnlyInstalledCLIsInAllCasesOrder() async {

@@ -83,6 +83,24 @@ public enum Advisor {
     /// all — it was probably uninstalled.
     public static let staleAfterDays = 45.0
 
+    /// How far back a refresh has to read for the advice it is able to give.
+    ///
+    /// `usableCycles` keeps the last `recentCycleCount` cycles and the longest
+    /// window any provider reports is a week, so eight of those are eight weeks.
+    /// One more covers the cycle currently in progress, and one more again the
+    /// sample before the oldest kept cycle — without it that cycle has no
+    /// observed start and stops counting as complete. Anything older is dropped
+    /// by `usableCycles` anyway, and a series silent for `staleAfterDays` is not
+    /// advised on at all, so reading past this only costs a `UsageSample` per
+    /// record.
+    public static let adviceLookback: TimeInterval = Double(recentCycleCount + 2) * 7 * 86_400
+
+    /// How far back a projection has to read. A forecast is the latest reading
+    /// plus a burn rate, and `UsageAnalysis.burnRate` ignores everything older
+    /// than its own window — with no sample inside it there is no rate, and so
+    /// no forecast.
+    public static let forecastLookback: TimeInterval = UsageAnalysis.burnRateWindow
+
     /// Ranked, stable and deterministic: same inputs, same order, every run.
     public static func recommendations(for inputs: [AdvisorInput], now: Date = Date()) -> [Recommendation] {
         let live = inputs.filter { input in
@@ -268,6 +286,21 @@ public enum Advisor {
 // MARK: - Assembling the inputs
 
 extension Advisor {
+    /// The "on course to run out before it resets" findings for the windows that
+    /// just reported.
+    ///
+    /// Reads back through the store the caller already has, over `forecastLookback`
+    /// and no further: a projection cannot see past its own burn-rate window, so
+    /// materialising three months of samples to compute one would be work thrown
+    /// away.
+    public static func projections(from store: any HistoryStore, for snapshots: [QuotaSnapshot],
+                                   now: Date = Date()) -> [Recommendation] {
+        let recent = store.read(from: now.addingTimeInterval(-forecastLookback), to: now).samples
+        guard !recent.isEmpty else { return [] }
+        return recommendations(for: inputs(history: recent, snapshots: snapshots, now: now), now: now)
+            .filter { $0.kind == .projectedExhaustion }
+    }
+
     /// Builds the advisor's view from stored history and the current snapshots.
     ///
     /// Labels come from the live snapshots because they are display data that

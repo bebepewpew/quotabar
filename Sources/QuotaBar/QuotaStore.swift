@@ -35,17 +35,20 @@ final class QuotaStore: ObservableObject {
     private var hasStarted = false
     private let store: StateStore
     private let cache: SnapshotCache
-    private let history: FileHistoryStore
+    private let history: any HistoryStore
     private let recorder: UsageRecorder
     private static let intervalKey = "QuotaBar.refreshIntervalMinutes"
     private static let menuBarKey = "QuotaBar.menuBarSelections.v1"
     static let refreshIntervals = QuotaEngine.refreshIntervals
 
-    init(store: StateStore = StateStoreFactory.makeDefault()) {
+    /// `history` is injectable so a test can watch which span a refresh asks
+    /// for; the app always gets the file-backed store.
+    init(store: StateStore = StateStoreFactory.makeDefault(), history: (any HistoryStore)? = nil) {
         self.store = store
         cache = SnapshotCache(store: store)
-        history = FileHistoryStore(store: store)
-        recorder = UsageRecorder(store: history)
+        let log = history ?? FileHistoryStore(store: store)
+        self.history = log
+        recorder = UsageRecorder(store: log)
         installedProviders = []
         snapshots = []
         let savedInterval = store.integer(forKey: Self.intervalKey)
@@ -76,7 +79,9 @@ final class QuotaStore: ObservableObject {
 
     /// Records the refresh and recomputes what the UI shows from it. The file
     /// work happens off the main actor; only the results land back on it.
-    private func reloadHistory(recording successful: [QuotaSnapshot]) async {
+    ///
+    /// Not private so a test can drive one reload without a scheduler.
+    func reloadHistory(recording successful: [QuotaSnapshot]) async {
         let recorder = self.recorder
         let history = self.history
         let span = Self.sparklineSpan
@@ -84,7 +89,13 @@ final class QuotaStore: ObservableObject {
         let computed = await Task.detached(priority: .utility) { () -> ([Recommendation], [HistorySeriesID: [Double?]]) in
             recorder.record(successful)
             let now = Date()
-            let all = history.read().samples
+            // Only the span this pass can render: a week for the strips, and
+            // `Advisor.adviceLookback` for every cycle the advice is allowed to
+            // rest on. Reading the whole log would materialise three months of
+            // samples per refresh to throw almost all of them away — which is
+            // what `recentUsage` promises it does not do.
+            let all = history.read(from: now.addingTimeInterval(-Advisor.adviceLookback),
+                                   to: now).samples
             let advice = Advisor.recommendations(
                 for: Advisor.inputs(history: all, snapshots: current, now: now), now: now)
             let from = now.addingTimeInterval(-span)
