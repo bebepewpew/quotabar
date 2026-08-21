@@ -1,0 +1,150 @@
+#!/bin/sh
+# Assert that the release workflow proves the Homebrew formula before it
+# publishes anything.
+#
+# The failure this guards against is not hypothetical: while `tap` ran after
+# `release`, every `brew audit`, `brew install` and `brew test` happened after
+# `gh release create` had already published notes telling users to
+# `brew install quotabar`. A failure there left a live release advertising a
+# formula the tap did not have, and a release is not retracted.
+#
+# So the shape below is the contract, and the CI policy job runs this on every
+# pull request:
+#
+#   tag      pushes refs/tags/<tag>, and needs both build jobs
+#   tap      needs tag, and installs the formula out of the tagged source
+#   release  needs tap, and is the only job that publishes
+#
+# Structural only, and deliberately dependency-free -- no yq, no PyYAML -- so it
+# runs the same on a contributor's macOS checkout and on the Linux policy job.
+# It reads top-level job keys and their `needs:` and it fails closed: a `needs:`
+# it cannot read is an error, not a pass.
+#
+# Usage: scripts/check-release-order [path-to-release.yml]
+
+set -eu
+
+workflow="${1:-}"
+if [ -z "$workflow" ]; then
+    root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+    workflow="$root/.github/workflows/release.yml"
+fi
+
+if [ ! -f "$workflow" ]; then
+    echo "check-release-order: no such workflow: $workflow" >&2
+    exit 1
+fi
+
+awk '
+function fail(message) {
+    printf "check-release-order: %s\n", message > "/dev/stderr"
+    bad = 1
+}
+
+# A key in column zero ends the jobs section, and starts it again for `jobs:`.
+/^[^ #]/ {
+    injobs = ($0 ~ /^jobs:[ \t]*$/)
+    job = ""
+    next
+}
+
+!injobs { next }
+/^[ \t]*#/ { next }
+
+# Two spaces of indent under `jobs:` is a job name.
+/^  [A-Za-z0-9_-]+:[ \t]*$/ {
+    job = $0
+    sub(/^  /, "", job)
+    sub(/:[ \t]*$/, "", job)
+    jobs[job] = 1
+    next
+}
+
+job == "" { next }
+
+/^    needs:/ {
+    list = $0
+    sub(/^    needs:[ \t]*/, "", list)
+    gsub(/[][,]/, " ", list)
+    # A bare `needs:` introduces a block sequence, which this does not read.
+    # Leave the entry unset so the fail-closed check below says so by name.
+    if (list ~ /[^ \t]/) needs[job] = " " list " "
+    next
+}
+
+# Commands, so a line-start match: the tap job also `echo`s some of these into
+# its commit message and its step summary, and quoted prose is not a step.
+/^[ \t]*git push origin "refs\/tags\// { pushes_tag[job] = 1 }
+/^[ \t]*gh release create/            { publishes[job] = 1 }
+/^[ \t]*brew audit /                  { proves["brew audit"] = job }
+/^[ \t]*brew install --build-from-source/ { proves["brew install"] = job }
+/^[ \t]*brew test /                   { proves["brew test"] = job }
+
+END {
+    split("version build-linux build-macos tag tap release container", expected, " ")
+    for (i in expected) {
+        if (!(expected[i] in jobs)) {
+            fail("no job named " expected[i] " -- this check knows the release " \
+                 "workflow by job name, so a rename means updating it too")
+        }
+    }
+
+    # Fail closed. A `needs:` written as a block sequence would read as absent,
+    # and silently passing that is how the ordering stops being enforced.
+    split("tag tap release container", wants_needs, " ")
+    for (i in wants_needs) {
+        name = wants_needs[i]
+        if ((name in jobs) && !(name in needs)) {
+            fail("could not read a flow-style `needs:` for " name \
+                 " -- keep `needs: [a, b]` on one line, or teach this check the new form")
+        }
+    }
+
+    if (index(needs["tap"], " tag ") == 0) {
+        fail("tap must need tag: the formula is rendered from the tagged source archive")
+    }
+    if (index(needs["release"], " tap ") == 0) {
+        fail("release must need tap, or `gh release create` can publish a formula " \
+             "nothing has audited, installed or tested")
+    }
+    if (index(needs["tap"], " release ") != 0) {
+        fail("tap must not need release -- that is the ordering this check exists to stop")
+    }
+    if (index(needs["tag"], " build-linux ") == 0 || index(needs["tag"], " build-macos ") == 0) {
+        fail("tag must need both build jobs, or a version number is spent on a build that failed")
+    }
+    if (index(needs["container"], " release ") == 0) {
+        fail("container must need release: it downloads the published tarball")
+    }
+
+    if (!("tag" in pushes_tag)) {
+        fail("no job pushes refs/tags/<tag>; the tag job is supposed to")
+    }
+    for (name in pushes_tag) {
+        if (name != "tag") fail("job " name " pushes the tag; only the tag job may")
+    }
+
+    if (!("release" in publishes)) {
+        fail("no job runs `gh release create`; the release job is supposed to")
+    }
+    for (name in publishes) {
+        if (name != "release") fail("job " name " publishes the release; only the release job may")
+    }
+
+    split("audit install test", proof, " ")
+    for (i in proof) {
+        step = "brew " proof[i]
+        if (!(step in proves)) {
+            fail("no job runs `" step "`, so nothing proves the formula before " \
+                 "the release is published")
+        } else if (proves[step] != "tap") {
+            fail("`" step "` runs in job " proves[step] ", not tap, which is " \
+                 "the job release waits for")
+        }
+    }
+
+    exit bad
+}
+' "$workflow"
+
+echo "check-release-order: ${workflow} verifies the formula before it publishes."

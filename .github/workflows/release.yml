@@ -9,6 +9,13 @@ name: Release
 # repository. The version stamped into the sources for the build is left
 # uncommitted in each build job's checkout, so the tag still points at the
 # untouched commit the run started from.
+#
+# The job order is a guarantee, and `needs:` is what holds it: `tag` pushes the
+# annotated tag, `tap` proves the Homebrew formula against that tag, and only
+# then does `release` publish. Any failure before that last step leaves a spent
+# tag and nothing else — never a live release whose install instructions point
+# at a formula the tap does not have. scripts/check-release-order asserts this
+# shape on every pull request.
 
 on:
   workflow_dispatch:
@@ -304,9 +311,314 @@ jobs:
           if-no-files-found: error
           path: dist/*.tar.gz
 
-  release:
-    name: Sign, tag and publish
+  tag:
+    name: Tag the release commit
     needs: [version, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    # A job of its own so the tag exists before `tap` runs. The formula is
+    # rendered from, and installed out of, the tag's source archive, so the tag
+    # has to be pushed before the formula can be proven -- and the proof has to
+    # finish before `release` publishes anything. A run that dies after this
+    # job spends a version number and leaves an orphan tag; it does not leave a
+    # published release pointing at a formula nobody has.
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Create the annotated tag
+        run: |
+          set -euo pipefail
+          # Only refs/tags/<tag> is pushed, and it points at the commit this run
+          # started from. Nothing lands on main.
+          dirty="$(git status --porcelain)"
+          if [ -n "$dirty" ]; then
+            echo "::error::refusing to tag a dirty checkout"
+            printf '%s\n' "$dirty"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "QuotaBar ${VERSION}" "$GITHUB_SHA"
+          git push origin "refs/tags/${TAG}"
+
+  tap:
+    name: Publish the Homebrew tap
+    # `tag`, not `release`: everything below reads the tag's source archive,
+    # which exists as soon as the ref is pushed and owes nothing to a GitHub
+    # release. Running here rather than after publication is the point -- a
+    # formula that fails `brew audit`, `brew install` or `brew test` stops the
+    # run while there is still no release advertising it.
+    needs: [version, tag]
+    # macOS because this job installs the formula before it publishes it. A
+    # Linux runner could push the commit but could not prove it works, which is
+    # how a placeholder checksum once reached users.
+    runs-on: macos-15
+    # `concurrency: release` has cancel-in-progress: false, so a hung
+    # `brew install --build-from-source` would hold the group for the default
+    # 360 minutes and block every later release. This is the first job here
+    # running a third-party build of unbounded duration.
+    timeout-minutes: 45
+    # `secrets.*` ignores `permissions:` and is readable by a workflow_dispatch
+    # run on ANY branch, and the "release from main only" guard is in this same
+    # file, which such a branch would control. An environment with a deployment
+    # branch policy is evaluated by GitHub against the ref, so a modified
+    # workflow on a side branch cannot reach TAP_TOKEN at all.
+    environment: tap
+    # Only to check this repository out for the formula. Nothing here writes.
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      TAP_REPOSITORY: bebepewpew/homebrew-tap
+      HOMEBREW_NO_ANALYTICS: 1
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+      # `brew audit --online` calls the GitHub API. Unauthenticated, it shares
+      # the runner's IP rate limit with everything else on that machine, and a
+      # limit here now fails the run before anything is published: the tag is
+      # spent, but no release ever points at a formula the tap does not have.
+      HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require the tap token
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            {
+              echo "::error::TAP_TOKEN is not set on the 'tap' environment, so the"
+              echo "::error::Homebrew tap cannot be updated. Create a fine-grained personal"
+              echo "::error::access token with Contents: read and write scoped to"
+              echo "::error::${TAP_REPOSITORY} only, then:"
+              echo "::error::  gh secret set TAP_TOKEN --env tap --repo ${GITHUB_REPOSITORY}"
+            } >&2
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Checksum the tagged source tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The tag is created from GITHUB_SHA, and that commit is what was
+          # built and is about to be signed, attested and published. Re-check it
+          # here: `concurrency` stops a second run, not a force-moved tag between
+          # the tag job and this one, and everything below would happily certify
+          # substituted source.
+          resolved="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}" "refs/tags/${TAG}^{}" | cut -f1)"
+          if [ "$resolved" != "$GITHUB_SHA" ]; then
+            echo "::error::${TAG} resolves to ${resolved:-nothing}, not the released ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          tarball="$RUNNER_TEMP/source.tar.gz"
+          # GitHub materializes a tag archive a moment after the ref appears, so
+          # retry — but a bounded number of times, with a bounded curl.
+          downloaded=false
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsSL --max-time 120 -o "$tarball" "$url"; then
+              downloaded=true
+              break
+            fi
+            echo "attempt ${attempt}: ${url} is not available yet"
+            sleep 6
+          done
+          if [ "$downloaded" != true ]; then
+            echo "::error::could not download ${url}"
+            exit 1
+          fi
+          tar -tzf "$tarball" > /dev/null
+          # Assigned first and checked. `echo "K=$(cmd)"` succeeds even when the
+          # substitution fails, which would write an empty checksum that the
+          # grep guard below happily matches against `sha256 ""`.
+          checksum="$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)"
+          if [ ${#checksum} -ne 64 ]; then
+            echo "::error::could not checksum ${url}" >&2
+            exit 1
+          fi
+          {
+            echo "SOURCE_URL=${url}"
+            echo "SOURCE_SHA256=${checksum}"
+          } >> "$GITHUB_ENV"
+
+      - name: Clone the tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote="https://github.com/${TAP_REPOSITORY}.git"
+          # Resolve the default branch rather than assuming `main`. Verifying one
+          # branch and pushing to another would succeed, satisfy `set -e`, and
+          # report a release that changed nothing for users, because Homebrew
+          # only ever reads the default branch.
+          branch="$(git ls-remote --symref "$remote" HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
+          if [ -z "$branch" ]; then
+            echo "::error::could not resolve the default branch of ${TAP_REPOSITORY}" >&2
+            exit 1
+          fi
+          echo "TAP_BRANCH=${branch}" >> "$GITHUB_ENV"
+          # No credential in this URL. The tap is public, so reading it needs
+          # none, and a tokenized remote would sit in .git/config for the rest
+          # of the job — including while `brew install` below runs the formula's
+          # Ruby and compiles Swift. The push step supplies the token instead.
+          git clone --depth 1 --branch "$branch" "$remote" "$RUNNER_TEMP/tap"
+
+      - name: Render the formula into the tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          formula="$RUNNER_TEMP/tap/Formula/quotabar.rb"
+          mkdir -p "$(dirname "$formula")"
+          # Overwrite rather than edit in place. `install` and `test` execute on
+          # every user's machine and on this runner moments from now, so the
+          # copy that runs must be the reviewed one from this repository, not
+          # whatever the tap happens to hold.
+          install -m 0644 packaging/homebrew/quotabar.rb "$formula"
+          # Line-anchored so the `head` URL and any other quoted string are left
+          # alone. Both keys appear exactly once, at the top of the class.
+          perl -pi -e 's{^(\s*url\s+")[^"]*(")}{$1$ENV{SOURCE_URL}$2}' "$formula"
+          perl -pi -e 's{^(\s*sha256\s+")[^"]*(")}{$1$ENV{SOURCE_SHA256}$2}' "$formula"
+          grep -Fq "\"${SOURCE_URL}\"" "$formula"
+          grep -Fq "\"${SOURCE_SHA256}\"" "$formula"
+          git -C "$RUNNER_TEMP/tap" diff -- Formula/quotabar.rb
+
+      - name: Register the clone as a tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Homebrew finds taps by directory layout, so this verifies the
+          # rendered working copy rather than whatever the remote holds.
+          taps="$(brew --repository)/Library/Taps/bebepewpew"
+          mkdir -p "$taps"
+          ln -sfn "$RUNNER_TEMP/tap" "$taps/homebrew-tap"
+          brew tap
+
+          # `brew tap` exits 0 whether or not the tap appeared, and resolving
+          # `bebepewpew/tap/quotabar` by name can auto-tap from the network —
+          # HOMEBREW_NO_AUTO_UPDATE disables updating, not auto-tapping. Without
+          # this assertion the audit, install and test below could all pass
+          # against the PREVIOUS formula fetched from the remote, and the job
+          # would then push the one nothing verified. Compare contents rather
+          # than paths, because `brew formula` prints the tap path and the
+          # rendered file is reached through a symlink.
+          resolved="$(brew formula bebepewpew/tap/quotabar)"
+          if ! cmp -s "$resolved" "$RUNNER_TEMP/tap/Formula/quotabar.rb"; then
+            echo "::error::brew resolved ${resolved}, which is not the formula this job rendered" >&2
+            exit 1
+          fi
+          echo "brew resolves bebepewpew/tap/quotabar to ${resolved}"
+
+      - name: Verify the formula installs before publishing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The order here is the whole point of this job: audit, install and
+          # test run against the rendered formula, the push below only happens
+          # if they pass, and `release` only runs if this whole job passed. A
+          # broken formula therefore fails the run with nothing published,
+          # instead of reaching users, which is what went wrong with v0.1.0.
+          #
+          # `--strict` is deliberately not here. The tap runs it on every push,
+          # where a newly added Homebrew lint rule is informative; here it could
+          # block shipping a release for a house-style change nobody made.
+          brew audit --online bebepewpew/tap/quotabar
+          brew install --build-from-source --verbose bebepewpew/tap/quotabar
+          brew test bebepewpew/tap/quotabar
+          # Not a repeat of `brew test`: this proves the binary was linked onto
+          # PATH, which the formula's own test block does not. No pipe — under
+          # `set -o pipefail` a `| grep -q` would turn SIGPIPE into a failure,
+          # which is the trap this workflow warns about elsewhere.
+          test "$(quotabar --version)" = "quotabar ${VERSION}"
+
+      - name: Publish the formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/tap"
+          if git diff --quiet -- Formula/quotabar.rb; then
+            # A re-run of this same tag, after an earlier attempt already pushed
+            # the formula. The tap already serves this version, and everything
+            # above verified it again, so this is a proven no-op rather than a
+            # silent skip or a failure.
+            echo "Formula already points at ${TAG}; nothing to push."
+            echo "PUBLISHED=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/quotabar.rb
+          # A file, not `-m`, so the body is not indented by this script's own
+          # indentation.
+          message="$RUNNER_TEMP/tap-commit.txt"
+          {
+            echo "quotabar ${VERSION}"
+            echo
+            echo "Rendered from packaging/homebrew/quotabar.rb in"
+            echo "${GITHUB_REPOSITORY} for ${TAG}. Verified with brew audit,"
+            echo "brew install --build-from-source and brew test on macos-15"
+            echo "before this commit was created."
+          } > "$message"
+          git commit -F "$message"
+
+          # `-c`, not `git config`: the helper is scoped to this one command and
+          # never written to .git/config. The token itself reaches git on the
+          # helper's stdout, so it is in neither argv (and so not in `ps`) nor
+          # any URL git could echo back on failure. The empty helper first clears
+          # anything inherited. Do NOT switch to http.extraheader with base64 —
+          # that lands in argv and base64 defeats the runner's log masking.
+          #
+          # No pull request: the tap holds generated output, not reviewable
+          # source — the formula that runs on users' machines is reviewed here,
+          # in packaging/homebrew/quotabar.rb, behind branch protection.
+          git -c credential.helper= \
+              -c credential.helper='!f() { echo username=x-access-token; echo "password=${TAP_TOKEN}"; }; f' \
+              push origin "HEAD:${TAP_BRANCH}"
+          echo "PUBLISHED=true" >> "$GITHUB_ENV"
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Homebrew tap"
+            echo
+            if [ "${PUBLISHED:-}" = true ]; then
+              # Only claim installability once the push actually happened. This
+              # step runs `if: always()`, and printing these two lines after a
+              # failed job reads as a successful publication.
+              echo "\`\`\`sh"
+              echo "brew tap bebepewpew/tap"
+              echo "brew install quotabar"
+              echo "\`\`\`"
+            else
+              echo "**Not published.** The tap still serves the previous formula."
+            fi
+            echo
+            echo "- tap: https://github.com/${TAP_REPOSITORY}"
+            echo "- branch: ${TAP_BRANCH:-not resolved}"
+            echo "- url: ${SOURCE_URL:-not resolved}"
+            echo "- sha256: \`${SOURCE_SHA256:-not resolved}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Sign and publish
+    # `tap` is in here on purpose: it audits, builds and installs the formula
+    # against the tagged source, and until it has, nothing may be published.
+    # The artifacts come from the two build jobs, which `tag` already waited on.
+    needs: [version, build-linux, build-macos, tag, tap]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -324,8 +636,10 @@ jobs:
       - name: Download the built artifacts
         uses: actions/download-artifact@v8
         with:
-          # Outside the checkout on purpose: the tag step refuses to run against
-          # a dirty working tree, and release files are not repository content.
+          # Outside the checkout on purpose: release files are not repository
+          # content. Tagging is a job of its own now, so nothing downloaded here
+          # can dirty the tree that job refuses to tag from — and keeping the two
+          # apart is what makes that true rather than lucky.
           path: ${{ runner.temp }}/dist
           merge-multiple: true
 
@@ -395,22 +709,6 @@ jobs:
             ${{ runner.temp }}/dist/*.deb
             ${{ runner.temp }}/dist/*.rpm
             ${{ runner.temp }}/dist/SHA256SUMS
-
-      - name: Create the annotated tag
-        run: |
-          set -euo pipefail
-          # Only refs/tags/<tag> is pushed, and it points at the commit this run
-          # started from. Nothing lands on main.
-          dirty="$(git status --porcelain)"
-          if [ -n "$dirty" ]; then
-            echo "::error::refusing to tag a dirty checkout"
-            printf '%s\n' "$dirty"
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "QuotaBar ${VERSION}" "$GITHUB_SHA"
-          git push origin "refs/tags/${TAG}"
 
       - name: Write the release notes
         # The hand-written half only. The categorised "What's changed" list and
@@ -520,263 +818,3 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}
             ghcr.io/${{ github.repository }}:latest
-
-  tap:
-    name: Publish the Homebrew tap
-    needs: [version, release]
-    # macOS because this job installs the formula before it publishes it. A
-    # Linux runner could push the commit but could not prove it works, which is
-    # how a placeholder checksum once reached users.
-    runs-on: macos-15
-    # `concurrency: release` has cancel-in-progress: false, so a hung
-    # `brew install --build-from-source` would hold the group for the default
-    # 360 minutes and block every later release. This is the first job here
-    # running a third-party build of unbounded duration.
-    timeout-minutes: 45
-    # `secrets.*` ignores `permissions:` and is readable by a workflow_dispatch
-    # run on ANY branch, and the "release from main only" guard is in this same
-    # file, which such a branch would control. An environment with a deployment
-    # branch policy is evaluated by GitHub against the ref, so a modified
-    # workflow on a side branch cannot reach TAP_TOKEN at all.
-    environment: tap
-    # Only to check this repository out for the formula. Nothing here writes.
-    permissions:
-      contents: read
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-      TAG: ${{ needs.version.outputs.tag }}
-      TAP_REPOSITORY: bebepewpew/homebrew-tap
-      HOMEBREW_NO_ANALYTICS: 1
-      HOMEBREW_NO_AUTO_UPDATE: 1
-      HOMEBREW_NO_INSTALL_CLEANUP: 1
-      # `brew audit --online` calls the GitHub API. Unauthenticated, it shares
-      # the runner's IP rate limit, and it runs after `gh release create` has
-      # already published — a limit here means a live release whose notes point
-      # at a formula the tap does not have yet.
-      HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
-    steps:
-      - name: Require the tap token
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${TAP_TOKEN:-}" ]; then
-            {
-              echo "::error::TAP_TOKEN is not set on the 'tap' environment, so the"
-              echo "::error::Homebrew tap cannot be updated. Create a fine-grained personal"
-              echo "::error::access token with Contents: read and write scoped to"
-              echo "::error::${TAP_REPOSITORY} only, then:"
-              echo "::error::  gh secret set TAP_TOKEN --env tap --repo ${GITHUB_REPOSITORY}"
-            } >&2
-            exit 1
-          fi
-
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Checksum the tagged source tarball
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The tag is created from GITHUB_SHA, and that commit is what was
-          # built, signed and attested. Re-check it here: `concurrency` stops a
-          # second run, not a force-moved tag between the release job and this
-          # one, and everything below would happily certify substituted source.
-          resolved="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}" "refs/tags/${TAG}^{}" | cut -f1)"
-          if [ "$resolved" != "$GITHUB_SHA" ]; then
-            echo "::error::${TAG} resolves to ${resolved:-nothing}, not the released ${GITHUB_SHA}" >&2
-            exit 1
-          fi
-
-          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          tarball="$RUNNER_TEMP/source.tar.gz"
-          # GitHub materializes a tag archive a moment after the ref appears, so
-          # retry — but a bounded number of times, with a bounded curl.
-          downloaded=false
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsSL --max-time 120 -o "$tarball" "$url"; then
-              downloaded=true
-              break
-            fi
-            echo "attempt ${attempt}: ${url} is not available yet"
-            sleep 6
-          done
-          if [ "$downloaded" != true ]; then
-            echo "::error::could not download ${url}"
-            exit 1
-          fi
-          tar -tzf "$tarball" > /dev/null
-          # Assigned first and checked. `echo "K=$(cmd)"` succeeds even when the
-          # substitution fails, which would write an empty checksum that the
-          # grep guard below happily matches against `sha256 ""`.
-          checksum="$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)"
-          if [ ${#checksum} -ne 64 ]; then
-            echo "::error::could not checksum ${url}" >&2
-            exit 1
-          fi
-          {
-            echo "SOURCE_URL=${url}"
-            echo "SOURCE_SHA256=${checksum}"
-          } >> "$GITHUB_ENV"
-
-      - name: Clone the tap
-        shell: bash
-        run: |
-          set -euo pipefail
-          remote="https://github.com/${TAP_REPOSITORY}.git"
-          # Resolve the default branch rather than assuming `main`. Verifying one
-          # branch and pushing to another would succeed, satisfy `set -e`, and
-          # report a release that changed nothing for users, because Homebrew
-          # only ever reads the default branch.
-          branch="$(git ls-remote --symref "$remote" HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
-          if [ -z "$branch" ]; then
-            echo "::error::could not resolve the default branch of ${TAP_REPOSITORY}" >&2
-            exit 1
-          fi
-          echo "TAP_BRANCH=${branch}" >> "$GITHUB_ENV"
-          # No credential in this URL. The tap is public, so reading it needs
-          # none, and a tokenized remote would sit in .git/config for the rest
-          # of the job — including while `brew install` below runs the formula's
-          # Ruby and compiles Swift. The push step supplies the token instead.
-          git clone --depth 1 --branch "$branch" "$remote" "$RUNNER_TEMP/tap"
-
-      - name: Render the formula into the tap
-        shell: bash
-        run: |
-          set -euo pipefail
-          formula="$RUNNER_TEMP/tap/Formula/quotabar.rb"
-          mkdir -p "$(dirname "$formula")"
-          # Overwrite rather than edit in place. `install` and `test` execute on
-          # every user's machine and on this runner moments from now, so the
-          # copy that runs must be the reviewed one from this repository, not
-          # whatever the tap happens to hold.
-          install -m 0644 packaging/homebrew/quotabar.rb "$formula"
-          # Line-anchored so the `head` URL and any other quoted string are left
-          # alone. Both keys appear exactly once, at the top of the class.
-          perl -pi -e 's{^(\s*url\s+")[^"]*(")}{$1$ENV{SOURCE_URL}$2}' "$formula"
-          perl -pi -e 's{^(\s*sha256\s+")[^"]*(")}{$1$ENV{SOURCE_SHA256}$2}' "$formula"
-          grep -Fq "\"${SOURCE_URL}\"" "$formula"
-          grep -Fq "\"${SOURCE_SHA256}\"" "$formula"
-          git -C "$RUNNER_TEMP/tap" diff -- Formula/quotabar.rb
-
-      - name: Register the clone as a tap
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Homebrew finds taps by directory layout, so this verifies the
-          # rendered working copy rather than whatever the remote holds.
-          taps="$(brew --repository)/Library/Taps/bebepewpew"
-          mkdir -p "$taps"
-          ln -sfn "$RUNNER_TEMP/tap" "$taps/homebrew-tap"
-          brew tap
-
-          # `brew tap` exits 0 whether or not the tap appeared, and resolving
-          # `bebepewpew/tap/quotabar` by name can auto-tap from the network —
-          # HOMEBREW_NO_AUTO_UPDATE disables updating, not auto-tapping. Without
-          # this assertion the audit, install and test below could all pass
-          # against the PREVIOUS formula fetched from the remote, and the job
-          # would then push the one nothing verified. Compare contents rather
-          # than paths, because `brew formula` prints the tap path and the
-          # rendered file is reached through a symlink.
-          resolved="$(brew formula bebepewpew/tap/quotabar)"
-          if ! cmp -s "$resolved" "$RUNNER_TEMP/tap/Formula/quotabar.rb"; then
-            echo "::error::brew resolved ${resolved}, which is not the formula this job rendered" >&2
-            exit 1
-          fi
-          echo "brew resolves bebepewpew/tap/quotabar to ${resolved}"
-
-      - name: Verify the formula installs before publishing it
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The order here is the whole point of this job: audit, install and
-          # test run against the rendered formula, and the push below only
-          # happens if they pass. A broken formula therefore fails the release
-          # instead of reaching users, which is what went wrong with v0.1.0.
-          #
-          # `--strict` is deliberately not here. The tap runs it on every push,
-          # where a newly added Homebrew lint rule is informative; here it could
-          # block shipping a release for a house-style change nobody made.
-          brew audit --online bebepewpew/tap/quotabar
-          brew install --build-from-source --verbose bebepewpew/tap/quotabar
-          brew test bebepewpew/tap/quotabar
-          # Not a repeat of `brew test`: this proves the binary was linked onto
-          # PATH, which the formula's own test block does not. No pipe — under
-          # `set -o pipefail` a `| grep -q` would turn SIGPIPE into a failure,
-          # which is the trap this workflow warns about elsewhere.
-          test "$(quotabar --version)" = "quotabar ${VERSION}"
-
-      - name: Publish the formula
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/tap"
-          if git diff --quiet -- Formula/quotabar.rb; then
-            # Re-running a release that already published. The verification above
-            # still ran, so this is a proven no-op rather than a silent skip.
-            # The tap already serves this version, and everything above still
-            # verified it, so this is a proven no-op rather than a failure.
-            echo "Formula already points at ${TAG}; nothing to push."
-            echo "PUBLISHED=true" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/quotabar.rb
-          # A file, not `-m`, so the body is not indented by this script's own
-          # indentation.
-          message="$RUNNER_TEMP/tap-commit.txt"
-          {
-            echo "quotabar ${VERSION}"
-            echo
-            echo "Rendered from packaging/homebrew/quotabar.rb in"
-            echo "${GITHUB_REPOSITORY} for ${TAG}. Verified with brew audit,"
-            echo "brew install --build-from-source and brew test on macos-15"
-            echo "before this commit was created."
-          } > "$message"
-          git commit -F "$message"
-
-          # `-c`, not `git config`: the helper is scoped to this one command and
-          # never written to .git/config. The token itself reaches git on the
-          # helper's stdout, so it is in neither argv (and so not in `ps`) nor
-          # any URL git could echo back on failure. The empty helper first clears
-          # anything inherited. Do NOT switch to http.extraheader with base64 —
-          # that lands in argv and base64 defeats the runner's log masking.
-          #
-          # No pull request: the tap holds generated output, not reviewable
-          # source — the formula that runs on users' machines is reviewed here,
-          # in packaging/homebrew/quotabar.rb, behind branch protection.
-          git -c credential.helper= \
-              -c credential.helper='!f() { echo username=x-access-token; echo "password=${TAP_TOKEN}"; }; f' \
-              push origin "HEAD:${TAP_BRANCH}"
-          echo "PUBLISHED=true" >> "$GITHUB_ENV"
-
-      - name: Summarise
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "### Homebrew tap"
-            echo
-            if [ "${PUBLISHED:-}" = true ]; then
-              # Only claim installability once the push actually happened. This
-              # step runs `if: always()`, and printing these two lines after a
-              # failed job reads as a successful publication.
-              echo "\`\`\`sh"
-              echo "brew tap bebepewpew/tap"
-              echo "brew install quotabar"
-              echo "\`\`\`"
-            else
-              echo "**Not published.** The tap still serves the previous formula."
-            fi
-            echo
-            echo "- tap: https://github.com/${TAP_REPOSITORY}"
-            echo "- branch: ${TAP_BRANCH:-not resolved}"
-            echo "- url: ${SOURCE_URL:-not resolved}"
-            echo "- sha256: \`${SOURCE_SHA256:-not resolved}\`"
-          } >> "$GITHUB_STEP_SUMMARY"

@@ -34,7 +34,7 @@ and write its caption at the same time, and delete the placeholder it replaces.
 | `Package.swift`, `Sources/`, `Tests/` | The SwiftPM package: every target and its tests |
 | `Resources/` | `Info.plist` and the icons the macOS app bundle is built from |
 | `packaging/` | What the release workflow builds distributables from: the nfpm configuration for the `.deb` and `.rpm`, the container `Dockerfile`, and `homebrew/quotabar.rb` |
-| `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` |
+| `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel`, `check-release-order` |
 | `docs/` | [`development.md`](docs/development.md) for building and testing from a checkout, [`container.md`](docs/container.md) for the published image, and `agent-guides/` for the long-form guidance the agent tooling points at |
 | `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `ISSUE_TEMPLATE/`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md` |
 | `.claude/`, `.codex/`, `.githooks/` | Per-tool wrappers and the repository hooks |
