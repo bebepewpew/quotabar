@@ -157,20 +157,12 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
 
     /// Advisory lock on a sidecar file — the state file itself is replaced by an
     /// atomic rename, which would leave each writer holding a different inode.
+    ///
+    /// The read-merge-write above already prevents the stale-snapshot clobber on
+    /// its own; the lock only closes the interleaving window. `FileLock` holds the
+    /// implementation because the history log needs the same sidecar guarantee.
     private func withFileLock(_ body: () -> Void) {
-        #if os(Windows)
-        // `flock` is POSIX-only; `LockFileEx` is the equivalent and belongs with a
-        // Windows front-end. The read-merge-write above already prevents the
-        // stale-snapshot clobber; the lock only closes the interleaving window.
-        body()
-        #else
-        let descriptor = open(url.path + ".lock", O_CREAT | O_RDWR, 0o644)
-        guard descriptor >= 0 else { return body() }
-        defer { close(descriptor) }
-        guard flock(descriptor, LOCK_EX) == 0 else { return body() }
-        defer { flock(descriptor, LOCK_UN) }
-        body()
-        #endif
+        FileLock.withExclusiveLock(at: FileLock.sidecarURL(for: url), body)
     }
 
     private enum JSONValue: Codable {

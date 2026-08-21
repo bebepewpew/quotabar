@@ -38,10 +38,24 @@ log, or store provider credentials or complete login prompts.
   and return concise actionable errors without exposing raw sensitive output.
 - Keep UI and observable state on the main actor; do blocking CLI work off the
   cooperative executor.
-- Persist through `StateStore`: `UserDefaults` on macOS, an XDG JSON file on
-  Linux. Keep storage keys stable and decoding backward compatible.
+- Persist settings and small state through `StateStore`: `UserDefaults` on macOS,
+  an XDG JSON file on Linux. Keep storage keys stable and decoding backward
+  compatible.
+- Persist usage history through `HistoryStore` instead. It is a second seam, not
+  a bypass: `StateStore` rewrites its whole file on every write, which is the
+  wrong shape for an append-only series that has to retain three months. The log
+  is `history.bin` under `~/Library/Application Support/QuotaBar` on macOS,
+  `${XDG_STATE_HOME:-~/.local/state}/quotabar` on Linux — history is state, not
+  configuration. Its series catalogue still goes through `StateStore`.
+- Keep the history format backward compatible the same way storage keys are kept
+  stable. The header carries a version and a record stride; a file written by a
+  newer build is read as far as it can be and **never appended to or deleted**,
+  and a file that is not ours is left alone rather than replaced.
+- Recording history is best effort. A history file that cannot be written or is
+  damaged must never turn a working quota refresh into a failure — read paths
+  report what they skipped, write paths stay silent.
 - Use stable quota-window keys; labels and reset timestamps are display data,
-  not identity.
+  not identity. History is keyed on the window key for the same reason.
 
 ## Validation
 
