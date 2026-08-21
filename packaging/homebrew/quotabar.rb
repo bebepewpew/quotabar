@@ -1,20 +1,25 @@
 # Homebrew formula for the `quotabar` command.
 #
-#   brew tap bebepewpew/quotabar https://github.com/bebepewpew/quotabar
-#   brew install bebepewpew/quotabar/quotabar
+#   brew tap bebepewpew/tap
+#   brew install quotabar
 #
-# The explicit URL is what lets this live in the project repository rather than
-# a separate homebrew-quotabar tap.
+# THIS FILE IS THE SOURCE OF TRUTH, AND IT IS NOT A TAP. Homebrew installs from
+# bebepewpew/homebrew-tap; the release workflow copies this file there, rewrites
+# `url` and `sha256`, and only pushes once it has audited, installed and tested
+# the result. It lives here rather than in the tap because `install` and `test`
+# below execute on every user's machine, so they belong behind this repository's
+# branch protection and review. The tap is generated output; edits made directly
+# there are overwritten by the next release.
+#
+# `url` and `sha256` are the only lines the workflow rewrites, and it does so
+# with a line-anchored substitution, so keep each on a line of its own. They
+# track the last published release; a stale pair here is harmless because the
+# workflow replaces them before anything installs from them.
 #
 # It builds from source deliberately. A downloaded Mach-O that Apple has not
 # notarized gets the com.apple.quarantine attribute and Gatekeeper blocks it on
 # first run; a binary compiled on the installing machine never carries that
 # attribute, so `brew install` just works.
-#
-# After publishing a release, .github/workflows/release.yml opens a pull request
-# that moves the tag in `url` and replaces `sha256` with the checksum of that
-# tag's source tarball. Keep those two lines each on one line of their own: the
-# workflow rewrites them with a line-anchored substitution.
 class Quotabar < Formula
   desc "Quota monitor for the Codex, Claude Code and Gemini CLIs"
   homepage "https://github.com/bebepewpew/quotabar"
