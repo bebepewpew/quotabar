@@ -139,6 +139,14 @@ Two deliberate exceptions:
 
 A floating `@main` is a remote-code-execution path into CI. It is never acceptable.
 
+`github/codeql-action` is pinned in two workflows at once — `init` and `analyze`
+in `codeql.yml`, `upload-sarif` twice in `security-scan.yml` — and the policy job
+fails a change that leaves them naming different majors. They drifted to `v3` and
+`v4` once, and the stale half was the Swift analysis: a retired major there is not
+a security-scan inconvenience, it fails `Analyse Swift`, which `gate` needs, which
+blocks every merge. Bumping one file and not the other is now red rather than
+quiet, including on a Dependabot pull request.
+
 ## Permissions and secrets
 
 `permissions: contents: read` at the top of each workflow, escalated **per job**
