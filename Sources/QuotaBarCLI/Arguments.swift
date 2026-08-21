@@ -97,8 +97,10 @@ struct Arguments {
         if command != .status, format == .waybar {
             throw ArgumentError.invalidValue("--format", "waybar is only available for the default status output")
         }
-        if command != .history, format == .csv {
-            throw ArgumentError.invalidValue("--format", "csv is only available for `quotabar history`")
+        if command == .advise, format == .csv {
+            // Advice is prose with a severity and evidence lines, not a table of
+            // numbers; there is no honest row to write for it.
+            throw ArgumentError.invalidValue("--format", "csv is not available for `quotabar advise`")
         }
     }
 
@@ -128,7 +130,8 @@ struct Arguments {
 
     OPTIONS
       --json                 Emit as JSON
-      --format <fmt>         text (default), json, waybar (status), csv (history)
+      --format <fmt>         text (default), json, csv (status, history),
+                             waybar (status)
       --provider <name>      Limit to one provider; repeatable (gemini, claude, codex)
       --watch                Keep running and re-probe on an interval
       --interval <minutes>   Refresh interval for --watch (default 15)
@@ -139,7 +142,8 @@ struct Arguments {
       -h, --help             Show this help
 
     HISTORY OPTIONS
-      --since <span>         How far back to read: 90m, 24h, 7d, 3w (default 7d)
+      --since <span>         How far back to read: 90m, 24h, 7d, 3w (default 7d).
+                             --format csv covers this window, not all 120 days
       --window <key>         Limit to one quota window
       --cycles               List completed cycles instead of the usage graph
       --clear                Delete all recorded history and exit

@@ -73,31 +73,40 @@ person and useless in an agent session. Write the body instead: a GitHub issue
 form renders each answer under `###` and its field label, so a body that mirrors
 those headings is indistinguishable from a submitted form.
 
+What follows is the shape, not a request. Copy the structure and replace every
+line of the content with what you actually found, after running the search
+above: a worked example is code and goes stale like code, so whatever this one
+describes may be filed, or already shipped, by the time you read it.
+
 ```sh
 body=$(mktemp)
 cat > "$body" <<'BODY'
 ### Problem
 
-`quotabar --format csv` is rejected — csv is accepted only by `quotabar history`
-— so a cron job that records the current numbers has to parse `--json` instead.
+`quotabar` exits 0 whether every window is at 4% or at 99% used — the only
+non-zero exits are 1 when a probe fails and 2 for invalid usage — so a CI step
+that should stop before a quota runs out has to parse `--json` and compare the
+numbers itself.
 
 ### Surfaces in scope
 
-Machine-readable output (`--json`, waybar, csv)
+`quotabar` CLI text output
 
 ### Acceptance criteria
 
-- `quotabar --format csv` prints a header row and one row per provider window,
-  instead of failing with `invalid value for --format: csv is only available for
-  quotabar history`.
-- A window whose reset time is unknown leaves that column empty rather than
-  omitting it or printing a placeholder date.
-- `--format waybar` is still rejected for `quotabar history`, unchanged.
+- `quotabar --fail-at 90` exits 3 when any reported window is at or above 90%
+  used, and 0 when every one of them is below it; exactly 90.0% exits 3.
+- A probe that failed still exits 1, and 1 outranks 3, so a provider that could
+  not be read is never reported as an exhausted quota.
+- `--fail-at 120` exits 2 with `invalid value for --fail-at: 120 (expected 0
+  to 100)`, and `--fail-at` with nothing after it exits 2 with `--fail-at
+  requires a value`.
+- Without the flag, every exit code is what it is today.
 
 ### Out of scope
 
-The text table, the menu bar, `quotabar advise`. No new probe, and no change to
-what `--json` emits.
+The 80% and 95% `--notify` thresholds, the menu bar, `quotabar history` and
+`quotabar advise`. No new probe, and no change to what any format prints.
 
 ### Category label
 
@@ -105,14 +114,19 @@ feature
 
 ### Risks and compatibility
 
-A new output format is a public interface from the first release that carries
-it: the column set and their order are what a script depends on, so they are
-decided here rather than in review. Nothing existing changes.
+A new exit code is a public interface from the first release that carries it: a
+script reading "non-zero" as "the probe failed" starts seeing 3. That is why the
+failure code keeps precedence and the flag is opt-in. Nothing existing changes.
+
+### Notes
+
+`--fail-at` rather than `--threshold`, which would read as though it moved the
+notification thresholds. A preference, not a criterion.
 
 BODY
 
 gh issue create \
-  --title "Accept --format csv for the status table" \
+  --title "Fail with exit code 3 when a window reaches --fail-at" \
   --body-file "$body" \
   --label feature
 ```

@@ -8,7 +8,7 @@ without knowing which is how a gate quietly stops gating.
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
 | `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
-| `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
+| `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because the menu-bar app compiles nowhere else, so one build there covers four of the five targets — everything but the Linux-only `QuotaTrayApp` |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
 

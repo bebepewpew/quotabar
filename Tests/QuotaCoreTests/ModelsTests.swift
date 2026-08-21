@@ -165,6 +165,55 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(restored.resetAt).timeIntervalSince1970, reset.timeIntervalSince1970, accuracy: 0.001)
     }
 
+    /// The encoder is deliberately not symmetric with the decoder: `--json` is a
+    /// machine-readable interface, so a window with no known reset time carries
+    /// `"resetAt": null` instead of dropping the key. A consumer then reads a
+    /// value rather than guarding a key, and can tell an unknown reset time
+    /// apart from a truncated payload.
+    func testWindowEncodesResetAtAsNullWhenThereIsNoResetTime() throws {
+        let window = QuotaWindow(label: "Weekly limit", usedPercent: 12.5, resetAt: nil)
+        let object = try XCTUnwrap(JSONSerialization
+            .jsonObject(with: JSONEncoder().encode(window)) as? [String: Any])
+
+        XCTAssertEqual(object.keys.sorted(), ["key", "label", "resetAt", "usedPercent"],
+                       "every key stays present, including the one with no value")
+        XCTAssertTrue(object["resetAt"] is NSNull, "an unknown reset time is null, not an absent key")
+        XCTAssertEqual(object["key"] as? String, "weekly-limit")
+        XCTAssertEqual(object["label"] as? String, "Weekly limit")
+        XCTAssertEqual(jsonNumber(object["usedPercent"]), 12.5)
+
+        // Decoding stays `decodeIfPresent`, so the null we now write reads back as nil.
+        let restored = try JSONDecoder().decode(QuotaWindow.self,
+                                                from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(restored.resetAt)
+    }
+
+    /// The shape `quotabar --json` actually emits: snapshots encoded with an
+    /// ISO-8601 date strategy, with the windows nested inside. A window with a
+    /// reset time carries the timestamp and one without carries null — never a
+    /// missing key.
+    func testJSONPayloadCarriesResetAtForEveryWindow() throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let snapshots = [
+            QuotaSnapshot(provider: .codex,
+                          windows: [QuotaWindow(label: "Session", usedPercent: 40,
+                                                resetAt: Date(timeIntervalSince1970: 2_000_000_000)),
+                                    QuotaWindow(label: "Weekly limit", usedPercent: 3, resetAt: nil)],
+                          plan: "pro", updatedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        ]
+        let payload = try XCTUnwrap(JSONSerialization
+            .jsonObject(with: encoder.encode(snapshots)) as? [[String: Any]])
+        let windows = try XCTUnwrap(payload.first?["windows"] as? [[String: Any]])
+
+        XCTAssertEqual(windows.count, 2)
+        XCTAssertEqual(windows[0]["resetAt"] as? String, "2033-05-18T03:33:20Z")
+        XCTAssertTrue(windows[1].keys.contains("resetAt"),
+                      "a window with no reset time must still carry the key for --json consumers")
+        XCTAssertTrue(windows[1]["resetAt"] is NSNull)
+    }
+
     // MARK: - QuotaSelection
 
     func testSelectionDerivesKeyAndIdentity() {

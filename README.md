@@ -62,8 +62,10 @@ still surfaces both from there, and the root stays short enough to read.
 | Module | Platforms | What it is |
 | --- | --- | --- |
 | `QuotaCore` | macOS, Linux | Probes, discovery, caching, threshold alerts, formatting |
+| `QuotaTray` | macOS, Linux | The tray icon, its menu model and the D-Bus StatusNotifierItem client. Built and tested on both platforms; only the Linux tray ships it |
 | `QuotaBar` | macOS | SwiftUI menu-bar app |
 | `QuotaBarCLI` | macOS, Linux | The `quotabar` command |
+| `QuotaTrayApp` | Linux | The `quotabar-tray` command, the tray front end |
 
 ## Features
 
@@ -98,6 +100,10 @@ and the reset time — to a local file. Readings that have not moved are skipped
 so three months costs well under a megabyte, and anything older than 120 days is
 dropped.
 
+`quotabar history --format csv` exports that record one row per sample, but only
+for the window it was asked for: `--since` defaults to 7 days, so a full backup
+of what is still retained is `quotabar history --since 120d --format csv`.
+
 From that QuotaBar reconstructs *cycles*: the span between one reset and the
 next. Providers report a level, not a cycle, so a reset is inferred from usage
 falling sharply, from the reported reset jumping forward, or from the clock
@@ -115,11 +121,21 @@ leaves your machine:
 | has gone unused | four or more cycles at 1% or less |
 | has headroom | one provider is full while another is half empty |
 
-Advice is withheld unless there are at least four complete cycles, each watched
-for at least 60% of its length. A laptop that was shut for four days understates
-that week, and `advise` says *"not enough history yet"* rather than reading the
-gap as a quiet week. History is only recorded while something is running to
-record it — the macOS app, `quotabar --watch`, or each one-shot invocation.
+Four of those rules read completed cycles, and are withheld unless there are at
+least four complete cycles, each watched for at least 60% of its length. A
+laptop that was shut for four days understates that week, so `advise` says
+*"not enough history yet"* for that window rather than reading the gap as a
+quiet week.
+
+The other two — *on course to run out before it resets* and *has headroom* — are
+computed from the latest readings instead, so they can appear on the first day:
+the projection extrapolates the trend of the last three hours, and the headroom
+note compares current levels alone. The `--notify` forecast rests on the first
+of those.
+
+A provider whose CLI has not reported for 45 days is left out of every rule; it
+was most likely uninstalled. History is only recorded while something is running
+to record it — the macOS app, `quotabar --watch`, or each one-shot invocation.
 
 ## Requirements
 
@@ -254,7 +270,8 @@ detail, along with how to run the tests.
 ```
 quotabar                      human-readable table
 quotabar --json               machine readable snapshots
-quotabar --format waybar      {"text","tooltip","class","percentage"}
+quotabar --format waybar      {"text","tooltip","class","percentage","stale"}
+quotabar --format csv         one row per window, in history's columns
 quotabar --provider claude    limit to one provider; repeatable
 quotabar --watch              keep running and re-probe on an interval
 quotabar --watch --interval 15 --notify
@@ -263,7 +280,7 @@ quotabar --no-color           disable ANSI colour ($NO_COLOR is honoured too)
 quotabar history              usage graph for the last 7 days
 quotabar history --since 30d  a longer window (90m, 24h, 7d, 3w all work)
 quotabar history --cycles     completed cycles with peak and coverage
-quotabar history --format csv export every recorded sample
+quotabar history --format csv export the --since window (7d), same columns
 quotabar history --clear      delete all recorded history
 quotabar advise               whether your subscriptions fit your usage
 quotabar advise --json        the same findings, machine readable
@@ -283,12 +300,19 @@ waybar:
 }
 ```
 
-The `class` field is `normal`, `warning`, or `critical`, so it can be styled:
+The `class` field is `normal`, `warning`, `critical`, or `unavailable` when no
+provider reported a reading at all, so it can be styled:
 
 ```css
-#custom-quotabar.warning  { color: #d79921; }
-#custom-quotabar.critical { color: #cc241d; }
+#custom-quotabar.warning     { color: #d79921; }
+#custom-quotabar.critical    { color: #cc241d; }
+#custom-quotabar.unavailable { color: #928374; }
 ```
+
+In that `unavailable` state `percentage` is `null` rather than `0`, so nothing
+reads as 0% used; `tooltip` says why each provider is missing. `stale` is `true`
+when the number shown is a retained reading whose refresh failed, and `text`
+then ends in `⚠` so the state is visible without colour.
 
 polybar and the Plasma command-output widget can run `quotabar --format waybar`
 and read the `text` field, or use plain `quotabar` for the full table.

@@ -116,12 +116,21 @@ final class UsageReportTests: XCTestCase {
         XCTAssertTrue(populated.contains("2 damaged records ignored"), populated)
     }
 
-    func testSeriesAreOrderedStably() {
-        let samples = ramp(weekly, from: 0, to: 10, count: 2) + ramp(session, from: 0, to: 10, count: 2)
-        let forward = UsageReport.history(samples: samples, from: start, to: start.addingTimeInterval(900))
-        let reversed = UsageReport.history(samples: samples.reversed(),
-                                           from: start, to: start.addingTimeInterval(900))
-        XCTAssertEqual(forward, reversed)
+    /// One row per series, in the order this module documents, so the expectation
+    /// comes from `UsageAnalysis.order`. Rendering the same samples twice and
+    /// comparing the two texts would not pin it: `Dictionary(grouping:)` iterates
+    /// in an order fixed by the per-process hash seed, so both renderings agree
+    /// with each other whether or not the sort is there.
+    func testSeriesAreRenderedInTheDocumentedOrder() {
+        let expected = Self.documentedSeriesOrder.map { UsageReport.name(for: $0, labels: [:]) }
+        let samples = Self.documentedSeriesOrder.reversed().flatMap { ramp($0, from: 0, to: 10, count: 2) }
+
+        let text = UsageReport.history(samples: samples, from: start, to: start.addingTimeInterval(900))
+        // Every line but the trailing scale footer names one series, padded out
+        // to a common width before the sparkline.
+        let rows = text.split(separator: "\n").dropLast()
+        let named = rows.map { row in expected.first { row.hasPrefix($0) } ?? String(row) }
+        XCTAssertEqual(named, expected)
     }
 
     // MARK: - Cycles text
@@ -186,6 +195,170 @@ final class UsageReportTests: XCTestCase {
         XCTAssertEqual(UsageReport.csv(samples: []), "provider,window_key,at,used_percent,reset_at")
     }
 
+    /// A CSV export covers the `--since` window, not the whole retained log:
+    /// `quotabar history` reads the file, keeps `from...to`, and hands only that
+    /// to `csv`. README.md and `--help` promise exactly this, so the count the
+    /// renderer receives is pinned on both sides of the boundary — the default
+    /// window is 7 days against 120 days of retention, and an export that
+    /// silently dropped the difference would be a backup with a hole in it.
+    func testCSVReceivesOnlyTheSinceWindowIncludingItsBoundarySamples() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quotabar-csv-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = FileHistoryStore(url: directory.appendingPathComponent("history.bin"),
+                                     catalog: HistorySeriesCatalog(store: MemoryStateStore()))
+
+        let now = start
+        let from = now.addingTimeInterval(-7 * 86_400)
+        // Oldest first: the header epoch is the day the first sample landed in,
+        // and a record before it cannot be encoded.
+        XCTAssertEqual(store.append([
+            sample(at: now.addingTimeInterval(-100 * 86_400), percent: 10),
+            sample(at: from.addingTimeInterval(-60), percent: 20),
+            sample(at: from, percent: 30),
+            sample(at: now.addingTimeInterval(-3_600), percent: 40),
+            sample(at: now, percent: 50),
+            sample(at: now.addingTimeInterval(60), percent: 60)
+        ]), 6)
+        XCTAssertEqual(store.read().samples.count, 6)
+
+        let windowed = store.read(from: from, to: now).samples
+        XCTAssertEqual(windowed.count, 3)
+        let rows = UsageReport.csv(samples: windowed).split(separator: "\n").dropFirst()
+        XCTAssertEqual(rows.count, 3)
+        // Both boundary samples are kept; the three outside the window are gone,
+        // not merely reordered.
+        XCTAssertEqual(rows.map { String($0.split(separator: ",")[3]) },
+                       ["30.00", "40.00", "50.00"])
+        for dropped in ["10.00", "20.00", "60.00"] {
+            XCTAssertFalse(rows.contains { $0.hasSuffix(",\(dropped),") }, dropped)
+        }
+    }
+
+    /// A percentage only ever reaches CSV through `percentField`, so an absurd one
+    /// out of a hand-edited cache or a damaged record cannot land in the column a
+    /// spreadsheet sums.
+    func testCSVClampsAPercentageOutsideZeroToOneHundred() {
+        XCTAssertTrue(UsageReport.csv(samples: [
+            UsageSample(series: session, at: start, usedPercent: 150, resetAt: nil)
+        ]).hasSuffix(",100.00,"))
+        XCTAssertTrue(UsageReport.csv(samples: [
+            UsageSample(series: session, at: start, usedPercent: -12, resetAt: nil)
+        ]).hasSuffix(",0.00,"))
+        XCTAssertTrue(UsageReport.csv(samples: [
+            UsageSample(series: session, at: start, usedPercent: .nan, resetAt: nil)
+        ]).hasSuffix(",0.00,"))
+    }
+
+    /// A window key is the only free-form column, and a cache file is not a
+    /// trusted writer: a separator inside one has to be quoted rather than allowed
+    /// to split the row.
+    func testCSVQuotesAWindowKeyThatCarriesASeparator() {
+        let awkward = HistorySeriesID(provider: .codex, windowKey: "we,ird\n\"key\"")
+        let row = String(UsageReport.csv(samples: [
+            UsageSample(series: awkward, at: start, usedPercent: 10, resetAt: nil)
+        ]).dropFirst(UsageReport.csvHeader.count + 1))
+        XCTAssertEqual(row, "codex,\"we,ird\n\"\"key\"\"\",2023-11-14T22:13:20Z,10.00,")
+    }
+
+    // MARK: - CSV, status snapshot
+
+    private func window(_ label: String, _ used: Double, resetAt: Date? = nil) -> QuotaWindow {
+        QuotaWindow(label: label, usedPercent: used, resetAt: resetAt)
+    }
+
+    private func snapshot(_ provider: Provider, _ windows: [QuotaWindow],
+                          at: Date, error: String? = nil) -> QuotaSnapshot {
+        QuotaSnapshot(provider: provider, windows: windows, error: error,
+                      probeSucceeded: error == nil, updatedAt: at)
+    }
+
+    func testStatusCSVCarriesAHeaderAndOneRowPerWindow() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [window("Session", 41.5, resetAt: start.addingTimeInterval(3_600)),
+                              window("Weekly", 66.666)], at: start),
+            snapshot(.claude, [window("5-hour limit", 7)], at: start)
+        ])
+        XCTAssertEqual(text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init), [
+            "provider,window_key,at,used_percent,reset_at",
+            "codex,session,2023-11-14T22:13:20Z,41.50,2023-11-14T23:13:20Z",
+            "codex,weekly,2023-11-14T22:13:20Z,66.67,",
+            "claude,5-hour-limit,2023-11-14T22:13:20Z,7.00,"
+        ])
+    }
+
+    /// Windows are identified by key, never by the label the provider prints, so
+    /// the column that a consumer joins on has to be the key.
+    func testStatusCSVWritesTheWindowKeyRatherThanItsLabel() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.gemini, [QuotaWindow(key: "pro", label: "Gemini 3 Pro", usedPercent: 12,
+                                           resetAt: nil)], at: start)
+        ])
+        XCTAssertTrue(text.hasSuffix("gemini,pro,2023-11-14T22:13:20Z,12.00,"), text)
+        XCTAssertFalse(text.contains("Gemini 3 Pro"), text)
+    }
+
+    /// An unknown reset is an empty cell: a placeholder date would be read as a
+    /// real one, and dropping the column would shift every later field.
+    func testStatusCSVLeavesTheResetCellEmptyWhenTheResetIsUnknown() {
+        let text = UsageReport.csv(snapshots: [snapshot(.codex, [window("Session", 0)], at: start)])
+        let row = String(text.split(separator: "\n")[1])
+        XCTAssertEqual(row.filter { $0 == "," }.count, 4)
+        XCTAssertTrue(row.hasSuffix(",0.00,"), row)
+    }
+
+    /// The stamp is the reading's own, not the moment of the call: a reading
+    /// retained through a failed refresh is stale and the row has to admit it.
+    func testStatusCSVStampsEachRowWithTheSnapshotsOwnTime() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [window("Session", 30)], at: start.addingTimeInterval(-86_400),
+                     error: "Refresh failed: timed out")
+        ])
+        XCTAssertTrue(text.contains(",2023-11-13T22:13:20Z,30.00,"), text)
+    }
+
+    /// A provider with nothing to report has no number to record. The CLI names it
+    /// on stderr and exits non-zero; a row of blanks would be a reading.
+    func testStatusCSVOfProvidersWithoutWindowsIsStillJustAHeader() {
+        XCTAssertEqual(UsageReport.csv(snapshots: []), UsageReport.csvHeader)
+        XCTAssertEqual(UsageReport.csv(snapshots: [
+            snapshot(.gemini, [], at: start, error: "not authenticated")
+        ]), UsageReport.csvHeader)
+    }
+
+    /// Both writers emit the same columns, so `quotabar --format csv` appended by a
+    /// cron job and an export of `quotabar history --format csv` are one table.
+    func testStatusAndHistoryCSVShareTheirColumns() {
+        XCTAssertEqual(UsageReport.csv(snapshots: []), UsageReport.csv(samples: []))
+    }
+
+    /// `--watch` writes the header once. A later cycle that saw nothing renders as
+    /// the empty string, which the CLI prints as nothing rather than a blank row.
+    func testStatusCSVCanOmitTheHeaderForALaterWatchCycle() {
+        XCTAssertEqual(UsageReport.csv(snapshots: [snapshot(.codex, [window("Session", 5)], at: start)],
+                                       includeHeader: false),
+                       "codex,session,2023-11-14T22:13:20Z,5.00,")
+        XCTAssertEqual(UsageReport.csv(snapshots: [], includeHeader: false), "")
+    }
+
+    func testStatusCSVQuotesAWindowKeyThatCarriesASeparator() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [QuotaWindow(key: "we,ird", label: "Session", usedPercent: 10,
+                                          resetAt: nil)], at: start)
+        ], includeHeader: false)
+        XCTAssertEqual(text, "codex,\"we,ird\",2023-11-14T22:13:20Z,10.00,")
+    }
+
+    func testStatusCSVClampsAPercentageOutsideZeroToOneHundred() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [window("High", 150), window("Low", -12), window("Broken", .nan)],
+                     at: start)
+        ])
+        let cells = text.split(separator: "\n").dropFirst().map { $0.split(separator: ",")[3] }
+        XCTAssertEqual(cells.map(String.init), ["100.00", "0.00", "0.00"])
+    }
+
     // MARK: - JSON payloads
 
     func testHistoryPayloadGroupsPointsBySeries() throws {
@@ -247,9 +420,43 @@ final class UsageReportTests: XCTestCase {
         }
     }
 
+    private func sample(at: Date, percent: Double) -> UsageSample {
+        UsageSample(series: session, at: at, usedPercent: percent, resetAt: nil)
+    }
+
+    /// Every provider crossed with several window keys, arranged the way the
+    /// reports document. Which arrangement that is stays out of the assertion on
+    /// purpose — the test pins that the rows follow `order`, not what `order`
+    /// says. Fifteen series rather than two because an unsorted grouping picks an
+    /// arrangement out of the hash seed: with two it would match by luck about
+    /// half the time, with fifteen there are 15! ways to be wrong. No key is a
+    /// prefix of another, so a row belongs to exactly one series.
+    private static let documentedSeriesOrder: [HistorySeriesID] = Provider.allCases
+        .flatMap { provider in
+            ["5h", "24h", "session", "weekly", "monthly"].map {
+                HistorySeriesID(provider: provider, windowKey: $0)
+            }
+        }
+        .sorted { UsageAnalysis.order($0) < UsageAnalysis.order($1) }
+
     private func cycle(peak: Double, coverage: Double, isComplete: Bool = true) -> CycleSummary {
         CycleSummary(series: session, startedAt: start, endedAt: start.addingTimeInterval(86_400),
                      peakPercent: peak, observedFraction: coverage, sampleCount: 96,
                      isComplete: isComplete)
     }
+}
+
+// MARK: - Stubs
+
+/// In-memory `StateStore` so the series catalogue the history file needs lives
+/// beside the temporary log rather than in the invoking user's state.
+private final class MemoryStateStore: StateStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var blobs: [String: Data] = [:]
+    private var numbers: [String: Int] = [:]
+
+    func data(forKey key: String) -> Data? { lock.withLock { blobs[key] } }
+    func setData(_ value: Data?, forKey key: String) { lock.withLock { blobs[key] = value } }
+    func integer(forKey key: String) -> Int? { lock.withLock { numbers[key] } }
+    func setInteger(_ value: Int?, forKey key: String) { lock.withLock { numbers[key] = value } }
 }

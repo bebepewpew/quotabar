@@ -76,17 +76,54 @@ final class AlertEvaluatorTests: XCTestCase {
 
     // MARK: - identifier(provider:window:level:)
 
+    /// The period component is the reset floored to a whole hour, not the second
+    /// it names: `reset` is 2 000 s into the period beginning at 1 999 998 000.
     func testIdentifierComposesProviderWindowKeyResetPeriodAndLevel() {
         XCTAssertEqual(
             AlertEvaluator.identifier(provider: .claude, window: window("Session", 82), level: .warning),
-            "quota.Claude Code.session.2000000000.warning")
+            "quota.Claude Code.session.1999998000.warning")
         XCTAssertEqual(
             AlertEvaluator.identifier(provider: .codex, window: window("Weekly", 96), level: .critical),
-            "quota.Codex.weekly.2000000000.critical")
+            "quota.Codex.weekly.1999998000.critical")
     }
 
-    /// Gemini reports usage without a reset timestamp. The identifier still has to
-    /// be well formed rather than collapsing to an empty period component.
+    /// The identifier half of #61. `GeminiTerminalProbe.parseReset` returns
+    /// `now +` an interval it reparses out of relative text on every probe, so one
+    /// cycle is never reported at the same second twice. The period identifies the
+    /// cycle; anything more than an hour away is a different one.
+    func testIdentifierNamesTheResetPeriodRatherThanTheExactSecond() {
+        let base = AlertEvaluator.identifier(provider: .gemini,
+                                             window: window("Pro", 82), level: .warning)
+        for drift in [-2_000, -1_999, 1, 60, 900, 1_599] as [TimeInterval] {
+            XCTAssertEqual(
+                AlertEvaluator.identifier(provider: .gemini,
+                                          window: window("Pro", 82, resetAt: reset.addingTimeInterval(drift)),
+                                          level: .warning),
+                base, "a reset \(drift)s away is the same cycle and must keep one identifier")
+        }
+        for move in [-7_200, 3_601, 18_000, 86_400] as [TimeInterval] {
+            XCTAssertNotEqual(
+                AlertEvaluator.identifier(provider: .gemini,
+                                          window: window("Pro", 82, resetAt: reset.addingTimeInterval(move)),
+                                          level: .warning),
+                base, "a reset \(move)s away is past the one-hour floor and is a new cycle")
+        }
+    }
+
+    /// The reset comes from untrusted output: `GeminiTerminalProbe.parseReset`
+    /// turns "resets in 99999999999999999999d" into a date no `Int` can hold.
+    /// Flooring it into a period must clamp rather than trap.
+    func testAnAbsurdResetStillComposesAWellFormedIdentifier() {
+        for seconds in [1e30, -1e30, .greatestFiniteMagnitude, .infinity, -.infinity, Double.nan] {
+            let absurd = window("Pro", 96, resetAt: Date(timeIntervalSince1970: seconds))
+            let identifier = AlertEvaluator.identifier(provider: .gemini, window: absurd, level: .critical)
+            XCTAssertTrue(identifier.hasPrefix("quota.Gemini CLI.pro."), identifier)
+            XCTAssertTrue(identifier.hasSuffix(".critical"), identifier)
+        }
+    }
+
+    /// Not every provider reports a reset. The identifier still has to be well
+    /// formed rather than collapsing to an empty period component.
     func testIdentifierUsesNoResetPlaceholderWhenTheWindowHasNoResetDate() {
         XCTAssertEqual(
             AlertEvaluator.identifier(provider: .gemini,
@@ -95,6 +132,9 @@ final class AlertEvaluatorTests: XCTestCase {
             "quota.Gemini CLI.pro.no-reset.critical")
     }
 
+    /// A genuine reset alerts again at the same level. Five hours is the shortest
+    /// window any supported provider publishes, so that — not an hour of drift on
+    /// one reset — is what a new period means.
     func testANewResetPeriodIsANewAlertAtTheSameLevel() async {
         let evaluator = AlertEvaluator(store: RecordingStateStore())
         let period = [snapshot(.claude, [window("Session", 82)])]
@@ -104,9 +144,57 @@ final class AlertEvaluatorTests: XCTestCase {
         let repeated = await evaluator.pending(for: period)
         XCTAssertTrue(repeated.isEmpty)
 
-        let nextPeriod = [snapshot(.claude, [window("Session", 82, resetAt: reset.addingTimeInterval(3_600))])]
+        let nextPeriod = [snapshot(.claude, [window("Session", 82, resetAt: reset.addingTimeInterval(5 * 3_600))])]
         let third = await evaluator.pending(for: nextPeriod)
         XCTAssertEqual(third.count, 1)
+    }
+
+    /// The regression #61 was filed for. Gemini's probe rebuilds `resetAt` as
+    /// `now +` the relative interval printed in `Resets: 10:01 AM (16h)`, so the
+    /// reset each refresh reports slides forward by the refresh interval. Four
+    /// refreshes of one cycle at 82% are one notification, not four.
+    func testADriftingResetIsOneAlertForTheCycleRatherThanOnePerRefresh() async {
+        let store = RecordingStateStore()
+        let evaluator = AlertEvaluator(store: store)
+        let sink = StubSink()
+        // Chosen so the drift crosses a period boundary — flooring the reset alone
+        // would still raise a second alert partway through.
+        let firstProbe = Date(timeIntervalSince1970: 2_000_000_600)
+        for refresh in 0..<4 {
+            let probedAt = firstProbe.addingTimeInterval(Double(refresh) * 900)
+            let drifting = QuotaWindow(key: "gemini-2.5-pro", label: "Pro", usedPercent: 82,
+                                       resetAt: probedAt.addingTimeInterval(16 * 3_600))
+            await evaluator.dispatch([snapshot(.gemini, [drifting])], through: sink, now: probedAt)
+        }
+        let attempted = await sink.attemptedIdentifiers
+        XCTAssertEqual(attempted.count, 1, "one cycle over the threshold is one notification")
+        XCTAssertEqual(store.writes, 1, "a drifting reset must not churn a dedup entry per refresh")
+
+        // The cycle after this one resets sixteen hours later, which is a new alert.
+        let afterReset = firstProbe.addingTimeInterval(16 * 3_600)
+        let nextCycle = QuotaWindow(key: "gemini-2.5-pro", label: "Pro", usedPercent: 82,
+                                    resetAt: afterReset.addingTimeInterval(16 * 3_600))
+        await evaluator.dispatch([snapshot(.gemini, [nextCycle])], through: sink, now: afterReset)
+        let afterNextCycle = await sink.attemptedIdentifiers
+        XCTAssertEqual(afterNextCycle.count, 2, "the next cycle alerts once of its own")
+        XCTAssertNotEqual(afterNextCycle.first, afterNextCycle.last)
+    }
+
+    /// A window reported without a reset uses the placeholder period, and that path
+    /// keeps alerting exactly once per level however often it is refreshed.
+    func testAWindowWithoutAResetAlertsOncePerLevel() async {
+        let evaluator = AlertEvaluator(store: RecordingStateStore())
+        let sink = StubSink()
+        let windows = [window("Session", 82, resetAt: nil), window("Weekly", 96, resetAt: nil)]
+        for refresh in 0..<4 {
+            await evaluator.dispatch([snapshot(.claude, windows)], through: sink,
+                                     now: alertsNow.addingTimeInterval(Double(refresh) * 900))
+        }
+        let attempted = await sink.attemptedIdentifiers
+        XCTAssertEqual(attempted, [
+            "quota.Claude Code.session.no-reset.warning",
+            "quota.Claude Code.weekly.no-reset.critical"
+        ])
     }
 
     /// The regression #30 was filed for. Gemini genuinely ships `key != label`, so
@@ -137,8 +225,8 @@ final class AlertEvaluatorTests: XCTestCase {
         ]
         let pending = await evaluator.pending(for: [snapshot(.gemini, windows)])
         XCTAssertEqual(pending.map(\.identifier), [
-            "quota.Gemini CLI.gemini-2.5-pro.2000000000.critical",
-            "quota.Gemini CLI.gemini-2.5-flash.2000000000.critical"
+            "quota.Gemini CLI.gemini-2.5-pro.1999998000.critical",
+            "quota.Gemini CLI.gemini-2.5-flash.1999998000.critical"
         ])
     }
 
@@ -222,8 +310,8 @@ final class AlertEvaluatorTests: XCTestCase {
 
         let attempted = await sink.attemptedIdentifiers
         XCTAssertEqual(attempted, [
-            "quota.Claude Code.session.2000000000.warning",
-            "quota.Claude Code.weekly.2000000000.critical"
+            "quota.Claude Code.session.1999998000.warning",
+            "quota.Claude Code.weekly.1999998000.critical"
         ])
         for identifier in attempted {
             let recorded = await evaluator.hasDelivered(identifier)

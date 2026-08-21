@@ -55,10 +55,19 @@ everything else, because the root holds an executable zsh dev wrapper that is
 also called `quotabar` and would otherwise be the file copied in.
 
 ```console
-$ ./quotabar build          # or: swift build -c release --static-swift-stdlib
+$ swift build -c release --static-swift-stdlib
 $ mkdir -p dist && cp .build/release/quotabar dist/
 $ docker build -f packaging/Dockerfile -t quotabar .
 ```
+
+These are the three lines `packaging/Dockerfile` records, and the ones
+`release.yml` runs. The configuration is not optional: the image ships no Swift
+runtime, so `--static-swift-stdlib` is required, and the copy above reads
+`.build/release/` — a build without `-c release` writes `.build/debug/` and
+leaves it nothing to stage. Without a local toolchain,
+`./quotabar build -c release --static-swift-stdlib` runs the same build inside
+`swift:6.3-noble` and leaves the same `.build/release/quotabar` behind, owned by
+you.
 
 ## Notes
 

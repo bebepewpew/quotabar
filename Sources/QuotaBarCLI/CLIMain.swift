@@ -76,6 +76,7 @@ struct QuotaBarCLI {
         }
 
         var previous = targets.compactMap { cache.snapshot(for: $0) }
+        var firstCycle = true
         repeat {
             let fresh = await QuotaEngine.refresh(targets)
             let merged = QuotaEngine.retainingLastGood(fresh: fresh, previous: previous)
@@ -86,7 +87,8 @@ struct QuotaBarCLI {
             // never used.
             recorder.record(fresh)
 
-            emit(merged, arguments: arguments, useColor: useColor)
+            emit(merged, arguments: arguments, useColor: useColor, firstCycle: firstCycle)
+            firstCycle = false
             sawFailure = sawFailure || merged.contains { $0.error != nil }
 
             if arguments.notify {
@@ -134,6 +136,9 @@ struct QuotaBarCLI {
         // is outside the window by definition.
         let cycles = UsageAnalysis.cycles(for: selected)
             .filter { $0.endedAt >= from }
+        // Every format renders this window, `--format csv` included: an export
+        // covers `--since` — 7 days by default — not the whole retained log,
+        // which is what README.md and `--help` promise.
         let windowed = selected.filter { $0.at >= from && $0.at <= now }
 
         let labels = self.labels(SnapshotCache(store: store).all())
@@ -196,14 +201,19 @@ struct QuotaBarCLI {
         return labels
     }
 
-    private static func emit(_ snapshots: [QuotaSnapshot], arguments: Arguments, useColor: Bool) {
+    private static func emit(_ snapshots: [QuotaSnapshot], arguments: Arguments, useColor: Bool,
+                             firstCycle: Bool) {
         do {
             // A text watch loop scrolls, so stamp each cycle. JSON and waybar stay
             // one record per line for whatever is consuming the stream.
             if arguments.watch && arguments.format == .text {
                 print("\n── \(timestamp()) ──")
             }
-            print(try Output.render(snapshots, format: arguments.format, color: useColor))
+            let rendered = try Output.render(snapshots, format: arguments.format, color: useColor,
+                                             csvHeader: firstCycle)
+            // A cycle in which no provider reported a window renders as no CSV rows
+            // at all; a blank line there would be a record to whatever is parsing.
+            if !rendered.isEmpty { print(rendered) }
             // Piped output is block-buffered, which would stall a --watch stream
             // feeding a status bar. Passing nil flushes every open stream.
             fflush(nil)
