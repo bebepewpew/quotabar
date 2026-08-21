@@ -280,7 +280,7 @@ quotabar --no-color           disable ANSI colour ($NO_COLOR is honoured too)
 quotabar history              usage graph for the last 7 days
 quotabar history --since 30d  a longer window (90m, 24h, 7d, 3w all work)
 quotabar history --cycles     completed cycles with peak and coverage
-quotabar history --format csv export the --since window, same columns (7d)
+quotabar history --format csv export the --since window (7d), same columns
 quotabar history --clear      delete all recorded history
 quotabar advise               whether your subscriptions fit your usage
 quotabar advise --json        the same findings, machine readable
