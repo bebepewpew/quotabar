@@ -100,7 +100,8 @@ public enum UsageReport {
     /// an export of the history it went into land in the same table.
     public static let csvHeader = "provider,window_key,at,used_percent,reset_at"
 
-    /// One row per stored sample. The header names what each column is.
+    /// One row per sample it is handed — `quotabar history` hands it the `--since`
+    /// window rather than the whole log. The header names what each column is.
     public static func csv(samples: [UsageSample]) -> String {
         let rows = samples.sorted { $0.at < $1.at }.map { sample in
             [sample.series.provider.slug,

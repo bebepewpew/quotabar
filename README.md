@@ -98,6 +98,10 @@ and the reset time — to a local file. Readings that have not moved are skipped
 so three months costs well under a megabyte, and anything older than 120 days is
 dropped.
 
+`quotabar history --format csv` exports that record one row per sample, but only
+for the window it was asked for: `--since` defaults to 7 days, so a full backup
+of what is still retained is `quotabar history --since 120d --format csv`.
+
 From that QuotaBar reconstructs *cycles*: the span between one reset and the
 next. Providers report a level, not a cycle, so a reset is inferred from usage
 falling sharply, from the reported reset jumping forward, or from the clock
@@ -264,7 +268,7 @@ quotabar --no-color           disable ANSI colour ($NO_COLOR is honoured too)
 quotabar history              usage graph for the last 7 days
 quotabar history --since 30d  a longer window (90m, 24h, 7d, 3w all work)
 quotabar history --cycles     completed cycles with peak and coverage
-quotabar history --format csv export every recorded sample (same columns)
+quotabar history --format csv export the --since window, same columns (7d)
 quotabar history --clear      delete all recorded history
 quotabar advise               whether your subscriptions fit your usage
 quotabar advise --json        the same findings, machine readable

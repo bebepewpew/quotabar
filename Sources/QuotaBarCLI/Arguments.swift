@@ -142,7 +142,8 @@ struct Arguments {
       -h, --help             Show this help
 
     HISTORY OPTIONS
-      --since <span>         How far back to read: 90m, 24h, 7d, 3w (default 7d)
+      --since <span>         How far back to read: 90m, 24h, 7d, 3w (default 7d).
+                             --format csv covers this window, not all 120 days
       --window <key>         Limit to one quota window
       --cycles               List completed cycles instead of the usage graph
       --clear                Delete all recorded history and exit
