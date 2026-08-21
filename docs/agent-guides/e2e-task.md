@@ -42,6 +42,7 @@ usable on their own; the workflow is just the order they run in.
 | `quotabar-performance` | `performance-review.md` | process spawns, blocking, deadlines, growth |
 | `quotabar-devops` | `ci-and-delivery.md` | the workflows, the gates, which job catches what |
 | `quotabar-writer` | `docs-writing.md` | documentation that is still true |
+| `quotabar-harness-reviewer` | `harness-review.md` | the guides, wrappers and templates an agent reads before it acts |
 | `quotabar-ciso` | `risk-signoff.md` | ship, ship with conditions, or hold |
 | `quotabar-release` | `release.md` | cutting and verifying a release |
 
@@ -63,11 +64,15 @@ in its own worktree. It is deliberately not split across stages: a later agent g
 a different worktree and would not see work that was never pushed. If the gate does
 not pass, the run stops at `gateFailed` with the branch, if one was pushed.
 
-**Assure** — eight narrow angles read the pushed branch at once. Narrow on purpose:
+**Assure** — nine narrow angles read the pushed branch at once. Narrow on purpose:
 a generalist waves through a test that cannot fail, because that is not a
 correctness bug, and waves through an unreadable icon, because that is not a bug at
 all. Two of the angles — tests and attack — get their own worktree so they can
-check the branch out and actually run what they write; the other six read the diff.
+check the branch out and actually run what they write; the other seven read the
+diff. The harness angle is unconditional rather than gated on the paths a diff
+touches, because a change to the guides, the wrappers, the workflows or the
+templates is the one whose defects nothing else turns red; on a code-only change it
+reports nothing and shows up in `anglesWithNothing`.
 
 **Verify** — every finding goes to a second agent whose job is to **refute** it,
 defaulting to refuted when uncertain. A wrong finding costs more than a silent
