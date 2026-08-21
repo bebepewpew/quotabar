@@ -22,9 +22,13 @@ final class CommandRunnerTests: XCTestCase {
         scratch = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("quotabar-command-runner-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        // `find` remembers what the login-shell ladder answered, so a case that
+        // stages `$PATH` starts from an empty memo rather than the last one's.
+        CommandRunner.resetDiscoveryMemo()
     }
 
     override func tearDown() {
+        CommandRunner.resetDiscoveryMemo()
         try? FileManager.default.removeItem(at: scratch)
     }
 
