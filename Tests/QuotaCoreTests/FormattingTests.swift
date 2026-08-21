@@ -68,6 +68,48 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(QuotaFormatting.percent(66.666), "66.7%")
     }
 
+    /// Rounding stops short of a threshold the reading has not reached: 79.96
+    /// used to print "80%" beside a `.normal` tint and no notification, though
+    /// the Settings copy promises an alert at 80% used. The exact values are the
+    /// ones the report names.
+    func testPercentNeverRoundsUpOntoAThresholdTheReadingHasNotReached() {
+        XCTAssertEqual(QuotaFormatting.percent(79.94), "79.9%")
+        XCTAssertEqual(QuotaFormatting.percent(79.95), "79.9%")
+        XCTAssertEqual(QuotaFormatting.percent(79.96), "79.9%")
+        XCTAssertEqual(QuotaFormatting.percent(79.99), "79.9%")
+        XCTAssertEqual(QuotaFormatting.percent(80.0), "80%")
+
+        XCTAssertEqual(QuotaFormatting.percent(94.94), "94.9%")
+        XCTAssertEqual(QuotaFormatting.percent(94.95), "94.9%")
+        XCTAssertEqual(QuotaFormatting.percent(94.96), "94.9%")
+        XCTAssertEqual(QuotaFormatting.percent(94.99), "94.9%")
+        XCTAssertEqual(QuotaFormatting.percent(95.0), "95%")
+
+        // 100 is not a band boundary, so a reading that near it still reads
+        // "100%" — and it is already critical, so nothing disagrees.
+        XCTAssertEqual(QuotaFormatting.percent(99.96), "100%")
+        XCTAssertEqual(QuotaUrgency(usedPercent: 99.96), .critical)
+    }
+
+    /// The invariant behind those cases, swept across both thresholds in 0.001
+    /// steps: what is printed never sits in a higher band than the reading it
+    /// came from, and never in a lower one either.
+    func testPercentTextNeverDisagreesWithItsOwnUrgency() {
+        for step in 0...20_000 {
+            let value = Double(78_000 + step) / 1_000
+            let text = QuotaFormatting.percent(value)
+            guard let shown = Double(String(text.dropLast())) else {
+                XCTFail("percent(\(value)) is not a number: \(text)")
+                return
+            }
+            XCTAssertEqual(QuotaUrgency(usedPercent: shown), QuotaUrgency(usedPercent: value),
+                           "percent(\(value)) rendered as \(text)")
+            XCTAssertEqual(AlertLevel(usedPercent: shown), AlertLevel(usedPercent: value),
+                           "percent(\(value)) rendered as \(text)")
+            XCTAssertLessThan(abs(shown - value), 0.1, "percent(\(value)) rendered as \(text)")
+        }
+    }
+
     /// CLI output is untrusted, so out-of-range readings are clamped rather than
     /// rendered as negative or above-100 percentages.
     func testPercentClampsOutOfRangeReadings() {
