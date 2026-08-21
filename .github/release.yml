@@ -1,0 +1,67 @@
+# Categorised release notes for GitHub's automatic generation.
+#
+# The release workflow passes `--generate-notes` to `gh release create`, which
+# builds a "What's changed" list from the pull requests merged since the
+# previous tag and groups them with the rules below. The repository squash-
+# merges, so one pull request is exactly one changelog line and the pull-request
+# title is that line.
+#
+# Every label named here is documented in .github/CONTRIBUTING.md. Keep the two
+# in step: a category whose labels nobody applies renders an empty section
+# forever, and a label nobody documents never gets applied.
+
+changelog:
+  exclude:
+    labels:
+      # Housekeeping that a reader of the release notes does not care about.
+      - skip changelog
+    # No author is excluded globally. Dropping Dependabot here would also empty
+    # the Dependencies category below, which is the section that keeps its pull
+    # requests out of everyone else's way.
+
+  categories:
+    - title: Added
+      labels:
+        - feature
+
+    - title: Fixed
+      labels:
+        - fix
+
+    - title: Security
+      labels:
+        - security
+
+    - title: Performance
+      labels:
+        - performance
+
+    - title: Tooling
+      labels:
+        - tooling
+        - ci
+
+    - title: Documentation
+      labels:
+        - documentation
+        - docs
+
+    # Dependabot applies `dependencies` itself, and this repository groups the
+    # weekly Actions bumps into one pull request. Categorising them keeps a
+    # quiet release from reading as nothing but dependency churn.
+    - title: Dependencies
+      labels:
+        - dependencies
+
+    # Catch-all: an unlabelled pull request lands here rather than vanishing.
+    # Categories are matched in order, so anything above has already been
+    # claimed. Dependabot is excluded so a bump that somehow lost its
+    # `dependencies` label still cannot drown this section; both spellings are
+    # listed because the account's login carries the `[bot]` suffix.
+    - title: Other
+      labels:
+        - "*"
+      exclude:
+        authors:
+          - dependabot
+          - dependabot[bot]

@@ -391,6 +391,9 @@ jobs:
           git push origin "refs/tags/${TAG}"
 
       - name: Write the release notes
+        # The hand-written half only. The categorised "What's changed" list and
+        # the full-changelog link come from `--generate-notes` in the next step,
+        # which is why nothing here builds a compare URL any more.
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/notes.md"
@@ -429,21 +432,28 @@ jobs:
             echo "gh attestation verify quotabar-${VERSION}-linux-x86_64.tar.gz \\"
             echo "  --repo ${GITHUB_REPOSITORY}"
             echo '```'
-            echo
-            if [ -n "$PREVIOUS" ]; then
-              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREVIOUS}...${TAG}"
-            else
-              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
-            fi
           } > "$notes"
           cat "$notes"
 
       - name: Publish the GitHub release
         run: |
           set -euo pipefail
+          # Two halves make up the published notes: the install and verify
+          # section written above, and the categorised what's-changed list plus
+          # full-changelog link that --generate-notes builds from the pull
+          # requests merged since the previous tag, grouped by the label
+          # categories in .github/release.yml.
+          notes_window=()
+          if [ -n "$PREVIOUS" ]; then
+            # The version job already resolved the previous tag, so pin the
+            # window to it instead of letting GitHub guess the prior release.
+            notes_window=(--notes-start-tag "$PREVIOUS")
+          fi
           gh release create "$TAG" \
             --title "QuotaBar ${VERSION}" \
             --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes \
+            "${notes_window[@]}" \
             --verify-tag \
             "$RUNNER_TEMP"/dist/*
 

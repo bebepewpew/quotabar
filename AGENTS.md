@@ -26,6 +26,15 @@ log, or store provider credentials or complete login prompts.
   data, generated review reports, or other local artifacts.
 - Do not weaken CI, hooks, or branch protection to make a change pass.
 
+### Release notes
+
+Release notes are generated from merged pull requests and grouped by label, as
+`.github/release.yml` configures. Give every pull request exactly one category
+label from the table in `.github/CONTRIBUTING.md`; an unlabelled one still
+appears, under the catch-all Other section. Because the repository squash-merges,
+the pull-request title is the changelog line — write it for someone reading the
+release, not for the branch.
+
 ## Implementation constraints
 
 - Prefer public, documented CLI interfaces. Gemini quota collection must remain
