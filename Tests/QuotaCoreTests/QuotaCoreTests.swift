@@ -128,8 +128,8 @@ final class QuotaCoreTests: XCTestCase {
 
     func testGeminiProbeUsesFullStatsAndBoundedTerminal() throws {
         let script = GeminiTerminalProbe.expectScript(binary: "/tmp/gemini")
-        let refresh = try XCTUnwrap(script.range(of: "send -- \"/stats\""))
-        let modelView = try XCTUnwrap(script.range(of: "send -- \"/model\""))
+        let refresh = try XCTUnwrap(script.range(of: "run_command \"/stats\""))
+        let modelView = try XCTUnwrap(script.range(of: "run_command \"/model\""))
         XCTAssertLessThan(refresh.lowerBound, modelView.lowerBound)
         XCTAssertTrue(script.contains("rows 40 columns 160"))
         XCTAssertTrue(script.contains("--screen-reader"))
@@ -184,6 +184,129 @@ final class QuotaCoreTests: XCTestCase {
         }
     }
 
+    /// Typing a slash command is not running one. Gemini's `handleSlashCommand`
+    /// returns early while the command registry is still loading, and the text
+    /// then goes to the model as an ordinary, billed prompt — against the quota
+    /// the probe exists to read, and silently, because the transcript never
+    /// matches and the user only ever sees a timeout. Enter may therefore be
+    /// pressed from one place only: after the suggestion row that proves the
+    /// registry is live.
+    func testGeminiProbeProvesTheRegistryIsLoadedBeforePressingEnter() throws {
+        let script = GeminiTerminalProbe.expectScript(binary: "/tmp/gemini")
+        let body = try XCTUnwrap(tclProcBody("run_command", in: script), "the handshake proc is missing")
+
+        // `expectScript` is a non-raw literal, so `\\r` in it is a backslash and
+        // an `r` for Tcl to read as a carriage return, not a control character.
+        let submit = #"send -- "\r""#
+        XCTAssertEqual(script.components(separatedBy: submit).count - 1, 1,
+                       "Enter is sent from somewhere other than the handshake")
+        let typed = try XCTUnwrap(body.range(of: "send -- $text"))
+        let proof = try XCTUnwrap(body.range(of: "-re $description"))
+        let pressed = try XCTUnwrap(body.range(of: submit))
+        XCTAssertLessThan(typed.lowerBound, proof.lowerBound, "the proof is awaited before the command is typed")
+        XCTAssertLessThan(proof.lowerBound, pressed.lowerBound, "Enter is pressed before the proof arrives")
+
+        // Both give-up branches name the cause and leave through `exit 0`, so
+        // neither can fall through to Enter: a reported failure costs the user
+        // nothing and a model turn costs them the quota being measured.
+        XCTAssertTrue(body.contains(#"timeout {puts "QUOTABAR_NOT_READY"; stop_child; exit 0}"#))
+        XCTAssertTrue(body.contains(#"eof {puts "QUOTABAR_NOT_READY"; exit 0}"#))
+
+        // Both commands go through it; neither is typed blind.
+        XCTAssertEqual(script.components(separatedBy: "run_command \"").count - 1, 2)
+        XCTAssertFalse(script.contains("send -- \"/stats\""))
+        XCTAssertFalse(script.contains("send -- \"/model\""))
+    }
+
+    /// The proof is a vendor string, so it is worth pinning against the ones
+    /// Gemini CLI 0.43.0 actually ships — and against the screen it draws
+    /// *before* the registry loads, which must not satisfy it.
+    func testGeminiHandshakeMatchesTheSuggestionRowAndNotTheBareComposer() throws {
+        let script = GeminiTerminalProbe.expectScript(binary: "/tmp/gemini")
+        let patterns = handshakePatterns(in: script)
+        XCTAssertEqual(Set(patterns.keys), Set(["/stats", "/model"]))
+
+        let rows = [
+            "/stats": "/stats   Check session stats. Usage: /stats [session|model|tools]",
+            "/model": "/model   Manage model configuration"
+        ]
+        // Everything on screen before the registry has rendered a row: the
+        // banner, the composer placeholder, and the echo of what was typed.
+        let beforeTheRegistryLoads = """
+        Gemini CLI 0.43.0
+        Type your message or @path/to/file
+        > /stats
+        > /model
+        """
+        for (command, pattern) in patterns {
+            let regex = try NSRegularExpression(pattern: pattern)
+            func matches(_ text: String) -> Bool {
+                regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+            }
+            XCTAssertTrue(matches(try XCTUnwrap(rows[command])), "\(command) does not match the row Gemini renders")
+            XCTAssertFalse(matches(beforeTheRegistryLoads), "\(command) is satisfied before the registry has rendered anything")
+            XCTAssertFalse(matches(command), "\(command) is satisfied by the echo of the command itself")
+        }
+    }
+
+    /// The script's own stage timeouts have to fit inside the deadline the probe
+    /// gives the whole run. If they do not, the deadline kills the child
+    /// mid-stage and the transcript comes back without the marker that says what
+    /// went wrong, so every diagnosis collapses into one bare timeout.
+    func testGeminiScriptTimeoutBudgetFitsInsideTheOuterDeadline() throws {
+        let script = GeminiTerminalProbe.expectScript(binary: "/tmp/gemini")
+        let regex = try NSRegularExpression(pattern: #"set timeout (\d+)"#)
+        func seconds(in text: String, of match: NSTextCheckingResult) -> Double? {
+            Range(match.range(at: 1), in: text).flatMap { Double(text[$0]) }
+        }
+        let stages = regex.matches(in: script, range: NSRange(script.startIndex..., in: script))
+            .compactMap { seconds(in: script, of: $0) }
+        XCTAssertGreaterThan(stages.count, 3, "the stage timeouts are no longer written as literals")
+
+        // The handshake's window lives inside a proc, so it is spent once per
+        // call rather than once per script. Counting `classify_auth`'s window
+        // too over-estimates — it only runs on a branch that then exits — which
+        // is the safe direction for a budget.
+        let body = try XCTUnwrap(tclProcBody("run_command", in: script))
+        let match = try XCTUnwrap(regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)))
+        let handshake = try XCTUnwrap(seconds(in: body, of: match))
+        let calls = Double(script.components(separatedBy: "run_command \"").count - 1)
+        let budget = stages.reduce(0, +) + handshake * (calls - 1)
+
+        XCTAssertLessThan(budget, GeminiTerminalProbe.deadline,
+                          "the script's own stages add up to \(budget)s, which the deadline cuts short")
+    }
+
+    /// The body of a Tcl proc, brace-matched from its header line.
+    private func tclProcBody(_ name: String, in script: String) -> String? {
+        guard let header = script.range(of: "proc \(name) "),
+              let lineEnd = script[header.upperBound...].firstIndex(of: "\n"),
+              let open = script[header.upperBound..<lineEnd].lastIndex(of: "{") else { return nil }
+        var depth = 0
+        var index = open
+        while index < script.endIndex {
+            if script[index] == "{" { depth += 1 }
+            if script[index] == "}" {
+                depth -= 1
+                if depth == 0 { return String(script[script.index(after: open)..<index]) }
+            }
+            index = script.index(after: index)
+        }
+        return nil
+    }
+
+    /// The `run_command "/stats" {pattern}` call sites, as command to pattern.
+    private func handshakePatterns(in script: String) -> [String: String] {
+        guard let regex = try? NSRegularExpression(pattern: #"run_command "(/[a-z]+)" \{(.+)\}"#) else { return [:] }
+        var found: [String: String] = [:]
+        for match in regex.matches(in: script, range: NSRange(script.startIndex..., in: script)) {
+            guard let command = Range(match.range(at: 1), in: script),
+                  let pattern = Range(match.range(at: 2), in: script) else { continue }
+            found[String(script[command])] = String(script[pattern])
+        }
+        return found
+    }
+
     /// Gemini shows the same sign-in menu whether nobody is signed in or Google
     /// has withdrawn the tier, so the decisive marker has to win.
     func testGeminiFailurePrecedencePrefersTheDecisiveMarker() throws {
@@ -195,6 +318,7 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertTrue(try message("QUOTABAR_AUTH\n").contains("sign in"))
         XCTAssertTrue(try message("QUOTABAR_STARTUP_TIMEOUT\n").contains("input prompt"))
         XCTAssertTrue(try message("QUOTABAR_STATS_TIMEOUT\n").contains("/stats"))
+        XCTAssertTrue(try message("QUOTABAR_NOT_READY\n").contains("slash commands"))
         XCTAssertNil(GeminiTerminalProbe.failure(in: "gemini-2.5-pro   -   10.0% (Resets in 1h)"))
     }
 

@@ -223,7 +223,7 @@ final class ProbeFetchTests: XCTestCase {
         XCTAssertTrue(script.contains(CommandRunner.tclQuoted("/opt/quotabar test/gemini")),
                       "the discovered path must reach the script quoted, not interpolated raw")
         let timeout = try XCTUnwrap(runner.expectTimeouts.first)
-        XCTAssertGreaterThan(timeout, 0)
+        XCTAssertEqual(timeout, GeminiTerminalProbe.deadline, "the expect child has to be bounded by the probe's deadline")
         XCTAssertLessThanOrEqual(timeout, 180, "the expect child has to be bounded by a deadline")
         XCTAssertEqual(runner.expectDirectories.compactMap { $0 }.count, 1, "the expect child needs a working directory")
     }
@@ -257,7 +257,9 @@ final class ProbeFetchTests: XCTestCase {
             ("Do you trust the files in this folder?\nQUOTABAR_TRUST\n",
              "Gemini is waiting for a folder-trust decision. Start Gemini CLI once in your home directory and trust the folder."),
             ("QUOTABAR_STARTUP_TIMEOUT\n", "Gemini did not reach its input prompt in time."),
-            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time.")
+            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time."),
+            ("QUOTABAR_NOT_READY\n",
+             "Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment.")
         ]
         for expectation in cases {
             let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"],

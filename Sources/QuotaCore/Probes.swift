@@ -88,9 +88,19 @@ struct GeminiTerminalProbe: QuotaProbe {
 
     init(runner: any ProbeRunner = SystemProbeRunner()) { self.runner = runner }
 
+    /// The outer bound on the whole expect run.
+    ///
+    /// It has to stay above the sum of the script's own stage timeouts. If the
+    /// deadline fires first the child is killed mid-stage and the transcript
+    /// comes back without the marker that says what went wrong, so every
+    /// diagnosis collapses into one bare timeout.
+    /// `testGeminiScriptTimeoutBudgetFitsInsideTheOuterDeadline` keeps the two
+    /// in step.
+    static let deadline: TimeInterval = 150
+
     func fetch() throws -> QuotaSnapshot {
         guard let binary = runner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
-        let output = try runner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
+        let output = try runner.runExpect(Self.expectScript(binary: binary), timeout: Self.deadline, currentDirectory: probeWorkingDirectory())
         if let failure = Self.failure(in: output) { throw failure }
         return try Self.parse(output, now: Date())
     }
@@ -123,7 +133,8 @@ struct GeminiTerminalProbe: QuotaProbe {
         // outranks them. The phrase alone is not a verdict — a signed-in client
         // shows it briefly while refreshing a token and then reaches its prompt.
         if Self.mentions("waiting for authentication", in: output),
-           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT") {
+           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT")
+            || output.contains("QUOTABAR_NOT_READY") {
             return .unsupported("Gemini has not finished signing in. Run `gemini` once and complete the prompts it shows — folder trust, then sign-in — before refreshing.")
         }
         if output.contains("QUOTABAR_TRUST") {
@@ -131,6 +142,12 @@ struct GeminiTerminalProbe: QuotaProbe {
         }
         if output.contains("QUOTABAR_AUTH") {
             return .unsupported("Gemini authentication is required. Open Gemini CLI and sign in.")
+        }
+        // Not a timeout of Gemini's: the probe stopped itself, on purpose,
+        // because pressing Enter on a slash command the registry has not
+        // registered yet submits it to the model as a billed prompt.
+        if output.contains("QUOTABAR_NOT_READY") {
+            return .unsupported("Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment.")
         }
         if output.contains("QUOTABAR_STARTUP_TIMEOUT") {
             return .unsupported("Gemini did not reach its input prompt in time.")
@@ -169,6 +186,44 @@ struct GeminiTerminalProbe: QuotaProbe {
             stop_child
             exit 0
         }
+        proc run_command {text description} {
+            # Typing a slash command is not the same as running one. Gemini's
+            # handleSlashCommand returns early for as long as the command
+            # registry is still loading -- filesystem, MCP and skill discovery,
+            # none of which the composer placeholder waits for -- and the text
+            # is then submitted to the model as an ordinary, billed prompt
+            # against the quota this probe exists to read. It is silent, too:
+            # the transcript never matches, so the only trace is a stray turn.
+            #
+            # The suggestion list renders from the loaded registry and from
+            # nothing else, and every row carries the command's own description,
+            # so seeing that description is proof that Enter will run the
+            # command rather than send it. Each pattern is the loosest
+            # distinctive fragment of one description, so a reworded one still
+            # matches; when none arrives Enter is never pressed and the probe
+            # reports why instead of spending a turn.
+            #
+            # Anything buffered before the keystrokes predates this command and
+            # can prove nothing about it, so drop it first.
+            expect *
+            after 300
+            send -- $text
+            set timeout 10
+            expect {
+                -re $description {}
+                -re {(?i)(no longer supported|migrate to the antigravity)} {puts "QUOTABAR_INELIGIBLE"; stop_child; exit 0}
+                -re {(?i)do you trust the files in this folder} {puts "QUOTABAR_TRUST"; stop_child; exit 0}
+                -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
+                timeout {puts "QUOTABAR_NOT_READY"; stop_child; exit 0}
+                eof {puts "QUOTABAR_NOT_READY"; exit 0}
+            }
+            # A suggestion row names the command the next stage is about to wait
+            # for, so drop the redraws of it that are still in flight. Otherwise
+            # that stage matches the row it can already see instead of waiting
+            # for the output the command has yet to print.
+            expect *
+            send -- "\\r"
+        }
         set timeout 30
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
@@ -185,10 +240,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         # Full /stats performs the quota refresh in Gemini 0.56, but its default
         # view contains session data only. Wait for it to finish before opening
         # /model, which renders the freshly updated account-wide quota buckets.
-        after 300
-        send -- "/stats"
-        after 100
-        send -- "\\r"
+        run_command "/stats" {(?i)(check\\s+session\\s+stats|usage:\\s*/stats)}
         set timeout 45
         expect {
             -re {(?i)Session Stats} {}
@@ -204,10 +256,7 @@ struct GeminiTerminalProbe: QuotaProbe {
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
-        after 300
-        send -- "/model"
-        after 100
-        send -- "\\r"
+        run_command "/model" {(?i)(manage\\s+model\\s+configuration|model\\s+configuration)}
         set timeout 30
         expect {
             -re {(?i)\\(Press Esc to close\\)} {puts "QUOTABAR_STATS_COMPLETE"}
