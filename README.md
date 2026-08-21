@@ -340,6 +340,7 @@ causes:
 | `Gemini rejected this client…` | Google has withdrawn this account's Gemini Code Assist tier. Signing in again cannot fix it; see <https://antigravity.google>. |
 | `Gemini is waiting for a folder-trust decision` | Gemini CLI asks whether to trust the working directory before it will start. Run `gemini` once and answer it. |
 | `Gemini authentication is required` | Genuinely signed out. Run `gemini` and sign in. |
+| `Gemini had not loaded its slash commands yet` | Gemini CLI was still discovering commands when the probe reached its prompt. QuotaBar stops there rather than let `/stats` reach the model as an ordinary prompt, so nothing is spent. Refresh again in a moment. |
 | `… is not installed` | The provider's CLI was not found on `PATH` or in the usual install locations. |
 | `The CLI did not respond in time` | The command was still running at its deadline and its process group was terminated. |
 | `claude exited with status 3` | The CLI ran and failed for a reason QuotaBar does not recognise. Run that command in a terminal to read what it said. |

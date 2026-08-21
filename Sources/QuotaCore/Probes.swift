@@ -97,22 +97,29 @@ struct GeminiTerminalProbe: QuotaProbe {
     /// `scriptTimeouts` sums *every* wait, including branches that cannot both
     /// run. Each `set timeout` bounds at most one `expect`, so their sum bounds
     /// any path through the script, and a branch added later cannot quietly
-    /// break the relation.
+    /// break the relation. The one wait that is written once and spent more than
+    /// once is `run_command`'s, so it is counted `commandsTyped` times.
     enum Budget {
         /// Reaching the trust prompt, the sign-in menu, or the input prompt.
         static let startup = 30
         /// The tier rejection that arrives a moment after the sign-in menu.
         static let authClassification = 6
+        /// Waiting for Gemini's command registry to offer a typed slash command
+        /// back as a suggestion, which is the proof that Return will run it
+        /// rather than send it to the model. Spent inside `run_command`, so once
+        /// per command the script types.
+        static let commandRegistry = 10
         /// `/stats` rendering its session view, which is what refreshes quota.
         static let statsView = 45
         /// Returning to the input prompt once `/stats` has finished.
         static let promptReturn = 15
         /// `/model` rendering the account-wide buckets.
         static let modelView = 30
-        /// Milliseconds to let a view settle before typing into it.
+        /// Milliseconds to let a view settle before typing into it. Also inside
+        /// `run_command`, so also spent once per command.
         static let viewSettleMilliseconds = 300
-        /// Milliseconds between a typed command and its Return.
-        static let keyPressMilliseconds = 100
+        /// The slash commands the script types: `/stats`, then `/model`.
+        static let commandsTyped = 2
         /// `stop_child`: a Ctrl-C, two signals to the process group, a close and
         /// a wait, plus the interpreter exiting and its pipes draining. The
         /// script has to fit all of that inside the deadline, because a caller
@@ -121,11 +128,12 @@ struct GeminiTerminalProbe: QuotaProbe {
 
         /// What the script's own `expect` waits can add up to.
         static var scriptTimeouts: TimeInterval {
-            TimeInterval(startup + authClassification + statsView + promptReturn + modelView)
+            TimeInterval(startup + authClassification + statsView + promptReturn + modelView
+                         + commandRegistry * commandsTyped)
         }
-        /// The pauses around the two commands the script types.
+        /// The pauses the script spends letting a view settle before typing.
         static var sendPauses: TimeInterval {
-            2 * TimeInterval(viewSettleMilliseconds + keyPressMilliseconds) / 1_000
+            TimeInterval(commandsTyped * viewSettleMilliseconds) / 1_000
         }
         /// The bound `fetch()` puts on the child: never less than the script can
         /// legitimately spend, so the script's own diagnostic wins the race.
@@ -202,7 +210,8 @@ struct GeminiTerminalProbe: QuotaProbe {
         // outranks them. The phrase alone is not a verdict — a signed-in client
         // shows it briefly while refreshing a token and then reaches its prompt.
         if Self.mentions("waiting for authentication", in: output),
-           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT") {
+           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT")
+            || output.contains("QUOTABAR_NOT_READY") {
             return .unsupported("Gemini has not finished signing in. Run `gemini` once and complete the prompts it shows — folder trust, then sign-in — before refreshing.")
         }
         if output.contains("QUOTABAR_TRUST") {
@@ -210,6 +219,12 @@ struct GeminiTerminalProbe: QuotaProbe {
         }
         if output.contains("QUOTABAR_AUTH") {
             return .unsupported("Gemini authentication is required. Open Gemini CLI and sign in.")
+        }
+        // Not a timeout of Gemini's: the probe stopped itself, on purpose,
+        // because pressing Enter on a slash command the registry has not
+        // registered yet submits it to the model as a billed prompt.
+        if output.contains("QUOTABAR_NOT_READY") {
+            return .unsupported("Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment.")
         }
         if output.contains("QUOTABAR_STARTUP_TIMEOUT") {
             return .unsupported("Gemini did not reach its input prompt in time.")
@@ -252,6 +267,44 @@ struct GeminiTerminalProbe: QuotaProbe {
             stop_child
             exit 0
         }
+        proc run_command {text description} {
+            # Typing a slash command is not the same as running one. Gemini's
+            # handleSlashCommand returns early for as long as the command
+            # registry is still loading -- filesystem, MCP and skill discovery,
+            # none of which the composer placeholder waits for -- and the text
+            # is then submitted to the model as an ordinary, billed prompt
+            # against the quota this probe exists to read. It is silent, too:
+            # the transcript never matches, so the only trace is a stray turn.
+            #
+            # The suggestion list renders from the loaded registry and from
+            # nothing else, and every row carries the command's own description,
+            # so seeing that description is proof that Enter will run the
+            # command rather than send it. Each pattern is the loosest
+            # distinctive fragment of one description, so a reworded one still
+            # matches; when none arrives Enter is never pressed and the probe
+            # reports why instead of spending a turn.
+            #
+            # Anything buffered before the keystrokes predates this command and
+            # can prove nothing about it, so drop it first.
+            expect *
+            after \(Budget.viewSettleMilliseconds)
+            send -- $text
+            set timeout \(Budget.commandRegistry)
+            expect {
+                -re $description {}
+                -re {(?i)(no longer supported|migrate to the antigravity)} {puts "QUOTABAR_INELIGIBLE"; stop_child; exit 0}
+                -re {(?i)do you trust the files in this folder} {puts "QUOTABAR_TRUST"; stop_child; exit 0}
+                -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
+                timeout {puts "QUOTABAR_NOT_READY"; stop_child; exit 0}
+                eof {puts "QUOTABAR_NOT_READY"; stop_child; exit 0}
+            }
+            # A suggestion row names the command the next stage is about to wait
+            # for, so drop the redraws of it that are still in flight. Otherwise
+            # that stage matches the row it can already see instead of waiting
+            # for the output the command has yet to print.
+            expect *
+            send -- "\\r"
+        }
         set timeout \(Budget.startup)
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
@@ -268,10 +321,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         # Full /stats performs the quota refresh in Gemini 0.56, but its default
         # view contains session data only. Wait for it to finish before opening
         # /model, which renders the freshly updated account-wide quota buckets.
-        after \(Budget.viewSettleMilliseconds)
-        send -- "/stats"
-        after \(Budget.keyPressMilliseconds)
-        send -- "\\r"
+        run_command "/stats" {(?i)(check\\s+session\\s+stats|usage:\\s*/stats)}
         set timeout \(Budget.statsView)
         expect {
             -re {(?i)Session Stats} {}
@@ -287,10 +337,7 @@ struct GeminiTerminalProbe: QuotaProbe {
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
         }
-        after \(Budget.viewSettleMilliseconds)
-        send -- "/model"
-        after \(Budget.keyPressMilliseconds)
-        send -- "\\r"
+        run_command "/model" {(?i)(manage\\s+model\\s+configuration|model\\s+configuration)}
         set timeout \(Budget.modelView)
         expect {
             -re {(?i)\\(Press Esc to close\\)} {puts "QUOTABAR_STATS_COMPLETE"}

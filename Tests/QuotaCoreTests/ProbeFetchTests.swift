@@ -263,7 +263,7 @@ final class ProbeFetchTests: XCTestCase {
         XCTAssertTrue(script.contains(CommandRunner.tclQuoted("/opt/quotabar test/gemini")),
                       "the discovered path must reach the script quoted, not interpolated raw")
         let timeout = try XCTUnwrap(runner.expectTimeouts.first)
-        XCTAssertGreaterThan(timeout, 0)
+        XCTAssertEqual(timeout, GeminiTerminalProbe.Budget.deadline, "the expect child has to be bounded by the probe's deadline")
         XCTAssertLessThanOrEqual(timeout, 180, "the expect child has to be bounded by a deadline")
         XCTAssertEqual(runner.expectDirectories.compactMap { $0 }.count, 1, "the expect child needs a working directory")
     }
@@ -282,18 +282,32 @@ final class ProbeFetchTests: XCTestCase {
         let deadline = try XCTUnwrap(runner.expectTimeouts.first)
 
         // Every wait the script can perform, whichever branch it takes, plus the
-        // pauses it spends between typing a command and pressing Return.
+        // pauses it spends letting a view settle before it types into it.
         let waits = try seconds(matching: #"(?m)^ *set timeout (\d+) *$"#, in: script)
         let pauses = try seconds(matching: #"(?m)^ *after (\d+) *$"#, in: script).map { $0 / 1_000 }
         let budget = GeminiTerminalProbe.Budget.self
-        XCTAssertEqual(waits.sorted(), [budget.startup, budget.authClassification, budget.statsView,
-                                        budget.promptReturn, budget.modelView].map { TimeInterval($0) }.sorted(),
+
+        // `run_command` holds one wait and one pause, and is written once but
+        // run once per command the script types, so each is spent that many
+        // times. Everything else appears exactly where it is spent.
+        let calls = script.components(separatedBy: "run_command \"").count - 1
+        XCTAssertEqual(calls, budget.commandsTyped, "the budget counts a different number of typed commands")
+        let extraRuns = TimeInterval(budget.commandsTyped - 1)
+        let repeatedWait = TimeInterval(budget.commandRegistry) * extraRuns
+        let repeatedPause = TimeInterval(budget.viewSettleMilliseconds) / 1_000 * extraRuns
+
+        XCTAssertEqual(waits.sorted(), [budget.startup, budget.authClassification, budget.commandRegistry,
+                                        budget.statsView, budget.promptReturn, budget.modelView]
+                            .map { TimeInterval($0) }.sorted(),
                        "the script has a `set timeout` the budget does not know about")
-        XCTAssertEqual(budget.scriptTimeouts, waits.reduce(0, +), accuracy: 0.001)
-        XCTAssertEqual(budget.sendPauses, pauses.reduce(0, +), accuracy: 0.001)
+        XCTAssertEqual(budget.scriptTimeouts, waits.reduce(0, +) + repeatedWait, accuracy: 0.001)
+        XCTAssertEqual(budget.sendPauses, pauses.reduce(0, +) + repeatedPause, accuracy: 0.001)
         XCTAssertGreaterThan(budget.teardown, 0, "tearing the child down needs a budget of its own")
         XCTAssertEqual(deadline, budget.deadline, "fetch must use the derived deadline")
-        XCTAssertGreaterThanOrEqual(deadline, waits.reduce(0, +) + pauses.reduce(0, +) + budget.teardown,
+        // Summed in a different order from `Budget.deadline`, so the same
+        // tolerance the equalities above use applies here too.
+        let spent = waits.reduce(0, +) + repeatedWait + pauses.reduce(0, +) + repeatedPause + budget.teardown
+        XCTAssertGreaterThanOrEqual(deadline + 0.001, spent,
                                     "the deadline no longer covers what the script may spend")
     }
 
@@ -360,7 +374,9 @@ final class ProbeFetchTests: XCTestCase {
             ("Do you trust the files in this folder?\nQUOTABAR_TRUST\n",
              "Gemini is waiting for a folder-trust decision. Start Gemini CLI once in your home directory and trust the folder."),
             ("QUOTABAR_STARTUP_TIMEOUT\n", "Gemini did not reach its input prompt in time."),
-            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time.")
+            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time."),
+            ("QUOTABAR_NOT_READY\n",
+             "Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment.")
         ]
         for expectation in cases {
             let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"],

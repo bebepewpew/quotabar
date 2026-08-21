@@ -261,6 +261,14 @@ final class ProbeParsingEdgeTests: XCTestCase {
              "Gemini authentication is required. Open Gemini CLI and sign in."),
             ("QUOTABAR_INELIGIBLE\n",
              "Gemini rejected this client: Google no longer supports Gemini Code Assist for individual accounts here. Signing in again will not help — see https://antigravity.google."),
+            // A registry that never loads is a symptom of an unfinished sign-in
+            // as much as a stalled startup is, so the sign-in still outranks it.
+            ("Waiting for authentication...\nQUOTABAR_NOT_READY\n",
+             "Gemini has not finished signing in. Run `gemini` once and complete the prompts it shows — folder trust, then sign-in — before refreshing."),
+            // On its own it is the probe refusing to spend a model turn, which
+            // is neither a Gemini timeout nor anything the user broke.
+            ("QUOTABAR_NOT_READY\nQUOTABAR_STATS_TIMEOUT\n",
+             "Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment."),
             ("", nil)
         ]
         for row in rows {
