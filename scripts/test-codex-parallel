@@ -1,0 +1,254 @@
+#!/bin/sh
+set -eu
+
+# Tests for scripts/codex-parallel, the Codex parallel task runner.
+#
+# The runner is shell, so its tests are too: swift test never sees it, and the
+# part that matters -- whether a pull request is opened with exactly one
+# category label -- is a question about the arguments handed to `gh`. The
+# runner sources cleanly with QUOTABAR_CODEX_PARALLEL_LIB=1, which defines its
+# helpers and stops before anything with a side effect, so nothing here creates
+# a worktree, starts Codex or talks to GitHub. `gh` itself is a stub on PATH
+# that records what it was called with.
+#
+#   scripts/test-codex-parallel
+#
+# The Repository policy job in .github/workflows/ci.yml runs this.
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+runner="$repo_root/scripts/codex-parallel"
+workflow="$repo_root/.github/workflows/ci.yml"
+
+QUOTABAR_CODEX_PARALLEL_LIB=1
+export QUOTABAR_CODEX_PARALLEL_LIB
+# shellcheck source=scripts/codex-parallel
+. "$runner"
+# The runner is also executed for real further down, where it must take its
+# ordinary path rather than stopping at the library guard.
+unset QUOTABAR_CODEX_PARALLEL_LIB
+
+checks=0
+failures=0
+
+check() { # name expected actual
+    checks=$((checks + 1))
+    if [ "$2" = "$3" ]; then
+        return 0
+    fi
+    failures=$((failures + 1))
+    printf 'FAIL %s\n  expected: [%s]\n  actual:   [%s]\n' "$1" "$2" "$3" >&2
+}
+
+check_contains() { # name haystack needle
+    checks=$((checks + 1))
+    case "$2" in
+        *"$3"*) return 0 ;;
+    esac
+    failures=$((failures + 1))
+    printf 'FAIL %s: expected to find [%s]\n' "$1" "$3" >&2
+}
+
+# canonical_label prints nothing and fails for a label the Labels job would
+# reject; every test below reads it back through this, so a rejection is
+# visible rather than an empty string that could also be a bug.
+label_of() {
+    canonical_label "$1" || printf '%s' '<rejected>'
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# --- the allowlist is the one CI enforces ---------------------------------
+
+# Read the labels straight out of the workflow rather than restating them: the
+# runner's list is only correct while it matches the array that fails a pull
+# request.
+ci_labels=$(sed -n '/allowed=($/,/^ *)$/p' "$workflow" \
+    | sed '1d;$d' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/"//g')
+check "the workflow still declares its allowed labels" "feature" "$(printf '%s' "$ci_labels" | head -1)"
+# Deliberately a fixed number: a label added to the workflow has to be added to
+# the runner's case as well, and this is what says so.
+check "the workflow declares ten of them" "10" "$(printf '%s\n' "$ci_labels" | wc -l | tr -d ' ')"
+
+for label in $(printf '%s' "$ci_labels" | tr ' ' '_'); do
+    label=$(printf '%s' "$label" | tr '_' ' ')
+    check "canonical_label accepts the CI label $label" "$label" "$(label_of "$label")"
+done
+
+# And nothing beyond them: a label the runner would happily pass but CI does
+# not categorise is the same red pull request, one step later.
+for label in chore refactor test build revert release wontfix "good first issue"; do
+    check "canonical_label rejects $label" "<rejected>" "$(label_of "$label")"
+done
+
+check "canonical_label lowercases" "tooling" "$(label_of "Tooling")"
+check "canonical_label ignores surrounding space" "fix" "$(label_of "   fix  ")"
+check "canonical_label unwraps markdown" "documentation" "$(label_of '`documentation`')"
+check "canonical_label unwraps emphasis" "security" "$(label_of '**security**')"
+check "canonical_label collapses inner space" "skip changelog" "$(label_of 'skip   changelog')"
+check "canonical_label takes the hyphenated spelling" "skip changelog" "$(label_of 'skip-changelog')"
+check "canonical_label rejects the empty string" "<rejected>" "$(label_of "")"
+
+# Agent output is untrusted, so the label has to be matched against the
+# allowlist rather than passed through: anything else is an argument of its own
+# on the `gh pr create` command line.
+check "canonical_label rejects smuggled options" "<rejected>" "$(label_of 'tooling --body pwned')"
+check "canonical_label rejects a leading option" "<rejected>" "$(label_of '--label')"
+check "canonical_label rejects a command substitution" "<rejected>" "$(label_of 'tooling$(id)')"
+check "canonical_label rejects a shell separator" "<rejected>" "$(label_of 'tooling; id')"
+check "canonical_label rejects two labels" "<rejected>" "$(label_of 'fix feature')"
+check "canonical_label rejects a terminal escape" "<rejected>" "$(label_of "$(printf 'tooling\033[2K')")"
+
+# --- reading the label out of the agent's report --------------------------
+
+report="$tmp/report.last"
+
+printf 'Changed the tray icon.\n\nPR-TITLE: Draw the tray icon at 22 pixels\nPR-LABEL: fix\n' > "$report"
+check "label_from reads the trailer" "fix" "$(label_from "$report" || printf '%s' '<rejected>')"
+check "title_from reads the trailer" "Draw the tray icon at 22 pixels" "$(title_from "$report" "make the icon smaller")"
+
+printf 'PR-LABEL: feature\nOn reflection this is tooling.\nPR-LABEL: tooling\n' > "$report"
+check "label_from takes the last trailer" "tooling" "$(label_from "$report" || printf '%s' '<rejected>')"
+
+printf 'All done.\n' > "$report"
+check "label_from fails without a trailer" "<rejected>" "$(label_from "$report" || printf '%s' '<rejected>')"
+
+printf 'PR-LABEL: chore\n' > "$report"
+check "label_from fails on a label CI rejects" "<rejected>" "$(label_from "$report" || printf '%s' '<rejected>')"
+
+printf 'PR-LABEL: tooling --add-label security\n' > "$report"
+check "label_from fails on a smuggled option" "<rejected>" "$(label_from "$report" || printf '%s' '<rejected>')"
+
+printf '  PR-LABEL:   `ci`  \n' > "$report"
+check "label_from tolerates the shapes agents write" "ci" "$(label_from "$report" || printf '%s' '<rejected>')"
+
+check "label_from fails when the report is missing" "<rejected>" \
+    "$(label_from "$tmp/absent.last" || printf '%s' '<rejected>')"
+
+# --- which label wins -----------------------------------------------------
+
+printf 'PR-LABEL: fix\n' > "$report"
+check "the agent's label beats the caller's default" "fix" "$(label_for "$report" "tooling")"
+
+printf 'no trailer here\n' > "$report"
+check "the caller's default covers an agent that named none" "tooling" \
+    "$(label_for "$report" "tooling")"
+
+printf 'PR-LABEL: chore\n' > "$report"
+check "the caller's default covers a label CI rejects" "tooling" \
+    "$(label_for "$report" "tooling")"
+
+check "no label anywhere is the empty string, not a failure" "" \
+    "$(label_for "$tmp/absent.last" "")"
+check "a default CI rejects is no label either" "" \
+    "$(label_for "$tmp/absent.last" "chore")"
+
+# --- the title is a changelog line, not the caller's task phrasing ---------
+
+check "title_from falls back to the task" "make the icon smaller" \
+    "$(title_from "$tmp/absent.last" "make the icon smaller")"
+
+printf 'PR-TITLE: \n' > "$report"
+check "title_from falls back when the trailer is empty" "cache provider discovery" \
+    "$(title_from "$report" "cache provider discovery")"
+
+printf 'PR-TITLE: Redraw\033[2K the tray icon\r\n' > "$report"
+check "title_from strips terminal control characters" "Redraw[2K the tray icon" \
+    "$(title_from "$report" "task")"
+
+printf 'PR-TITLE: -- Draw   the   icon  \n' > "$report"
+check "title_from trims leading dashes and inner runs" "Draw the icon" \
+    "$(title_from "$report" "task")"
+
+long=$(printf 'x%.0s' $(seq 1 200))
+printf 'PR-TITLE: %s\n' "$long" > "$report"
+check "title_from caps the changelog line" "72" "$(title_from "$report" "task" | wc -c | tr -d ' ')"
+
+# --- the prompt asks for both trailers ------------------------------------
+
+prompt=$(prompt_for "add a KDE tray icon")
+check_contains "the prompt carries the task" "$prompt" "add a KDE tray icon"
+check_contains "the prompt asks for a title" "$prompt" "PR-TITLE:"
+check_contains "the prompt asks for a label" "$prompt" "PR-LABEL:"
+check_contains "the prompt names the tooling label" "$prompt" "tooling"
+
+# --- publishing ------------------------------------------------------------
+
+bin="$tmp/bin"
+mkdir -p "$bin" "$tmp/worktree"
+cat > "$bin/gh" <<'STUB'
+#!/bin/sh
+: > "$GH_ARGS"
+for arg in "$@"; do printf '%s\n' "$arg" >> "$GH_ARGS"; done
+if [ "${GH_FAIL:-0}" = "1" ]; then
+    printf 'gh: could not create pull request\n' >&2
+    exit 1
+fi
+printf 'https://github.com/bebepewpew/quotabar/pull/1\n'
+STUB
+chmod +x "$bin/gh"
+PATH="$bin:$PATH"
+export PATH
+GH_ARGS="$tmp/gh-args"
+export GH_ARGS
+
+status="$tmp/status"
+log="$tmp/log"
+: > "$log"
+
+publish_task "codex/tray-icon" "$tmp/worktree" "tooling" "Draw the tray icon at 22 pixels" "body" "$log" "$status"
+check "a labelled task is reported as opened" "opened" "$(cut -f1 "$status")"
+check "the status names the branch" "codex/tray-icon" "$(cut -f2 "$status")"
+check_contains "the status carries the URL" "$(cut -f3 "$status")" "/pull/1"
+
+# The whole point of the issue: exactly one --label, carrying an allowed value.
+check "gh pr create is passed one --label" "1" "$(grep -c '^--label$' "$GH_ARGS")"
+check "the label follows it" "tooling" "$(grep -A1 '^--label$' "$GH_ARGS" | tail -1)"
+check "gh pr create targets main" "1" "$(grep -c '^main$' "$GH_ARGS")"
+check "the title is the changelog line" "Draw the tray icon at 22 pixels" \
+    "$(grep -A1 '^--title$' "$GH_ARGS" | tail -1)"
+
+# A pull request with no label fails the Labels job the moment it opens, so the
+# runner must not open one: the branch is pushed, and the reason says so.
+rm -f "$GH_ARGS"
+publish_task "codex/tray-icon" "$tmp/worktree" "" "Draw the tray icon at 22 pixels" "body" "$log" "$status"
+check "an unlabelled task is not opened" "label-missing" "$(cut -f1 "$status")"
+check "the label-missing status names the branch" "codex/tray-icon" "$(cut -f2 "$status")"
+check_contains "the reason says the work is pushed" "$(cut -f3 "$status")" "pushed"
+check_contains "the reason says how to finish it" "$(cut -f3 "$status")" "--label <category>"
+checks=$((checks + 1))
+if [ -e "$GH_ARGS" ]; then
+    failures=$((failures + 1))
+    printf 'FAIL gh was invoked for an unlabelled task\n' >&2
+fi
+
+GH_FAIL=1
+export GH_FAIL
+publish_task "codex/tray-icon" "$tmp/worktree" "tooling" "Draw the tray icon" "body" "$log" "$status"
+check "a failed gh is reported as pr-failed" "pr-failed" "$(cut -f1 "$status")"
+check_contains "the pr-failed reason points at the log" "$(cut -f3 "$status")" "$log"
+GH_FAIL=0
+
+# Nothing in the runner may open a pull request without a label, however it is
+# reached -- an unlabelled `gh pr create --base main` is the line the Labels job
+# used to fail on, whether the runner runs it or prints it for someone to run.
+unlabelled=$(grep 'gh pr create --base' "$runner" | grep -cv -- '--label' || true)
+check "no gh pr create in the runner omits --label" "0" "$unlabelled"
+check "the runner does open a pull request" "2" "$(grep -c 'gh pr create --base' "$runner")"
+
+# --- the command line ------------------------------------------------------
+
+out=$(sh "$runner" --help 2>&1) && rc=0 || rc=$?
+check "--help exits 2" "2" "$rc"
+check_contains "--help documents --label" "$out" "--label"
+
+out=$(sh "$runner" --label chore "a task" 2>&1) && rc=0 || rc=$?
+check "an unusable --label is refused before anything runs" "2" "$rc"
+check_contains "the refusal lists the labels" "$out" "skip changelog"
+
+out=$(sh "$runner" --nonsense "a task" 2>&1) && rc=0 || rc=$?
+check "an unknown option is refused" "2" "$rc"
+check_contains "the refusal names the option" "$out" "--nonsense"
+
+printf 'Executed %d checks, %d failures\n' "$checks" "$failures"
+[ "$failures" -eq 0 ] || exit 1
