@@ -132,7 +132,8 @@ jobs:
             exit 0
           fi
 
-          files="$(git diff --name-only "$BASE_SHA" HEAD)"
+          git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed"
+          files="$(cat "$RUNNER_TEMP/changed")"
           printf 'Changed files:\n%s\n' "$files"
 
           # An empty diff has nothing to compile either. Guarded explicitly
@@ -143,26 +144,54 @@ jobs:
             exit 0
           fi
 
-          # Anything NOT matched here counts as code. The list is an allowlist on
-          # purpose: a directory nobody thought about fails towards building
-          # rather than towards skipping, and a new one is a decision somebody
-          # has to make here rather than a silent hole.
-          code="$(printf '%s\n' "$files" | grep -Ev \
-            -e '^docs/' \
-            -e '^\.claude/' \
-            -e '^\.codex/' \
-            -e '^\.github/ISSUE_TEMPLATE/' \
-            -e '^\.github/(CONTRIBUTING|SECURITY)\.md$' \
-            -e '^\.github/pull_request_template\.md$' \
-            -e '^[^/]+\.md$' \
-            -e '^LICENSE$' || true)"
+          # Three buckets, and the third is the point. `build` and `skip` are
+          # both explicit, so a path that matches neither is *unclassified* --
+          # it builds, and it says so by name, which is the signal that this
+          # list needs a line rather than a silent guess either way.
+          build=false
+          because=""
+          unclassified=""
 
-          if [ -n "$code" ]; then
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              # Compiled, or decides how the compile runs.
+              Sources/*|Tests/*|Package.swift|Package.resolved|quotabar|scripts/coverage)
+                build=true; because="$because $file" ;;
+
+              # The pipeline itself. A workflow change is only ever proven by
+              # running it, so it earns a full suite even though it compiles
+              # nothing. This is the line to cut if that stops being worth it.
+              .github/workflows/*)
+                build=true; because="$because $file" ;;
+
+              # Prose, per-tool wrappers and repository furniture. None of it
+              # reaches swiftc, and `policy` below checks the parts that matter
+              # for every change regardless.
+              docs/*|.claude/*|.codex/*|.github/ISSUE_TEMPLATE/*|.githooks/*) ;;
+              *.md|LICENSE|.gitignore|.gitattributes) ;;
+              scripts/install-codex-skills|scripts/codex-parallel) ;;
+              .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
+
+              *)
+                build=true; unclassified="$unclassified $file" ;;
+            esac
+          done < "$RUNNER_TEMP/changed"
+
+          if [ -n "$unclassified" ]; then
+            printf 'Not classified, so building. Add these to the case in this job:\n'
+            printf '  %s\n' $unclassified
+          fi
+          if [ -n "$because" ]; then
+            printf 'Needs the build, because of:\n'
+            printf '  %s\n' $because
+          fi
+
+          if [ "$build" = true ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
-            printf 'Needs the build, because of:\n%s\n' "$code"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "Documentation and agent tooling only: skipping the build and test jobs."
+            echo "Nothing compiled changed: skipping macOS, Linux and CodeQL."
           fi
 
   # Structure rather than behaviour, so it costs seconds and runs for every

@@ -59,9 +59,20 @@ such guard and runs for everything, which matters precisely *because* it is the
 documentation-shaped change that can break an issue form or unset an executable
 bit. A push to `main` always runs the full suite.
 
-The allowlist in `changes` is an allowlist deliberately: a path nobody thought
-about counts as code and builds. A new top-level directory is then a decision
-somebody makes in that job rather than a hole that silently skips the suite.
+`changes` sorts every changed path into three buckets, and the third is the
+point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, the
+`quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
+pipeline change is only ever proven by running it. **Skips:** `docs/`,
+`.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
+`.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
+that configure GitHub rather than the build. **Unclassified:** anything else — it
+builds, *and the job prints it by name*, which is the signal that the case
+statement needs a line rather than a silent guess in either direction.
+
+Both lists are explicit on purpose. An include-only list fails towards skipping,
+which is how a real change stops being tested; an exclude-only list fails towards
+building, which is how the whole mechanism quietly stops saving anything. Naming
+both leaves a bucket that can complain.
 
 `gate` is the required check. Two GitHub behaviours force that shape:
 
