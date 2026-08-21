@@ -1,0 +1,65 @@
+name: Feature request
+description: Suggest a change to the menu-bar app, the CLI, or the core library
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem you hit rather than the patch you already have in
+        mind — the design is easier to agree on before anyone writes code.
+
+        Two constraints shape what is possible: QuotaBar uses public, documented
+        CLI interfaces only, and it never reads, stores or logs provider
+        credentials or completes a login prompt. The rest is in
+        [AGENTS.md](https://github.com/bebepewpew/quotabar/blob/main/AGENTS.md).
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched the existing issues and did not find this request.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of QuotaBar?
+      options:
+        - the macOS menu-bar app
+        - the `quotabar` command
+        - QuotaCore (probes, caching, alerts)
+        - a new provider
+        - a new platform front-end
+        - something else
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What you were trying to do, and what QuotaBar made you do instead.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should QuotaBar do?
+      description: The behaviour you want, including how it should look or read.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Existing flags, integrations or workarounds you tried first, and why they were not enough.
+    validations:
+      required: false
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Scope
+      options:
+        - label: This does not require QuotaBar to read, store or log provider credentials, or to complete a login prompt.
+          required: true
+        - label: This can be done through documented, publicly supported CLI interfaces rather than a provider's private internals.
+          required: true

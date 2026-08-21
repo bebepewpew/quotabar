@@ -1,0 +1,120 @@
+name: Bug report
+description: A wrong quota, an unexplained error, or a provider QuotaBar will not report on
+title: "[Bug]: "
+labels: ["fix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. QuotaBar reads quotas by running the provider
+        CLIs installed on your machine and parsing their output, so most bugs are
+        a provider printing something a parser did not expect. That output is
+        usually the only thing that reproduces the problem.
+
+        **Do not report a security vulnerability here.** QuotaBar shells out to
+        authenticated provider CLIs; anything touching credentials, process
+        lifetime or command construction goes privately through a
+        [security advisory](https://github.com/bebepewpew/quotabar/security/advisories/new),
+        never a public issue.
+
+        **Redact before you paste.** QuotaBar output carries account state —
+        plans, usage and reset times — and this issue is public.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: This is not a security vulnerability.
+          required: true
+        - label: I read the [troubleshooting table](https://github.com/bebepewpew/quotabar#troubleshooting) and this is not a missing `expect`, an unanswered Gemini folder-trust prompt, or a withdrawn Gemini Code Assist tier.
+          required: true
+        - label: I searched the existing issues and did not find this one.
+          required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Which provider CLI is involved?
+      description: The CLI whose quota is wrong or missing.
+      options:
+        - codex
+        - claude
+        - gemini
+        - more than one
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did you see it?
+      options:
+        - the `quotabar` command
+        - the macOS menu-bar app
+        - both
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      description: The macOS release or the distribution, with its version.
+      placeholder: macOS 15.3 — or Arch Linux, kernel 6.13
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: QuotaBar version
+      description: The output of `quotabar --version`. If you built from a checkout, add the commit.
+      placeholder: quotabar 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected instead
+      description: Include the exact message QuotaBar showed, if it showed one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The command or action, and whether it fails every time or intermittently.
+      placeholder: |
+        1. Run `quotabar --provider gemini`
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: json
+    attributes:
+      label: Output of `quotabar --json`
+      description: Run `quotabar --json 2>&1` so warnings on stderr are captured too, then remove anything sensitive.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: provider-output
+    attributes:
+      label: The provider's own output, if the numbers are wrong
+      description: |
+        A parsing fix needs a fixture, and this is what one is built from: what the
+        provider itself printed. `/stats` inside `gemini`, `claude -p /usage`, or
+        the Codex usage view. Redact account identifiers before pasting.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: How you installed QuotaBar, whether it used to work, or anything else that seems relevant.
+    validations:
+      required: false
+  - type: checkboxes
+    id: sanitised
+    attributes:
+      label: Sanitised output
+      options:
+        - label: I have removed account identifiers, tokens, personal paths and anything else sensitive from the output pasted above.
+          required: true

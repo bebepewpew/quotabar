@@ -1,0 +1,11 @@
+# Blank issues are disabled so every report arrives through a form, and so a
+# vulnerability cannot be filed as a public issue by default. The advisory link
+# below is the route for those.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/bebepewpew/quotabar/security/advisories/new
+    about: QuotaBar runs your authenticated provider CLIs, so vulnerabilities are reported privately through a GitHub security advisory — never in a public issue.
+  - name: A provider is not reporting its quota
+    url: https://github.com/bebepewpew/quotabar#troubleshooting
+    about: Missing `expect`, an unanswered Gemini folder-trust prompt and a withdrawn Gemini Code Assist tier are expected messages the README explains.
