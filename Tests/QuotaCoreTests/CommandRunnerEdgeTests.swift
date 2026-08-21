@@ -18,6 +18,13 @@ import Glibc
 /// one that answers `command -v`, and one that refuses its flags the way
 /// nushell, elvish and restricted shells do. Everything here is a real process
 /// with a short deadline.
+///
+/// A staged `$SHELL` only covers the first rung: `find` asks every candidate
+/// before it gives up, so a search that resolves nothing would go on to run the
+/// machine's own `/bin/zsh -lic` and source the developer's startup files. The
+/// cases that expect no answer therefore hand `find` the whole ladder through
+/// `shells:`. `testFindTriesTheNextCandidateWhenTheConfiguredShellRejectsItsFlags`
+/// is the deliberate exception — the real ladder is the thing it asserts on.
 final class CommandRunnerEdgeTests: XCTestCase {
     private var scratch = URL(fileURLWithPath: NSTemporaryDirectory())
 
@@ -71,9 +78,45 @@ final class CommandRunnerEdgeTests: XCTestCase {
         let empty = scratch.appendingPathComponent("empty-path")
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
 
-        try withEnvironment(["SHELL": shell, "PATH": empty.path]) {
-            XCTAssertNil(CommandRunner.find(name))
+        try withEnvironment(["PATH": empty.path]) {
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
         }
+    }
+
+    /// Nothing on the machine provides the name, which is the answer every
+    /// probe gets for a CLI that is not installed.
+    ///
+    /// It is asserted against a staged ladder rather than the machine's own
+    /// shells, and this is the reason the ladder is a parameter at all: `find`
+    /// asks every candidate before giving up, so staging `$SHELL` alone would
+    /// still run `/bin/zsh -lic` and source the developer's `~/.zshrc`. The
+    /// staged `$HOME` here is a canary for exactly that — a startup file in it
+    /// records being sourced, and the search must not have touched one.
+    func testFindReturnsNilWhenNoKnownLocationAndNoStagedShellProvidesIt() throws {
+        try requireLiveEnvironment()
+        let name = "quotabar-absent-\(UUID().uuidString.prefix(8))"
+        let sourced = scratch.appendingPathComponent("sourced.log").path
+        let home = try makeHomeRecordingItsStartupFiles(into: sourced)
+        let asked = scratch.appendingPathComponent("asked.log").path
+        let shell = try makeShell(named: "not-found-shell", body: """
+        echo "$@" >> "\(asked)"
+        echo '\(name): command not found' >&2
+        exit 127
+        """)
+        let empty = scratch.appendingPathComponent("empty-path")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+
+        let started = Date()
+        try withEnvironment(["PATH": empty.path, "HOME": home, "ZDOTDIR": home]) {
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "the fallback stays bounded")
+
+        XCTAssertTrue(String(decoding: FileManager.default.contents(atPath: asked) ?? Data(), as: UTF8.self)
+            .contains("command -v -- \(name)"), "the staged shell was never asked")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sourced),
+                       "an interactive login shell was run, sourcing startup files: "
+                       + String(decoding: FileManager.default.contents(atPath: sourced) ?? Data(), as: UTF8.self))
     }
 
     /// A `$SHELL` that exits rather than accepting `-lc`/`-lic` must not make
@@ -130,18 +173,22 @@ final class CommandRunnerEdgeTests: XCTestCase {
         let name = "quotabar-absent-\(UUID().uuidString.prefix(8))"
         let empty = try emptyDirectory()
 
+        // A miss walks the whole ladder, so the staged shell is handed in rather
+        // than only put in `$SHELL`: the machine's own `/bin/zsh -lic` would
+        // otherwise follow it and source the developer's startup files. `$SHELL`
+        // is still staged because the memo is keyed on it.
         withEnvironment(["SHELL": shell, "PATH": empty.path]) {
-            XCTAssertNil(CommandRunner.find(name))
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
             XCTAssertEqual(ladderRuns(loggedAt: log).count, 1, "the first search has to ask")
 
-            XCTAssertNil(CommandRunner.find(name))
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
             XCTAssertEqual(ladderRuns(loggedAt: log).count, 1,
                            "the second search re-ran the login-shell ladder: \(ladderRuns(loggedAt: log))")
 
             // The seam the tests rely on, and the only way anything forgets an
             // answer before its lifetime is up.
             CommandRunner.resetDiscoveryMemo()
-            XCTAssertNil(CommandRunner.find(name))
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
             XCTAssertEqual(ladderRuns(loggedAt: log).count, 2, "a reset memo has to ask again")
         }
     }
@@ -170,6 +217,10 @@ final class CommandRunnerEdgeTests: XCTestCase {
     /// The acceptance criterion of #78, through the probe that pays for it:
     /// `GeminiTerminalProbe.fetch()` resolves `gemini` and then asks
     /// `CommandRunner.runExpect` for `expect`, which is what runs the ladder.
+    ///
+    /// `runExpect` resolves the binary itself, so the ladder cannot be handed in
+    /// the way the cases above hand one in; the machine's own shells do run.
+    /// `ShellStartupFiles` is what keeps them off the developer's startup files.
     func testRepeatedGeminiProbesAskTheLoginShellLadderAtMostOnce() throws {
         try requireLiveEnvironment()
         let installed = scratch.appendingPathComponent("provider-bin")
@@ -178,22 +229,24 @@ final class CommandRunnerEdgeTests: XCTestCase {
         let shell = try makeCountingShell(loggingTo: log)
 
         try withEnvironment(["SHELL": shell, "PATH": installed.path]) {
-            guard CommandRunner.find("expect") == nil else {
-                throw XCTSkip("expect is installed in a known location here, so the ladder never runs")
-            }
-            CommandRunner.resetDiscoveryMemo()
-            try? FileManager.default.removeItem(atPath: log)
-
-            for attempt in 1...2 {
-                XCTAssertThrowsError(try GeminiTerminalProbe().fetch(), "refresh \(attempt)") { error in
-                    XCTAssertEqual((error as? ProbeError)?.errorDescription, CommandRunner.expectInstallHint)
+            try ShellStartupFiles.suppressed {
+                guard CommandRunner.find("expect") == nil else {
+                    throw XCTSkip("expect is installed in a known location here, so the ladder never runs")
                 }
-            }
+                CommandRunner.resetDiscoveryMemo()
+                try? FileManager.default.removeItem(atPath: log)
 
-            let asked = ladderRuns(loggedAt: log)
-            XCTAssertEqual(asked.count, 1, "two refreshes ran the login-shell ladder twice: \(asked)")
-            XCTAssertTrue(asked.first?.contains("command -v -- expect") == true,
-                          "the ladder asked for something else: \(asked)")
+                for attempt in 1...2 {
+                    XCTAssertThrowsError(try GeminiTerminalProbe().fetch(), "refresh \(attempt)") { error in
+                        XCTAssertEqual((error as? ProbeError)?.errorDescription, CommandRunner.expectInstallHint)
+                    }
+                }
+
+                let asked = ladderRuns(loggedAt: log)
+                XCTAssertEqual(asked.count, 1, "two refreshes ran the login-shell ladder twice: \(asked)")
+                XCTAssertTrue(asked.first?.contains("command -v -- expect") == true,
+                              "the ladder asked for something else: \(asked)")
+            }
         }
     }
 
@@ -209,10 +262,10 @@ final class CommandRunnerEdgeTests: XCTestCase {
         let directory = try emptyDirectory()
 
         try withEnvironment(["SHELL": shell, "PATH": directory.path]) {
-            XCTAssertNil(CommandRunner.find(name))
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
 
             let installed = try makeExecutable(named: name, in: directory)
-            XCTAssertEqual(CommandRunner.find(name), installed,
+            XCTAssertEqual(CommandRunner.find(name, shells: [(shell, "-lic")]), installed,
                            "a remembered miss must not outlive the install that answers it")
             XCTAssertEqual(ladderRuns(loggedAt: log).count, 1,
                            "the cheap half of the search answers without asking a shell again")
@@ -230,10 +283,10 @@ final class CommandRunnerEdgeTests: XCTestCase {
         let empty = try emptyDirectory()
 
         withEnvironment(["SHELL": silent, "PATH": empty.path]) {
-            XCTAssertNil(CommandRunner.find(name))
+            XCTAssertNil(CommandRunner.find(name, shells: [(silent, "-lic")]))
         }
         withEnvironment(["SHELL": answering, "PATH": empty.path]) {
-            XCTAssertEqual(CommandRunner.find(name), installed,
+            XCTAssertEqual(CommandRunner.find(name, shells: [(answering, "-lic")]), installed,
                            "the miss was remembered for a shell that is no longer the one being used")
         }
     }
@@ -400,6 +453,20 @@ final class CommandRunnerEdgeTests: XCTestCase {
     /// answer rather than about any real shell's dialect.
     private func makeShell(named name: String, body: String) throws -> String {
         try makeExecutable(named: name, in: scratch.appendingPathComponent("shells"), body: body)
+    }
+
+    /// A home directory whose shell startup files announce themselves. Every
+    /// name a login or interactive `sh`, `bash` or `zsh` reads is present, so
+    /// running any of them against this `HOME` leaves the log behind.
+    private func makeHomeRecordingItsStartupFiles(into log: String) throws -> String {
+        let home = scratch.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        for name in [".profile", ".bash_profile", ".bash_login", ".bashrc",
+                     ".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            try Data("echo '\(name)' >> \"\(log)\"\n".utf8)
+                .write(to: home.appendingPathComponent(name))
+        }
+        return home.path
     }
 
     @discardableResult

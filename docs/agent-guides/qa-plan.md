@@ -48,6 +48,13 @@ screen that means two different things.
   looks like.
 - A test that needs a temporary directory cleans it up, and does not assume it is
   the only test running.
+- Never let binary discovery run out through the machine's own shells.
+  `CommandRunner.find` asks *every* candidate when a name resolves nowhere, so a
+  staged `$SHELL` covers only the first rung and the search goes on to
+  `/bin/zsh -lic` — an interactive login shell, which sources the developer's
+  `~/.zshrc` and makes the test mean something else on their machine than in CI.
+  Hand `find` a staged ladder through `shells:`, or, where the code under test
+  resolves the binary itself, wrap the case in `ShellStartupFiles.suppressed`.
 
 ## Coverage
 

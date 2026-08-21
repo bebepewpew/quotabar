@@ -16,6 +16,26 @@ public enum CommandRunner {
     public static let maximumCapturedBytes = 8 * 1024 * 1024
 
     public static func find(_ executable: String) -> String? {
+        find(executable, shells: loginShells())
+    }
+
+    /// The search with its shell ladder supplied. Shipped code goes through
+    /// `find(_:)` above, which passes the real `loginShells()`; a test passes a
+    /// staged ladder instead.
+    ///
+    /// It has to be a parameter rather than a staged `$SHELL`, because a name
+    /// that resolves nowhere is asked of *every* candidate — so a stub in
+    /// `$SHELL` would still be followed by the machine's own `/bin/zsh -lic`,
+    /// an interactive login shell sourcing whatever the developer keeps in
+    /// `~/.zshrc`. The ladder is an autoclosure so it is still only built when
+    /// the known locations and `PATH` come up empty.
+    ///
+    /// `DiscoveryMemo` is keyed on the executable, `$PATH` and `$SHELL` and not
+    /// on the ladder, because production has only ever one ladder. A test that
+    /// stages a different one under the same environment therefore has to use a
+    /// name of its own or call `resetDiscoveryMemo()` first, which is what the
+    /// discovery cases do.
+    static func find(_ executable: String, shells: @autoclosure () -> [(path: String, flags: String)]) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let explicit = ["\(home)/.local/bin/\(executable)", "\(home)/.volta/bin/\(executable)",
                         "\(home)/.npm-global/bin/\(executable)", "\(home)/.bun/bin/\(executable)",
@@ -33,7 +53,7 @@ public enum CommandRunner {
         case .absent: return nil
         case .unknown: break
         }
-        let resolved = searchLoginShells(for: executable)
+        let resolved = searchLoginShells(for: executable, shells: shells())
         discoveryMemo.remember(resolved, for: key)
         return resolved
     }
@@ -41,9 +61,11 @@ public enum CommandRunner {
     /// The expensive half of `find`, kept apart so `DiscoveryMemo` has something
     /// to remember. Every candidate is an interactive login shell that re-executes
     /// the user's startup files, and the loop returns early only on success, so a
-    /// binary that is genuinely absent pays for all of them.
-    private static func searchLoginShells(for executable: String) -> String? {
-        for shell in loginShells() {
+    /// binary that is genuinely absent pays for all of them. That is also why a
+    /// test hands its own ladder in rather than letting the machine's shells run.
+    private static func searchLoginShells(for executable: String,
+                                          shells: [(path: String, flags: String)]) -> String? {
+        for shell in shells {
             guard let data = try? run(shell.path, [shell.flags, "command -v -- \(executable)"], timeout: 4) else { continue }
             if let match = String(decoding: data, as: UTF8.self)
                 .split(whereSeparator: \.isNewline).map(String.init)
