@@ -53,9 +53,9 @@ you already have in mind.
 Two constraints shape what is acceptable, and both are non-negotiable:
 
 - QuotaBar uses public, documented CLI interfaces only. Gemini quota collection
-  stays terminal-only through the interactive `/stats` view; Codex uses
-  `app-server --stdio` over pipes and Claude Code uses `-p /usage`. No private
-  JavaScript modules, no new pseudo-terminal dependencies for those two.
+  stays terminal-only through the interactive `/stats` and `/model` views; Codex
+  uses `app-server --stdio` over pipes and Claude Code uses `-p /usage`. No
+  private JavaScript modules, no new pseudo-terminal dependencies for those two.
 - QuotaBar never reads, copies, logs or stores provider credentials and never
   completes a login prompt. Authentication stays inside each vendor's CLI.
 

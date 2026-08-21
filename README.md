@@ -12,7 +12,8 @@ cross-platform `quotabar` command for everything else.
 - **Codex:** reads live limits through the local app-server protocol.
 - **Claude Code:** runs `claude -p /usage` and parses its usage windows.
 - **Gemini CLI:** opens a bounded, screen-reader-friendly terminal session, runs
-  interactive `/stats`, and parses every displayed model quota bucket.
+  the interactive `/stats` and `/model` views, and parses every displayed model
+  quota bucket.
 
 QuotaBar discovers installed providers at launch. It caches the last successful
 snapshot, refreshes automatically, and keeps cached values visible with a refresh
@@ -348,9 +349,13 @@ successful reading stays visible with the error beside it.
 ## Privacy and behavior
 
 All probes execute installed CLIs locally. Gemini runs inside a fixed-size
-pseudo-terminal with a bounded deadline; QuotaBar sends only `/stats` and
-terminates the complete process group afterward. Failed refreshes preserve the
-last successful values rather than clearing the corresponding card.
+pseudo-terminal with a bounded deadline, and QuotaBar types nothing into that
+authenticated session beyond the keystrokes that open the quota screen: `/stats`
+and Enter, which makes Gemini refresh its counters; then `/model` and Enter,
+which draws the refreshed account-wide buckets; then Ctrl-C to close the session
+before the complete process group is terminated. No prompt, file, or credential
+is ever sent. Failed refreshes preserve the last successful values rather than
+clearing the corresponding card.
 
 State is stored per platform: `UserDefaults` on macOS, and
 `${XDG_CONFIG_HOME:-~/.config}/quotabar/state.json` on Linux.

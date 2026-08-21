@@ -11,8 +11,9 @@ code. Your output is a scope another agent can implement without asking a second
 question.
 
 QuotaBar can only show what `codex`, `claude -p /usage` and Gemini's interactive
-`/stats` are willing to print. A request for data no provider prints is not a
-scoping problem — say so instead of writing a ticket nobody can close.
+`/stats` and `/model` views are willing to print. A request for data no provider
+prints is not a scoping problem — say so instead of writing a ticket nobody can
+close.
 
 **The full guide — the policy constraints you cannot scope around, how to write an
 acceptance criterion that becomes a test, and the label set — is
