@@ -406,6 +406,8 @@ public protocol HistoryStore: AnyObject, Sendable {
     func heads() -> [HistorySeriesID: UsageSample]
     /// Drops records older than `horizon` before `now`, reporting how many went.
     @discardableResult func compact(now: Date, horizon: TimeInterval) -> Int
+    /// Whether retention is worth running. Cheap enough to ask on every refresh.
+    func needsCompaction(now: Date, horizon: TimeInterval) -> Bool
     func removeAll()
 }
 

@@ -140,6 +140,9 @@ struct DashboardView: View {
                     }.buttonStyle(.borderless).help("Refresh quotas")
                 }
             }
+            if !store.recommendations.isEmpty {
+                AdvisorStrip(recommendations: store.recommendations)
+            }
             ScrollView {
                 if store.isDiscoveringTools {
                     VStack(spacing: 10) {
@@ -153,7 +156,7 @@ struct DashboardView: View {
                         ForEach(layout.columns.indices, id: \.self) { index in
                             LazyVStack(spacing: 14) {
                                 ForEach(layout.columns[index]) { snapshot in
-                                    QuotaCard(snapshot: snapshot)
+                                    QuotaCard(snapshot: snapshot, usage: store.recentUsage)
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .top)
@@ -295,6 +298,7 @@ struct SettingsView: View {
     @StateObject private var loginItem = LoginItemManager()
     @State private var notificationPermission: NotificationPermissionState = .unavailable
     @State private var notificationTestFailed = false
+    @State private var historyCleared = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -385,6 +389,24 @@ struct SettingsView: View {
             }
             Text("\(store.menuBarSelections.count) of 3 selected")
                 .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Usage history").font(.headline)
+                Text("QuotaBar keeps usage percentages and timestamps on this Mac for \(Int(FileHistoryStore.defaultHorizon / 86_400)) days "
+                     + "so it can chart consumption and tell you whether a subscription fits. "
+                     + "Nothing is sent anywhere.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Delete history", role: .destructive) {
+                        store.clearHistory()
+                        historyCleared = true
+                    }
+                    if historyCleared {
+                        Text("Deleted.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
         .padding(18)
         .onAppear {
@@ -411,6 +433,9 @@ struct SettingsView: View {
 
 struct QuotaCard: View {
     let snapshot: QuotaSnapshot
+    /// Bucketed usage per window for the last week, from `QuotaStore`. Empty
+    /// until enough has been recorded, which is what a new install looks like.
+    var usage: [HistorySeriesID: [Double?]] = [:]
     var color: Color { Color(hex: snapshot.provider.tint) }
 
     var body: some View {
@@ -429,6 +454,12 @@ struct QuotaCard: View {
                         Text("\(QuotaFormatting.percent(window.usedPercent)) used").font(.caption.monospacedDigit()).fontWeight(.medium)
                     }
                     ProgressView(value: window.usedPercent, total: 100).tint(color)
+                    if let strip = usage[HistorySeriesID(provider: snapshot.provider, windowKey: window.key)],
+                       strip.contains(where: { $0 != nil }) {
+                        UsageStrip(values: strip, color: color)
+                            .frame(height: 14)
+                            .accessibilityLabel("Usage over the last 7 days")
+                    }
                     if let reset = window.resetAt {
                         Text("Resets \(reset, style: .relative)").font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
                     }
@@ -445,6 +476,90 @@ struct QuotaCard: View {
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
     }
 
+}
+
+/// A week of usage as a bar strip. Bars rather than a line because the data is
+/// a level sampled at intervals, not a continuous signal, and a gap should read
+/// as "not watched" rather than as zero.
+struct UsageStrip: View {
+    let values: [Double?]
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geometry in
+            let slot = values.isEmpty ? 0 : geometry.size.width / CGFloat(values.count)
+            HStack(alignment: .bottom, spacing: max(0, slot * 0.15)) {
+                ForEach(values.indices, id: \.self) { index in
+                    Rectangle()
+                        .fill(values[index] == nil ? Color.secondary.opacity(0.12) : color.opacity(0.55))
+                        .frame(height: barHeight(values[index], in: geometry.size.height))
+                        .frame(maxHeight: geometry.size.height, alignment: .bottom)
+                }
+            }
+        }
+    }
+
+    /// An empty bucket still draws a hairline, so an unwatched stretch is visibly
+    /// different from a stretch that really was at zero.
+    private func barHeight(_ value: Double?, in height: CGFloat) -> CGFloat {
+        guard let value else { return max(1, height * 0.08) }
+        return max(1, height * CGFloat(min(max(value, 0), 100) / 100))
+    }
+}
+
+/// The advisor's findings, most pressing first. Informational ones — "not enough
+/// history yet" — belong in `quotabar advise`, not in a panel above the numbers.
+struct AdvisorStrip: View {
+    let recommendations: [Recommendation]
+
+    /// Computed outside the view builder: result builders accept local
+    /// declarations, but keeping the filtering here makes the body a plain
+    /// conditional and the limit testable by eye.
+    private var shown: [Recommendation] {
+        Array(recommendations.filter { $0.severity != .info }.prefix(3))
+    }
+
+    var body: some View {
+        if !shown.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(shown.enumerated()), id: \.offset) { _, recommendation in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: symbol(recommendation.severity))
+                            .foregroundStyle(tint(recommendation.severity))
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(recommendation.headline).font(.caption).fontWeight(.medium)
+                            if let first = recommendation.evidence.first {
+                                Text(first).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func symbol(_ severity: Recommendation.Severity) -> String {
+        switch severity {
+        case .critical: "exclamationmark.triangle.fill"
+        case .warning: "clock.arrow.circlepath"
+        case .opportunity: "arrow.down.circle"
+        case .info: "info.circle"
+        }
+    }
+
+    private func tint(_ severity: Recommendation.Severity) -> Color {
+        switch severity {
+        case .critical: .red
+        case .warning: .orange
+        case .opportunity: .green
+        case .info: .secondary
+        }
+    }
 }
 
 extension Color {

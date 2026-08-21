@@ -21,14 +21,19 @@ final class AlertEvaluatorTests: XCTestCase {
         XCTAssertEqual(AlertLevel(usedPercent: 95), .critical)
         XCTAssertEqual(AlertLevel(usedPercent: 100), .critical)
         XCTAssertEqual(AlertLevel(usedPercent: 150), .critical)
+        // `.projected` is raised by the advisor, never by a threshold on the
+        // current reading, so no percentage may produce it.
+        XCTAssertFalse((0...200).contains { AlertLevel(usedPercent: Double($0)) == .projected })
     }
 
     func testAlertLevelTitlesAndRawValues() {
-        XCTAssertEqual(AlertLevel.allCases, [.warning, .critical])
+        XCTAssertEqual(AlertLevel.allCases, [.warning, .critical, .projected])
         XCTAssertEqual(AlertLevel.warning.rawValue, "warning")
         XCTAssertEqual(AlertLevel.critical.rawValue, "critical")
+        XCTAssertEqual(AlertLevel.projected.rawValue, "projected")
         XCTAssertEqual(AlertLevel.warning.title, "running low")
         XCTAssertEqual(AlertLevel.critical.title, "almost exhausted")
+        XCTAssertEqual(AlertLevel.projected.title, "on course to run out early")
     }
 
     // MARK: - alerts(for:now:)

@@ -71,7 +71,10 @@ still surfaces both from there, and the root stays short enough to read.
   `P`/`F`/`L` for recognizable Gemini model families.
 - Provider-colored progress below 80% used, amber at 80%, and red at 95%.
 - Local macOS notifications at the 80% and 95% thresholds, deduplicated per
-  provider, quota window, reset period, and threshold.
+  provider, quota window, reset period, and threshold — plus a forecast alert
+  when a window is on course to run out before it resets.
+- A usage strip under each quota showing the last seven days, and an advisor
+  panel when a subscription looks oversized or keeps running out.
 - Optional launch at login.
 
 ### `quotabar` command (macOS, Linux)
@@ -80,7 +83,39 @@ still surfaces both from there, and the root stays short enough to read.
 - `--watch` polls on an interval; `--notify` raises the same 80%/95% alerts
   through `notify-send`, so any `org.freedesktop.Notifications` daemon (KDE
   Plasma, GNOME, dunst, mako) shows them.
+- `quotabar history` charts recorded consumption; `quotabar advise` says whether
+  your subscriptions match how you actually use them.
 - Same dedup rules and same cached-value retention as the macOS app.
+
+### Consumption history and the advisor
+
+Every refresh records one sample per quota window — a percentage, a timestamp
+and the reset time — to a local file. Readings that have not moved are skipped,
+so three months costs well under a megabyte, and anything older than 120 days is
+dropped.
+
+From that QuotaBar reconstructs *cycles*: the span between one reset and the
+next. Providers report a level, not a cycle, so a reset is inferred from usage
+falling sharply, from the reported reset jumping forward, or from the clock
+passing a reset already reported.
+
+`quotabar advise` then applies fixed rules — no model, no network, nothing
+leaves your machine:
+
+| It says | When |
+|---|---|
+| on course to run out before it resets | the recent trend reaches 100% before the reset |
+| runs out most cycles | at least half of the last 8 cycles hit 95% |
+| usage is bursty, not oversubscribed | the session limit keeps biting while the week stays quiet |
+| looks oversized | even the busiest of the last cycles peaked at 40% or less |
+| has gone unused | four or more cycles at 1% or less |
+| has headroom | one provider is full while another is half empty |
+
+Advice is withheld unless there are at least four complete cycles, each watched
+for at least 60% of its length. A laptop that was shut for four days understates
+that week, and `advise` says *"not enough history yet"* rather than reading the
+gap as a quiet week. History is only recorded while something is running to
+record it — the macOS app, `quotabar --watch`, or each one-shot invocation.
 
 ## Requirements
 
@@ -196,6 +231,14 @@ quotabar --provider claude    limit to one provider; repeatable
 quotabar --watch              keep running and re-probe on an interval
 quotabar --watch --interval 15 --notify
 quotabar --no-color           disable ANSI colour ($NO_COLOR is honoured too)
+
+quotabar history              usage graph for the last 7 days
+quotabar history --since 30d  a longer window (90m, 24h, 7d, 3w all work)
+quotabar history --cycles     completed cycles with peak and coverage
+quotabar history --format csv export every recorded sample
+quotabar history --clear      delete all recorded history
+quotabar advise               whether your subscriptions fit your usage
+quotabar advise --json        the same findings, machine readable
 ```
 
 Exit codes: `0` every probe succeeded, `1` at least one provider failed to
@@ -277,6 +320,14 @@ last successful values rather than clearing the corresponding card.
 
 State is stored per platform: `UserDefaults` on macOS, and
 `${XDG_CONFIG_HOME:-~/.config}/quotabar/state.json` on Linux.
+
+Usage history is a separate file — `history.bin` under
+`~/Library/Application Support/QuotaBar` on macOS and
+`${XDG_STATE_HOME:-~/.local/state}/quotabar` on Linux. It holds usage
+percentages, timestamps and reset times, and nothing else: no prompts, no
+filenames, no credentials. It never leaves the machine, and QuotaBar makes no
+network requests of its own. Delete it with `quotabar history --clear`, or from
+Settings in the macOS app.
 
 ## License
 
