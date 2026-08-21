@@ -37,6 +37,13 @@ final class ProcessLineSession: @unchecked Sendable {
             condition.lock()
             defer { condition.broadcast(); condition.unlock() }
             guard !data.isEmpty else {
+                // End of file. Whatever is still buffered is a final line the
+                // child wrote without a trailing newline; dropping it would lose
+                // the last response of a CLI that does not terminate its output.
+                if !buffer.isEmpty {
+                    pending.append(buffer)
+                    buffer = ""
+                }
                 closed = true
                 handle.readabilityHandler = nil
                 return
@@ -58,9 +65,13 @@ final class ProcessLineSession: @unchecked Sendable {
         #endif
     }
 
+    /// Writing through the string's own UTF-8 view rather than the optional
+    /// `data(using:)`: that conversion cannot fail for a Swift string, and
+    /// returning quietly when it did would have dropped a request the caller
+    /// believes it sent. A write that really fails — the pipe is closed, or the
+    /// child is gone — still throws.
     func send(_ line: String) throws {
-        guard let data = (line + "\n").data(using: .utf8) else { return }
-        try input.fileHandleForWriting.write(contentsOf: data)
+        try input.fileHandleForWriting.write(contentsOf: Data((line + "\n").utf8))
     }
 
     /// Reads lines until one satisfies `matches` or the deadline passes. Every
