@@ -61,37 +61,83 @@ final class CommandRunnerTests: XCTestCase {
 
     // MARK: - run: failure diagnostics
 
-    func testNonZeroExitSurfacesTheDiagnosticFromStandardError() throws {
+    /// A command that fails is reported as an exit status, never as whatever it
+    /// printed. Its stderr is untrusted text that has carried API keys, and
+    /// every error description reaches the menu card, the table and `--json`.
+    func testNonZeroExitReportsTheStatusWithoutEchoingWhatTheCLIPrinted() throws {
         let shell = try systemBinary("sh")
-        XCTAssertThrowsError(try CommandRunner.run(shell, ["-c", "echo not logged in >&2; exit 3"], timeout: 5)) { error in
-            XCTAssertEqual((error as? ProbeError)?.errorDescription, "not logged in")
+        let secret = "sk-live-QUOTABARNOTAREALKEY"
+        XCTAssertThrowsError(try CommandRunner.run(
+            shell, ["-c", "echo 'Error: credential \(secret) was rejected' >&2; exit 3"], timeout: 5)) { error in
+            let message = (error as? ProbeError)?.errorDescription ?? ""
+            XCTAssertFalse(message.contains(secret), "the CLI's own stderr reached the message: \(message)")
+            XCTAssertFalse(message.contains("rejected"), "no part of the CLI's stderr may be quoted: \(message)")
+            XCTAssertEqual(message, "sh exited with status 3. Run it in a terminal to see what it reported.")
         }
     }
 
-    func testNonZeroExitFallsBackToStandardOutputAndThenToTheExitCode() throws {
+    /// stdout is no safer than stderr, and an empty stream changes nothing: the
+    /// status is what gets reported either way. What the command printed is
+    /// kept beside the error for a probe to classify, off the display path.
+    func testNonZeroExitWithholdsStandardOutputAndKeepsItOnlyAsDetail() throws {
         let shell = try systemBinary("sh")
         XCTAssertThrowsError(try CommandRunner.run(shell, ["-c", "echo printed to stdout; exit 1"], timeout: 5)) { error in
-            XCTAssertEqual((error as? ProbeError)?.errorDescription, "printed to stdout")
+            XCTAssertEqual((error as? ProbeError)?.errorDescription,
+                           "sh exited with status 1. Run it in a terminal to see what it reported.")
+            XCTAssertEqual((error as? ProbeError)?.diagnosticDetail, "printed to stdout")
         }
         XCTAssertThrowsError(try CommandRunner.run(shell, ["-c", "exit 7"], timeout: 5)) { error in
-            XCTAssertEqual((error as? ProbeError)?.errorDescription, "Command failed with exit code 7")
+            XCTAssertEqual((error as? ProbeError)?.errorDescription,
+                           "sh exited with status 7. Run it in a terminal to see what it reported.")
+            XCTAssertNil((error as? ProbeError)?.diagnosticDetail, "a silent command leaves nothing to classify")
         }
     }
 
-    /// Terminal control bytes must never reach the menu UI, and a CLI that
-    /// dumps a screenful of noise must not turn into an unbounded error card.
-    func testDiagnosticIsSanitizedAndClampedToTheTailOfTheStream() throws {
+    /// The retained detail is still sanitized and bounded. It is only ever
+    /// matched against, but terminal control bytes make a match unreliable and
+    /// a screenful of noise is not free to carry around.
+    func testTheRetainedDetailIsSanitizedAndClampedToTheTailOfTheStream() throws {
         let shell = try systemBinary("sh")
         XCTAssertThrowsError(try CommandRunner.run(
             shell, ["-c", "printf '\\033[2K\\033[1Aquota exhausted\\r\\n' >&2; exit 1"], timeout: 5)) { error in
-            XCTAssertEqual((error as? ProbeError)?.errorDescription, "quota exhausted")
+            XCTAssertEqual((error as? ProbeError)?.diagnosticDetail, "quota exhausted")
+            XCTAssertFalse((error as? ProbeError)?.errorDescription?.contains("quota exhausted") ?? true)
         }
         XCTAssertThrowsError(try CommandRunner.run(
             shell, ["-c", "printf '%3000s' '' | tr ' ' A >&2; exit 1"], timeout: 5)) { error in
-            let message = (error as? ProbeError)?.errorDescription ?? ""
-            XCTAssertEqual(message.count, 1_500, "only the tail of a noisy stream is reported")
-            XCTAssertTrue(message.allSatisfy { $0 == "A" })
+            let detail = (error as? ProbeError)?.diagnosticDetail ?? ""
+            XCTAssertEqual(detail.count, 1_500, "only the tail of a noisy stream is kept")
+            XCTAssertTrue(detail.allSatisfy { $0 == "A" })
         }
+    }
+
+    /// The message names the command, so the three failure kinds stay distinct,
+    /// but it names it only when the name is plain: the path is resolved from
+    /// `PATH` or from a login shell, so its last component is untrusted too.
+    func testOnlyAPlainCommandNameIsQuotedBackInTheMessage() {
+        XCTAssertEqual(CommandRunner.commandName("/opt/quota bar/claude"), "claude")
+        XCTAssertEqual(CommandRunner.commandName("gemini-2.5_pro+beta"), "gemini-2.5_pro+beta")
+        XCTAssertNil(CommandRunner.commandName("/tmp/claude \u{1B}[31mfake"))
+        XCTAssertNil(CommandRunner.commandName("/tmp/claude;id"))
+        XCTAssertNil(CommandRunner.commandName("/tmp/" + String(repeating: "a", count: 33)))
+
+        XCTAssertEqual(ProbeError.commandFailed(.init(command: nil, status: 2, detail: "boom")).errorDescription,
+                       "The CLI exited with status 2. Run it in a terminal to see what it reported.")
+        XCTAssertNil(ProbeError.commandFailed(.init(command: "claude", status: 1, detail: "")).diagnosticDetail)
+        XCTAssertNil(ProbeError.message("plain").diagnosticDetail, "only a command failure carries CLI output")
+        XCTAssertNil(ProbeError.timeout.diagnosticDetail)
+    }
+
+    /// Exit status, timeout and a stuck output stream have to stay tellable
+    /// apart: they need different things done about them.
+    func testTheThreeCommandFailuresKeepDistinctMessages() {
+        let messages = [ProbeError.commandFailed(.init(command: "claude", status: 3, detail: "sk-live-key")),
+                        .timeout,
+                        .message("The CLI exited but left its output stream open")]
+            .map { $0.errorDescription ?? "" }
+        XCTAssertEqual(Set(messages).count, 3, "\(messages)")
+        XCTAssertTrue(messages[0].contains("status 3"))
+        XCTAssertFalse(messages[0].contains("sk-live-key"))
     }
 
     // MARK: - run: deadlines and process groups

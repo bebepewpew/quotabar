@@ -197,8 +197,10 @@ final class CommandRunnerEdgeTests: XCTestCase {
                        "the child's output is returned rather than the process dying on SIGPIPE")
     }
 
-    /// The same path when the child also fails: the reported error has to be the
-    /// child's own diagnostic, not the broken pipe the input write hit.
+    /// The same path when the child also fails: what is reported has to be the
+    /// child's own failure, not the broken pipe the input write hit. The exit
+    /// status is what says so — the child's stderr is kept for classification
+    /// and stays out of the message.
     func testRunReportsTheChildsFailureRatherThanTheBrokenInputPipe() throws {
         let shell = try systemBinary("sh")
         let payload = Data(String(repeating: "x", count: 512 * 1024).utf8)
@@ -206,8 +208,12 @@ final class CommandRunnerEdgeTests: XCTestCase {
         XCTAssertThrowsError(
             try CommandRunner.run(shell, ["-c", "echo refused >&2; exit 3"], input: payload, timeout: 5)
         ) { error in
-            XCTAssertTrue("\(error)".contains("refused"),
-                          "the child's stderr explains the failure better than EPIPE does; got \(error)")
+            guard case .commandFailed(let failure)? = error as? ProbeError else {
+                return XCTFail("expected the child's own failure, got \(error)")
+            }
+            XCTAssertEqual(failure.status, 3, "the child's exit status explains this better than EPIPE does")
+            XCTAssertEqual(failure.detail, "refused", "the child's stderr is kept for a probe to classify")
+            XCTAssertFalse("\(failure.message)".contains("refused"), "…and never shown")
         }
     }
 

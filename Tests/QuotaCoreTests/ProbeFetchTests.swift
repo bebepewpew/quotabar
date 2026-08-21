@@ -155,27 +155,41 @@ final class ProbeFetchTests: XCTestCase {
     }
 
     /// A signed-out `claude -p /usage` exits non-zero, so the sign-in prompt
-    /// arrives as a thrown command diagnostic. That branch used to reach the UI
-    /// as raw CLI text, with no mention of what to do about it.
+    /// arrives as a thrown command failure. That branch used to reach the UI as
+    /// raw CLI text, with no mention of what to do about it.
+    ///
+    /// The prompt is in the failure's detail rather than in its message, so this
+    /// also pins down that the probe classifies from the detail: matching the
+    /// message would quietly stop recognising a signed-out CLI.
     func testClaudeFetchReportsAuthenticationFromANonZeroExit() {
         for diagnostic in ["Invalid API key · Please run /login",
                            "Error: authentication required, run `claude login`"] {
-            let runner = FakeProbeRunner(executables: ["claude": "/usr/bin/claude"],
-                                         runResult: .failure(ProbeError.message(diagnostic)))
+            let runner = FakeProbeRunner(
+                executables: ["claude": "/usr/bin/claude"],
+                runResult: .failure(ProbeError.commandFailed(.init(command: "claude", status: 1, detail: diagnostic))))
             XCTAssertEqual(message(from: { try ClaudePrintProbe(runner: runner).fetch() }),
                            "Claude authentication is required. Open Claude Code once and sign in.",
                            "\(diagnostic) must become an actionable error")
         }
     }
 
-    /// Only sign-in failures are reworded; every other command failure keeps the
-    /// diagnostic that says what actually went wrong.
+    /// Only sign-in failures are reworded; every other failure keeps the message
+    /// that says what actually went wrong — and for a command failure that
+    /// message is the exit status, never the text the CLI printed.
     func testClaudeFetchKeepsUnrelatedCommandFailuresIntact() {
         for failure: ProbeError in [.message("The CLI did not respond in time"),
-                                    .message("Command failed with exit code 127")] {
+                                    .message("The CLI exited but left its output stream open")] {
             let runner = FakeProbeRunner(executables: ["claude": "/usr/bin/claude"], runResult: .failure(failure))
             XCTAssertEqual(message(from: { try ClaudePrintProbe(runner: runner).fetch() }), failure.errorDescription)
         }
+
+        let secret = "sk-ant-QUOTABARNOTAREALKEY"
+        let unclassified = ProbeError.commandFailed(
+            .init(command: "claude", status: 127, detail: "panic: config \(secret) is corrupt"))
+        let runner = FakeProbeRunner(executables: ["claude": "/usr/bin/claude"], runResult: .failure(unclassified))
+        let reported = message(from: { try ClaudePrintProbe(runner: runner).fetch() })
+        XCTAssertEqual(reported, "claude exited with status 127. Run it in a terminal to see what it reported.")
+        XCTAssertFalse(reported?.contains(secret) ?? true, "an unclassified failure must not quote the CLI")
     }
 
     func testClaudeFetchRejectsAnUnreadableResponse() {
@@ -307,6 +321,71 @@ final class ProbeFetchTests: XCTestCase {
                        "Gemini returned incomplete quota rows.")
     }
 
+    // MARK: - Untrusted provider output
+
+    /// The whole path the fix is about, with a real child process at one end and
+    /// the machine-readable output at the other: a provider CLI fails for a
+    /// reason no probe recognises, and nothing it printed may reach the
+    /// snapshot, the display rows or `--json`.
+    func testAFailedProviderNeverLeaksItsOutputIntoTheSnapshotOrTheJSON() throws {
+        let secret = "sk-ant-QUOTABARNOTAREALKEY"
+        let runner = try ShellProbeRunner(script: "echo 'Error: credential \(secret) rejected' >&2; exit 3")
+
+        let snapshot = QuotaEngine.load(.claude) { _ in try ClaudePrintProbe(runner: runner).fetch() }
+
+        XCTAssertFalse(snapshot.probeSucceeded)
+        let reported = try XCTUnwrap(snapshot.error)
+        XCTAssertFalse(reported.contains(secret), "the CLI's stderr reached the snapshot: \(reported)")
+        XCTAssertTrue(reported.contains("exited with status 3"), reported)
+
+        let json = String(decoding: try JSONEncoder().encode([snapshot]), as: UTF8.self)
+        XCTAssertFalse(json.contains(secret), "--json carried the CLI's stderr")
+        let rows = QuotaFormatting.rows(for: [snapshot])
+        XCTAssertFalse(rows.compactMap(\.error).joined().contains(secret),
+                       "the text table carried the CLI's stderr")
+    }
+
+    /// …while a sign-in prompt arriving the same way is still recognised, out of
+    /// the detail the failure carries rather than out of its message.
+    func testAFailedProviderStillClassifiesASignInPromptItPrinted() throws {
+        let runner = try ShellProbeRunner(script: "echo 'Invalid API key · Please run /login' >&2; exit 1")
+        XCTAssertEqual(message(from: { try ClaudePrintProbe(runner: runner).fetch() }),
+                       "Claude authentication is required. Open Claude Code once and sign in.")
+    }
+
+    /// `expect` writes the pseudo-terminal transcript to its stdout, so a
+    /// non-zero exit hands the whole Gemini session over as the failure detail.
+    /// A marker in it still has to be classified — and the transcript around it
+    /// still must not be shown.
+    func testGeminiClassifiesItsMarkersWhenTheExpectRunItselfFails() throws {
+        let signedOut = try ShellProbeRunner(script: "echo QUOTABAR_AUTH; exit 1")
+        XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: signedOut).fetch() }),
+                       "Gemini authentication is required. Open Gemini CLI and sign in.")
+
+        let secret = "sk-live-GEMINITRANSCRIPTKEY"
+        let noise = try ShellProbeRunner(script: "echo 'pasted \(secret) into the prompt'; exit 1")
+        let reported = message(from: { try GeminiTerminalProbe(runner: noise).fetch() }) ?? ""
+        XCTAssertFalse(reported.contains(secret), "the transcript reached the UI: \(reported)")
+        // Asserted whole, not by substring: the command `run` was given here is
+        // the runner's `sh`, and in production it is `expect`. Either name would
+        // satisfy "exited with status 1" while telling the user to go and run a
+        // helper they never invoked, so the unclassified message must be the
+        // fixed Gemini one with no command name in it at all.
+        XCTAssertEqual(reported, "Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
+    }
+
+    /// The same when the run left nothing to classify at all. A failing `expect`
+    /// usually died on a Tcl error rather than on a marker branch, so the detail
+    /// is that error or is empty — and neither may be reported against `expect`.
+    func testGeminiNamesItselfWhenAFailedExpectRunLeftNothingToClassify() throws {
+        for script in ["exit 1", "echo 'invalid spawn id id4: spawn failed' >&2; exit 1"] {
+            let runner = try ShellProbeRunner(script: script)
+            XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: runner).fetch() }),
+                           "Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.",
+                           "`\(script)` must not be reported against the expect helper")
+        }
+    }
+
     // MARK: - The default seam
 
     /// A seam is only worth having if its default really is the old behaviour,
@@ -364,6 +443,36 @@ final class ProbeFetchTests: XCTestCase {
             XCTFail("expected a ProbeError, got \(error)")
             return nil
         }
+    }
+}
+
+/// A runner whose commands are a real `/bin/sh` script, so a failing provider
+/// is simulated all the way down to the pipes: the error a probe catches is the
+/// one `CommandRunner` built from what the child actually wrote.
+private struct ShellProbeRunner: ProbeRunner {
+    let shell: String
+    let script: String
+
+    init(script: String) throws {
+        guard let shell = ["/bin/sh", "/usr/bin/sh"].first(where: FileManager.default.isExecutableFile) else {
+            throw XCTSkip("sh is not installed at a standard location on this machine")
+        }
+        self.shell = shell
+        self.script = script
+    }
+
+    func find(_ executable: String) -> String? { shell }
+
+    func run(_ executable: String, _ arguments: [String], timeout: TimeInterval, currentDirectory: URL?) throws -> Data {
+        try CommandRunner.run(shell, ["-c", script], timeout: timeout)
+    }
+
+    func runExpect(_ script: String, timeout: TimeInterval, currentDirectory: URL?) throws -> String {
+        String(decoding: try CommandRunner.run(shell, ["-c", self.script], timeout: timeout), as: UTF8.self)
+    }
+
+    func lineSession(executable: String, arguments: [String], currentDirectory: URL?) throws -> any LineSession {
+        throw ProbeError.message("no scripted session")
     }
 }
 

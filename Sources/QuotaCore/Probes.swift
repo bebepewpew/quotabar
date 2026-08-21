@@ -90,7 +90,24 @@ struct GeminiTerminalProbe: QuotaProbe {
 
     func fetch() throws -> QuotaSnapshot {
         guard let binary = runner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
-        let output = try runner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
+        let output: String
+        do {
+            output = try runner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
+        } catch {
+            // `expect` writes the whole pseudo-terminal transcript to its stdout,
+            // so a non-zero exit carries the session — markers and all — as the
+            // command failure's detail. The markers still say what blocked the
+            // probe; the transcript itself must never reach the UI.
+            //
+            // Neither may the failure's own message. The executable handed to
+            // `run` is the `expect` helper, so the message names *that* —
+            // "expect exited with status 1" points at a binary the user never
+            // invoked and cannot usefully run. Anything this probe cannot
+            // classify is reported against the CLI it is actually for.
+            guard case .commandFailed(let commandFailure)? = error as? ProbeError else { throw error }
+            throw Self.failure(in: commandFailure.detail)
+                ?? .unsupported("Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
+        }
         if let failure = Self.failure(in: output) { throw failure }
         return try Self.parse(output, now: Date())
     }
@@ -300,13 +317,25 @@ struct ClaudePrintProbe: QuotaProbe {
             data = try runner.run(binary, ["-p", "/usage"], timeout: 45, currentDirectory: probeWorkingDirectory())
         } catch {
             // A signed-out `claude -p /usage` exits non-zero, so its "Please run
-            // /login" arrives as a thrown command diagnostic rather than as
-            // output to parse. Only the zero-exit branch used to be classified,
-            // which left the actionable step buried under raw CLI text.
-            throw Self.authenticationFailure(in: (error as? ProbeError)?.errorDescription ?? error.localizedDescription) ?? error
+            // /login" arrives as a thrown command failure rather than as output
+            // to parse. Only the zero-exit branch used to be classified, which
+            // left the actionable step buried under raw CLI text.
+            throw Self.authenticationFailure(in: Self.classifiableText(of: error)) ?? error
         }
         let output = String(decoding: data, as: UTF8.self)
         return try Self.parse(output, now: Date())
+    }
+
+    /// The text a thrown failure may be classified from.
+    ///
+    /// A command failure keeps the CLI's own output out of its message on
+    /// purpose, so the sign-in prompt is only in the detail — reading the
+    /// message instead would silently stop recognising a signed-out CLI. The
+    /// detail is matched here and never returned: what comes back out of
+    /// `authenticationFailure` is fixed text.
+    static func classifiableText(of error: Error) -> String {
+        guard let probe = error as? ProbeError else { return error.localizedDescription }
+        return probe.diagnosticDetail ?? probe.localizedDescription
     }
 
     /// Untrusted CLI text in, one concise actionable error out — or nil when the
