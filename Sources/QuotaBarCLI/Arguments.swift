@@ -75,8 +75,17 @@ struct Arguments {
             case "--watch": arguments.watch = true
             case "--interval":
                 let value = try nextValue(for: "--interval")
-                guard let minutes = Int(value), minutes > 0 else {
-                    throw ArgumentError.invalidValue("--interval", "\(value) (expected a positive number of minutes)")
+                // A floor rather than merely a positive number: below it the
+                // loop spends more time spawning provider CLIs and appending
+                // history than the readings change.
+                //
+                // Rejected here where the tray clamps: this is a command someone
+                // typed and can retype, and every other bad value it takes fails
+                // the same way, where a tray systemd starts has to come up.
+                guard let minutes = Int(value), minutes >= QuotaEngine.minimumRefreshMinutes else {
+                    throw ArgumentError.invalidValue(
+                        "--interval",
+                        "\(value) (expected a whole number of minutes, \(QuotaEngine.minimumRefreshMinutes) or more)")
                 }
                 arguments.intervalMinutes = minutes
             case "--notify": arguments.notify = true
@@ -131,7 +140,7 @@ struct Arguments {
       --format <fmt>         text (default), json, waybar (status), csv (history)
       --provider <name>      Limit to one provider; repeatable (gemini, claude, codex)
       --watch                Keep running and re-probe on an interval
-      --interval <minutes>   Refresh interval for --watch (default 15)
+      --interval <minutes>   Refresh interval for --watch (default 15, minimum 5)
       --notify               Send desktop notifications at 80% and 95% usage, and
                              when a window is on course to run out before it resets
       --no-color             Disable ANSI colour in text output

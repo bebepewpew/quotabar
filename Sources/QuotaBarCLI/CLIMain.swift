@@ -37,7 +37,11 @@ struct QuotaBarCLI {
         let store = StateStoreFactory.makeDefault()
         let cache = SnapshotCache(store: store)
         let evaluator = AlertEvaluator(store: store)
-        let recorder = UsageRecorder(stateStore: store)
+        // One history store for the whole run. The recorder writes through it
+        // and the forecast reads back through it, instead of --notify building a
+        // second store, series catalogue and state store on every tick.
+        let history = FileHistoryStore(store: store)
+        let recorder = UsageRecorder(store: history)
         let sink = NotifySendSink()
         // Descriptor 1 by number: the C `stdout` global is a mutable var and so
         // not readable under strict concurrency.
@@ -92,7 +96,8 @@ struct QuotaBarCLI {
             if arguments.notify {
                 let succeeded = fresh.filter { $0.error == nil && !$0.windows.isEmpty }
                 await evaluator.dispatch(succeeded, through: sink)
-                await evaluator.dispatch(projections: forecasts(for: succeeded), through: sink)
+                await evaluator.dispatch(projections: Advisor.projections(from: history, for: succeeded),
+                                         through: sink)
             }
             if arguments.watch {
                 try? await Task.sleep(for: .seconds(arguments.intervalMinutes * 60))
@@ -100,16 +105,6 @@ struct QuotaBarCLI {
         } while arguments.watch
 
         exit(sawFailure ? 1 : 0)
-    }
-
-    /// The advisor's "will run out before it resets" findings for the windows that
-    /// just reported. Reads back the history the refresh has already recorded, so
-    /// the forecast uses every sample rather than only this process's.
-    private static func forecasts(for snapshots: [QuotaSnapshot]) -> [Recommendation] {
-        let history = FileHistoryStore().read().samples
-        guard !history.isEmpty else { return [] }
-        return Advisor.recommendations(for: Advisor.inputs(history: history, snapshots: snapshots))
-            .filter { $0.kind == .projectedExhaustion }
     }
 
     // MARK: - History
@@ -153,13 +148,18 @@ struct QuotaBarCLI {
     // MARK: - Advise
 
     private static func runAdvise(_ arguments: Arguments) {
+        let now = Date()
         let store = StateStoreFactory.makeDefault()
-        let history = FileHistoryStore(store: store).read()
+        // The same span the menu-bar panel reads, so the two surfaces cannot
+        // advise differently about the same file. Older cycles are dropped by
+        // `Advisor.usableCycles` whether they are read or not.
+        let history = FileHistoryStore(store: store)
+            .read(from: now.addingTimeInterval(-Advisor.adviceLookback), to: now)
         let snapshots = SnapshotCache(store: store).all()
 
-        let inputs = Advisor.inputs(history: history.samples, snapshots: snapshots)
+        let inputs = Advisor.inputs(history: history.samples, snapshots: snapshots, now: now)
             .filter { matches($0.series, arguments) }
-        let recommendations = Advisor.recommendations(for: inputs)
+        let recommendations = Advisor.recommendations(for: inputs, now: now)
 
         #if os(Windows)
         let isTerminal = _isatty(1) != 0

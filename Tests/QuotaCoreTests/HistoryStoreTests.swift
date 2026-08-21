@@ -362,9 +362,27 @@ final class HistoryStoreTests: XCTestCase {
     /// a megabyte. A format change that inflates storage should fail here rather
     /// than on a user's disk.
     func testThreeMonthsOfSamplesStaysUnderOneMegabyte() throws {
+        XCTAssertLessThan(try threeMonths(everyMinutes: 15), 1_024 * 1_024)
+    }
+
+    /// The same three months at the shortest interval `--watch` now accepts. The
+    /// floor is what keeps this a number worth printing: `--interval` used to take
+    /// any positive value, and at one minute a refresh the file grows fifteen
+    /// times as fast as the default towards the 32 MB backstop.
+    func testThreeMonthsAtTheShortestAcceptedIntervalStaysUnderThreeMegabytes() throws {
+        let size = try threeMonths(everyMinutes: QuotaEngine.minimumRefreshMinutes)
+        XCTAssertLessThan(size, 3 * 1_024 * 1_024)
+        XCTAssertLessThan(size, UInt64(FileHistoryStore.maximumFileBytes) / 10)
+    }
+
+    /// Three months of eight quota windows sampled every `everyMinutes`, nothing
+    /// suppressed, returning the size of the file it produced. Eight windows is
+    /// what the three CLIs report between them, and the deadband can only ever
+    /// make a real file smaller than this one.
+    private func threeMonths(everyMinutes minutes: Int) throws -> UInt64 {
         let store = makeStore()
         let series = (0..<8).map { HistorySeriesID(provider: .gemini, windowKey: "series-\($0)") }
-        let perDay = 24 * 60 / 15
+        let perDay = 24 * 60 / minutes
         let days = 92
 
         // Appended in day-sized batches so the test exercises the real append path
@@ -372,7 +390,8 @@ final class HistoryStoreTests: XCTestCase {
         for day in 0..<days {
             var batch: [UsageSample] = []
             for slot in 0..<perDay {
-                let at = start.addingTimeInterval(Double(day) * 86_400 + Double(slot) * 15 * 60)
+                let at = start.addingTimeInterval(Double(day) * 86_400
+                    + Double(slot) * Double(minutes) * 60)
                 for one in series {
                     batch.append(sample(one, at: at, percent: Double(slot % 101)))
                 }
@@ -386,7 +405,7 @@ final class HistoryStoreTests: XCTestCase {
 
         let expected = HistoryFormat.headerLength + series.count * perDay * days * HistoryFormat.recordStride
         XCTAssertEqual(Int(size), expected)
-        XCTAssertLessThan(size, 1_024 * 1_024)
+        return size
     }
 
     // MARK: - Fixtures
