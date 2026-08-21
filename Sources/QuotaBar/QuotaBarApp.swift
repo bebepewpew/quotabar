@@ -93,6 +93,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func updateIcon(_ quotas: [MenuBarQuota]) {
         statusItem.button?.image = MenuBarIconRenderer.render(quotas: quotas)
         statusItem.button?.toolTip = "AI Quotas"
+        // The button is colour, a one-character badge and a bar, none of which
+        // VoiceOver can read. Without a label carrying the reading itself, the
+        // item announces exactly the same thing at 5% used and at 99%.
+        statusItem.button?.setAccessibilityLabel(MenuBarCompositeIcon.accessibilityDescription(for: quotas))
     }
 
     private func updatePopoverSize(for store: QuotaStore) {
@@ -222,14 +226,17 @@ struct MenuBarCompositeIcon: View {
     var body: some View {
         Image(nsImage: MenuBarIconRenderer.render(quotas: quotas))
             .id(signature)
-            .accessibilityLabel(accessibilityDescription)
+            .accessibilityLabel(Self.accessibilityDescription(for: quotas))
     }
 
     private var signature: String {
         quotas.map { "\($0.id):\($0.usedPercent ?? -1)" }.joined(separator: ",")
     }
 
-    private var accessibilityDescription: String {
+    /// Spoken description of what the icon is showing, shared by this view and the
+    /// status item itself. It names every selected quota and its reading, so the
+    /// label changes whenever the picture does instead of naming the app.
+    static func accessibilityDescription(for quotas: [MenuBarQuota]) -> String {
         guard !quotas.isEmpty else { return "AI Quotas" }
         return quotas.map { quota in
             let value = quota.usedPercent.map { "\(QuotaFormatting.percent($0)) used" } ?? "waiting for data"

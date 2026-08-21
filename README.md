@@ -74,6 +74,8 @@ still surfaces both from there, and the root stays short enough to read.
 - Compact metric badges: `S`/`W` for session and weekly windows, and
   `P`/`F`/`L` for recognizable Gemini model families.
 - Provider-colored progress below 80% used, amber at 80%, and red at 95%.
+- A VoiceOver label on the menu-bar item naming each selected quota and its
+  current reading, so the state is not carried by color alone.
 - Local macOS notifications at the 80% and 95% thresholds, deduplicated per
   provider, quota window, reset period, and threshold — plus a forecast alert
   when a window is on course to run out before it resets.
