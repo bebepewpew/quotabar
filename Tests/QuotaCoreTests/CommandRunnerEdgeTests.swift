@@ -181,4 +181,64 @@ final class CommandRunnerEdgeTests: XCTestCase {
             throw XCTSkip("ProcessInfo snapshots the environment here, so the search cannot be staged")
         }
     }
+    // MARK: - SIGPIPE
+
+    /// The `CommandRunner` half of #34. A child that exits without reading its
+    /// stdin leaves `input` writing into a pipe with no reader; under the default
+    /// signal disposition that killed the whole process with signal 13 instead of
+    /// failing one refresh. The command's own exit status is what gets reported.
+    func testRunSurvivesAChildThatExitsWithoutReadingItsInput() throws {
+        let shell = try systemBinary("sh")
+        // Large enough that the write cannot all sit in the pipe buffer.
+        let payload = Data(String(repeating: "x", count: 512 * 1024).utf8)
+
+        let output = try CommandRunner.run(shell, ["-c", "echo done"], input: payload, timeout: 5)
+        XCTAssertEqual(String(decoding: output, as: UTF8.self), "done\n",
+                       "the child's output is returned rather than the process dying on SIGPIPE")
+    }
+
+    /// The same path when the child also fails: the reported error has to be the
+    /// child's own diagnostic, not the broken pipe the input write hit.
+    func testRunReportsTheChildsFailureRatherThanTheBrokenInputPipe() throws {
+        let shell = try systemBinary("sh")
+        let payload = Data(String(repeating: "x", count: 512 * 1024).utf8)
+
+        XCTAssertThrowsError(
+            try CommandRunner.run(shell, ["-c", "echo refused >&2; exit 3"], input: payload, timeout: 5)
+        ) { error in
+            XCTAssertTrue("\(error)".contains("refused"),
+                          "the child's stderr explains the failure better than EPIPE does; got \(error)")
+        }
+    }
+
+    /// `ignoreBrokenPipe` is what makes the two tests above possible, asserted on
+    /// a bare POSIX pipe so nothing else can explain the result. It is called
+    /// twice because every seam that owns a pipe requests it.
+    ///
+    /// Without the disposition installed, this does not fail — the `write` below
+    /// raises `SIGPIPE` and kills the test process.
+    func testIgnoreBrokenPipeTurnsAWriteWithNoReaderIntoEPIPE() throws {
+        ProcessSignals.ignoreBrokenPipe()
+        ProcessSignals.ignoreBrokenPipe()
+
+        var descriptors: [Int32] = [0, 0]
+        XCTAssertEqual(pipe(&descriptors), 0)
+        close(descriptors[0])
+        defer { close(descriptors[1]) }
+
+        var byte: UInt8 = 0x41
+        errno = 0
+        XCTAssertEqual(write(descriptors[1], &byte, 1), -1)
+        XCTAssertEqual(errno, EPIPE, "the write has to report a broken pipe instead of signalling one")
+    }
+
+    // MARK: - Fixtures
+
+    private func systemBinary(_ name: String) throws -> String {
+        let candidates = ["/bin/\(name)", "/usr/bin/\(name)"]
+        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw XCTSkip("\(name) is not installed at a standard location on this machine")
+        }
+        return path
+    }
 }

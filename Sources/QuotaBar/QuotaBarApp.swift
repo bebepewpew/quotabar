@@ -15,6 +15,9 @@ final class QuotaBarApp: NSObject, NSApplicationDelegate {
     private var store: QuotaStore?
 
     static func main() {
+        // A provider CLI that exits mid-write must fail one refresh, not take the
+        // menu bar down. Installed before anything can spawn a child.
+        ProcessSignals.ignoreBrokenPipe()
         let application = NSApplication.shared
         application.delegate = shared
         application.setActivationPolicy(.accessory)
