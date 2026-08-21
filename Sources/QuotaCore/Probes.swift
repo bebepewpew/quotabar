@@ -228,6 +228,10 @@ struct GeminiTerminalProbe: QuotaProbe {
             # comes back and the probe reports a bare timeout instead of the
             # reason. Signal the spawned process *group*, which is what
             # AGENTS.md requires and what actually releases the pipe.
+            # End of file says the slave side of the pty was closed, not that
+            # everything Gemini spawned has exited, so the eof branches call
+            # this too. Every step is caught: on eof the spawn id is already
+            # closed, and the send and the close then fail harmlessly.
             set child [exp_pid]
             catch {send -- "\\003"}
             catch {exec kill -TERM -$child}
@@ -259,7 +263,7 @@ struct GeminiTerminalProbe: QuotaProbe {
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
             -re {Type your message or @path/to/file} {}
             timeout {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
         }
         # Full /stats performs the quota refresh in Gemini 0.56, but its default
         # view contains session data only. Wait for it to finish before opening
@@ -275,13 +279,13 @@ struct GeminiTerminalProbe: QuotaProbe {
             -re {(?i)do you trust the files in this folder} {puts "QUOTABAR_TRUST"; stop_child; exit 0}
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
         }
         set timeout \(Budget.promptReturn)
         expect {
             -re {Type your message or @path/to/file} {}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
         }
         after \(Budget.viewSettleMilliseconds)
         send -- "/model"
@@ -291,7 +295,7 @@ struct GeminiTerminalProbe: QuotaProbe {
         expect {
             -re {(?i)\\(Press Esc to close\\)} {puts "QUOTABAR_STATS_COMPLETE"}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
         }
         stop_child
         """
