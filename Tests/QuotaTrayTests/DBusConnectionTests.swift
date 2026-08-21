@@ -242,9 +242,107 @@ final class DBusConnectionTests: XCTestCase {
         }
     }
 
+    // MARK: Pumping
+
+    func testPumpBuffersWhatArrivesAndReportsIt() throws {
+        let channel = MemoryChannel()
+        let message = DBusMessage(kind: .signal, serial: 1, path: "/a", interface: "i.f", member: "M")
+        channel.queue(try message.encoded())
+        let connection = DBusConnection(channel: channel)
+
+        XCTAssertTrue(try connection.pump())
+        XCTAssertEqual(try connection.receiveBuffered(), message)
+    }
+
+    /// A read that times out is the service loop's timer, not a failure — it is
+    /// how a quiet bus still lets a scheduled refresh fire.
+    func testPumpReportsATimeoutAsNothingToDoRatherThanThrowing() throws {
+        let channel = TimingOutChannel()
+        XCTAssertFalse(try DBusConnection(channel: channel).pump())
+    }
+
+    func testPumpTreatsAClosedPeerAsADisconnect() {
+        XCTAssertThrowsError(try DBusConnection(channel: MemoryChannel()).pump()) {
+            XCTAssertEqual($0 as? DBusConnectionError, .disconnected)
+        }
+    }
+
+    // MARK: Concurrency
+
+    /// The tray refreshes on one thread and serves on another, so both call
+    /// `send`. An unguarded counter would hand two messages the same serial, and
+    /// a reply matched by serial would then answer the wrong call.
+    func testConcurrentSendsNeverShareASerial() {
+        let channel = LockedChannel()
+        let connection = DBusConnection(channel: channel)
+        let count = 200
+        let serials = LockedBox()
+
+        DispatchQueue.concurrentPerform(iterations: count) { _ in
+            if let serial = try? connection.send(
+                DBusMessage(kind: .signal, path: "/a", interface: "i.f", member: "M")) {
+                serials.append(serial)
+            }
+        }
+        XCTAssertEqual(serials.values.count, count)
+        XCTAssertEqual(Set(serials.values).count, count, "serials were reused")
+        XCTAssertFalse(serials.values.contains(0), "0 is not a legal serial")
+    }
+
+    /// Each message must reach the socket as one write, or two concurrent
+    /// messages interleave their bytes and the stream desynchronises.
+    func testEachMessageIsWrittenInASingleCall() {
+        let channel = LockedChannel()
+        let connection = DBusConnection(channel: channel)
+        DispatchQueue.concurrentPerform(iterations: 50) { _ in
+            _ = try? connection.send(
+                DBusMessage(kind: .signal, path: "/a", interface: "i.f", member: "M"))
+        }
+        XCTAssertEqual(channel.writeCount, 50)
+        // Every write is a complete, decodable message.
+        for buffer in channel.writes {
+            XCTAssertEqual(try? DBusMessage.length(of: buffer), buffer.count)
+        }
+    }
+
     func testCloseReachesTheChannel() {
         let channel = MemoryChannel()
         DBusConnection(channel: channel).close()
         XCTAssertTrue(channel.closed)
     }
+}
+
+
+/// A channel whose reads always time out, the way a socket with SO_RCVTIMEO does
+/// when the peer is quiet.
+private final class TimingOutChannel: DBusChannel {
+    func write(_ bytes: [UInt8]) throws {}
+    func read(upTo count: Int) throws -> [UInt8] {
+        throw DBusConnectionError.connectFailed("read timed out")
+    }
+    func close() {}
+}
+
+/// Records each write as its own buffer so a test can prove messages are not
+/// interleaved, and is safe to call from many threads at once.
+private final class LockedChannel: DBusChannel, @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffers = [[UInt8]]()
+
+    var writes: [[UInt8]] { lock.lock(); defer { lock.unlock() }; return buffers }
+    var writeCount: Int { writes.count }
+
+    func write(_ bytes: [UInt8]) throws {
+        lock.lock(); defer { lock.unlock() }
+        buffers.append(bytes)
+    }
+    func read(upTo count: Int) throws -> [UInt8] { [] }
+    func close() {}
+}
+
+private final class LockedBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = [UInt32]()
+    var values: [UInt32] { lock.lock(); defer { lock.unlock() }; return storage }
+    func append(_ value: UInt32) { lock.lock(); storage.append(value); lock.unlock() }
 }

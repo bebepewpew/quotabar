@@ -16,6 +16,14 @@ var targets: [Target] = [
     .testTarget(name: "QuotaTrayTests", dependencies: ["QuotaTray", "QuotaCore"])
 ]
 
+// The tray speaks StatusNotifierItem, a freedesktop protocol served over the
+// session bus. macOS has no such bus and has the menu-bar app instead, so the
+// target does not exist there rather than existing and refusing to run.
+#if os(Linux)
+products.append(.executable(name: "quotabar-tray", targets: ["QuotaTrayApp"]))
+targets.append(.executableTarget(name: "QuotaTrayApp", dependencies: ["QuotaCore", "QuotaTray"]))
+#endif
+
 #if os(macOS)
 products.append(.executable(name: "QuotaBar", targets: ["QuotaBar"]))
 targets.append(.executableTarget(name: "QuotaBar", dependencies: ["QuotaCore"]))

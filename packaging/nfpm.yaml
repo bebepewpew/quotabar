@@ -28,6 +28,13 @@ contents:
     dst: /usr/bin/quotabar
     file_info:
       mode: 0755
+  # The StatusNotifierItem tray icon. Linux only, and a separate binary rather
+  # than a flag on `quotabar`: it runs as a long-lived session service under
+  # systemd, while the command is one-shot. `quotabar` works without it.
+  - src: ./dist/linux-x86_64/quotabar-tray
+    dst: /usr/bin/quotabar-tray
+    file_info:
+      mode: 0755
   # Plain files, not `type: doc`: nfpm maps that type onto the RPM %doc flag and
   # its deb packager drops those entries entirely, so the .deb would ship
   # without a README or a licence.
@@ -40,10 +47,12 @@ contents:
     file_info:
       mode: 0644
 
-# The binary is linked with --static-swift-stdlib, so it carries the Swift
-# runtime itself and needs no Swift package at all. `expect` is used by the
-# Gemini probe alone and libnotify only by `--notify`, so both stay weak
-# dependencies, spelled with each distribution's own package name.
+# Both binaries are linked with --static-swift-stdlib, so they carry the Swift
+# runtime themselves and need no Swift package at all. The tray speaks D-Bus over
+# the session socket directly rather than linking libdbus, so it adds no
+# dependency either. `expect` is used by the Gemini probe alone and libnotify only
+# by `--notify`, so both stay weak dependencies, spelled with each distribution's
+# own package name.
 overrides:
   deb:
     recommends:
