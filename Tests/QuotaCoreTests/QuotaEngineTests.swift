@@ -256,6 +256,45 @@ final class QuotaEngineTests: XCTestCase {
         XCTAssertTrue(merged.allSatisfy { $0.error?.hasPrefix("Refresh failed: ") == true })
     }
 
+    /// A malformed Codex payload used to reach retention as a *successful* 0%
+    /// snapshot, so the seam waved it through and the cache stored it over the
+    /// real reading — or, when the payload held no windows at all, deleted the
+    /// provider outright. Driven through the real parser, both shapes have to end
+    /// as a failed refresh with yesterday's 42% still on screen and still cached.
+    func testAMalformedCodexPayloadKeepsTheLastGoodQuota() {
+        let previous: [QuotaSnapshot] = [
+            .init(provider: .codex, windows: [.init(label: "Session", usedPercent: 42, resetAt: nil)], plan: "plus")
+        ]
+        let malformed = [
+            #"{"rateLimits":{"primary":{"resetsAt":2000000000,"windowDurationMins":300}}}"#: "unreadable",
+            #"{"rateLimits":{"primary":{"usedPercent":"NaN"}}}"#: "unreadable",
+            #"{"rateLimits":{"planType":"plus"}}"#: "no windows"
+        ]
+        for (json, shape) in malformed {
+            let cache = SnapshotCache(store: MemoryStateStore())
+            cache.update(with: previous)
+
+            let fresh = QuotaEngine.load(.codex) { _ in
+                guard let result = CodexProbe.jsonObject(json) else { throw ProbeError.message("bad fixture") }
+                return try CodexProbe.parse(result)
+            }
+            XCTAssertFalse(fresh.probeSucceeded, "\(shape) is not a successful refresh")
+            if shape == "unreadable" {
+                XCTAssertEqual(fresh.error,
+                               "Codex returned an unreadable quota response. Refresh after updating Codex.")
+            }
+
+            let merged = QuotaEngine.retainingLastGood(fresh: [fresh], previous: previous)
+            XCTAssertEqual(merged[0].windows.map(\.usedPercent), [42], "\(shape) must keep the last good quota")
+            XCTAssertFalse(merged[0].probeSucceeded)
+            XCTAssertEqual(merged[0].error?.hasPrefix("Refresh failed: "), true)
+
+            cache.update(with: merged)
+            XCTAssertEqual(cache.snapshot(for: .codex)?.windows.first?.usedPercent, 42,
+                           "\(shape) must not replace or delete the cached quota")
+        }
+    }
+
     // MARK: - SnapshotCache
 
     func testSnapshotCacheRoundTripsThroughAStateStore() throws {

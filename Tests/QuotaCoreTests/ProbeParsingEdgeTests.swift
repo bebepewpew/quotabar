@@ -45,10 +45,14 @@ final class ProbeParsingEdgeTests: XCTestCase {
         XCTAssertNil(jsonNumber("-infinity"))
         XCTAssertNil(jsonNumber("1e400"))
 
-        let snapshot = CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": "NaN", "resetsAt": "inf"]]])
-        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0])
+        // A non-finite percent is not a quota, so the refresh fails rather than
+        // reporting one; a non-finite reset time only costs the countdown.
+        XCTAssertEqual(codexParseFailure(["rateLimits": ["primary": ["usedPercent": "NaN", "resetsAt": "inf"]]]),
+                       "Codex returned an unreadable quota response. Refresh after updating Codex.")
+        let snapshot = try CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": 40, "resetsAt": "inf"]]])
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [40])
         XCTAssertNil(snapshot.windows[0].resetAt)
-        XCTAssertNoThrow(try JSONEncoder().encode(snapshot), "a non-finite percent must never reach the cache")
+        XCTAssertNoThrow(try JSONEncoder().encode(snapshot), "a non-finite value must never reach the cache")
     }
 
     // MARK: - Gemini: normalize
@@ -383,7 +387,7 @@ final class ProbeParsingEdgeTests: XCTestCase {
         "primary":{"used_percent":12.5,"resets_at":2000000000,"window_duration_mins":300},\
         "secondary":{"used_percent":80,"resets_at":2000100000,"window_duration_mins":10080}}}
         """))
-        let snapshot = CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
+        let snapshot = try CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
         XCTAssertEqual(snapshot.plan, "team")
         XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Weekly"])
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [12.5, 80])
@@ -393,27 +397,60 @@ final class ProbeParsingEdgeTests: XCTestCase {
     }
 
     /// A window duration between the session and weekly cutoffs is not one we
-    /// can name, so the caller's label stands. A missing percent is 0, not a
-    /// crash, and one above the ceiling is clamped.
-    func testCodexParseKeepsTheCallersLabelForAnUnnamedDurationAndClampsThePercent() {
-        let snapshot = CodexProbe.parse(["rateLimits": [
-            "primary": ["windowDurationMins": 720],
+    /// can name, so the caller's label stands. A percent outside `0...100` is
+    /// Codex rounding, not a broken payload: it is clamped to the exact bound.
+    func testCodexParseKeepsTheCallersLabelForAnUnnamedDurationAndClampsThePercent() throws {
+        let snapshot = try CodexProbe.parse(["rateLimits": [
+            "primary": ["usedPercent": -5, "windowDurationMins": 720],
             "secondary": ["usedPercent": 250, "windowDurationMins": 720]
         ]])
         XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Weekly"])
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0, 100])
         XCTAssertNil(snapshot.windows[0].resetAt)
         XCTAssertNil(snapshot.plan)
+        XCTAssertNil(snapshot.error)
     }
 
-    func testCodexParseNamesWindowsByTheirDurationAtEachCutoff() {
-        func label(minutes: Int) -> String? {
-            CodexProbe.parse(["rateLimits": ["primary": ["windowDurationMins": minutes]]]).windows.first?.label
+    func testCodexParseNamesWindowsByTheirDurationAtEachCutoff() throws {
+        func label(minutes: Int) throws -> String? {
+            try CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": 10, "windowDurationMins": minutes]]])
+                .windows.first?.label
         }
-        XCTAssertEqual(label(minutes: 360), "Session")
-        XCTAssertEqual(label(minutes: 361), "Session", "the caller already calls the primary window a session")
-        XCTAssertEqual(label(minutes: 1_439), "Session")
-        XCTAssertEqual(label(minutes: 1_440), "Weekly")
+        XCTAssertEqual(try label(minutes: 360), "Session")
+        XCTAssertEqual(try label(minutes: 361), "Session", "the caller already calls the primary window a session")
+        XCTAssertEqual(try label(minutes: 1_439), "Session")
+        XCTAssertEqual(try label(minutes: 1_440), "Weekly")
+    }
+
+    /// A window Codex sends without a readable percentage used to become an
+    /// invented `0%` that looked like a measurement and, being a successful
+    /// snapshot, overwrote the cached one. It is a failed refresh instead.
+    func testCodexParseRefusesAWindowWithoutAReadablePercent() {
+        let payloads: [String: [String: Any]] = [
+            "a missing percent": ["rateLimits": ["primary": ["windowDurationMins": 300]]],
+            "a quoted NaN": ["rateLimits": ["primary": ["usedPercent": "NaN"]]],
+            "an overflowing exponent": ["rateLimits": ["primary": ["usedPercent": "1e400"]]],
+            "a null percent": ["rateLimits": ["primary": ["usedPercent": NSNull()]]],
+            "a percent that is a word": ["rateLimits": ["primary": ["used_percent": "unknown"]]],
+            "a percent nested in an object": ["rateLimits": ["primary": ["usedPercent": ["value": 20]]]],
+            "a readable window beside an unreadable one":
+                ["rateLimits": ["primary": ["usedPercent": 23], "secondary": ["resetsAt": 2_000_100_000]]],
+            "an unreadable entry in the limits array":
+                ["rateLimits": ["limits": [["usedPercent": 40], ["windowDurationMins": 10_080]]]]
+        ]
+        for (description, payload) in payloads {
+            XCTAssertEqual(codexParseFailure(payload),
+                           "Codex returned an unreadable quota response. Refresh after updating Codex.",
+                           "\(description) is not a 0% window")
+        }
+    }
+
+    /// The message never carries the payload back: raw provider output in an
+    /// error string is how a token reaches a screenshot.
+    func testCodexParseFailureDoesNotEchoTheRawPayload() {
+        let failure = codexParseFailure(["rateLimits": ["primary": ["usedPercent": "sk-secret-token"]]])
+        XCTAssertEqual(failure, "Codex returned an unreadable quota response. Refresh after updating Codex.")
+        XCTAssertFalse(failure?.contains("sk-secret-token") ?? true)
     }
 
     /// Newer Codex builds answer with an array instead of named windows.
@@ -424,7 +461,7 @@ final class ProbeParsingEdgeTests: XCTestCase {
         {"usedPercent":64,"window_duration_mins":720},\
         {"usedPercent":91,"windowDurationMins":10080}]}}}
         """))
-        let snapshot = CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
+        let snapshot = try CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
         XCTAssertEqual(snapshot.plan, "enterprise")
         XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Window 2", "Weekly"])
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0, 64, 91], "a negative percent is clamped, not shown")
@@ -439,21 +476,21 @@ final class ProbeParsingEdgeTests: XCTestCase {
         {"rateLimits":{"primary":{"usedPercent":30,"windowDurationMins":300},\
         "limits":[{"usedPercent":99,"windowDurationMins":300}]}}
         """))
-        XCTAssertEqual(CodexProbe.parse(reply).windows.map(\.usedPercent), [30])
+        XCTAssertEqual(try CodexProbe.parse(reply).windows.map(\.usedPercent), [30])
     }
 
     /// Anything that is not a window object is skipped rather than counted, and
-    /// a reply holding none of them says so instead of reporting 0%.
+    /// a reply holding none of them fails the refresh instead of reporting 0%.
+    /// A snapshot carrying no windows would still read as a success, which is
+    /// what makes `SnapshotCache.update` drop the provider it had cached.
     func testCodexParseReportsNoActiveWindowsRatherThanInventingThem() throws {
         for json in [#"{"rateLimits":{"planType":"plus"}}"#,
                      #"{"rateLimits":{"primary":"soon","secondary":[1,2]}}"#,
                      #"{"rateLimits":{"limits":"soon"}}"#,
                      #"{"rateLimits":{"limits":[]}}"#,
                      "{}"] {
-            let snapshot = CodexProbe.parse(try XCTUnwrap(CodexProbe.jsonObject(json)))
-            XCTAssertTrue(snapshot.windows.isEmpty, "\(json) holds no quota window")
-            XCTAssertEqual(snapshot.error, "No active quota windows")
-            XCTAssertEqual(snapshot.provider, .codex)
+            XCTAssertEqual(codexParseFailure(try XCTUnwrap(CodexProbe.jsonObject(json))),
+                           "No active quota windows", "\(json) holds no quota window")
         }
     }
 
@@ -471,6 +508,10 @@ final class ProbeParsingEdgeTests: XCTestCase {
 
     private func claudeParseFailure(_ output: String) -> String? {
         failureMessage { try ClaudePrintProbe.parse(output, now: Date()) }
+    }
+
+    private func codexParseFailure(_ result: [String: Any]) -> String? {
+        failureMessage { try CodexProbe.parse(result) }
     }
 
     private func failureMessage(_ body: () throws -> QuotaSnapshot) -> String? {
