@@ -34,6 +34,44 @@ final class ProjectedAlertTests: XCTestCase {
         XCTAssertNotEqual(first.first?.identifier, next.first?.identifier)
     }
 
+    /// Issue #61 on the forecast path. The advisor is handed the reset a probe
+    /// recomputed, so four refreshes of one cycle name four different seconds and
+    /// must still produce one identifier.
+    func testTheIdentifierSurvivesADriftingCycleReset() {
+        // 100 s into a reset period, so an hour of drift stays inside it.
+        let firstReset = Date(timeIntervalSince1970: 2_000_055_700)
+        let identifiers = Set((0..<4).flatMap { refresh in
+            AlertEvaluator.projectedAlerts(
+                for: [recommendation(kind: .projectedExhaustion,
+                                     resetAt: firstReset.addingTimeInterval(Double(refresh) * 900))]
+            ).map(\.identifier)
+        })
+        XCTAssertEqual(identifiers.count, 1, identifiers.sorted().joined(separator: " "))
+    }
+
+    /// And one forecast is delivered once even when the drift crosses a period
+    /// boundary, which the identifier on its own cannot absorb.
+    func testADriftingCycleResetIsDeliveredOnce() async {
+        let sink = CountingSink()
+        let evaluator = AlertEvaluator(store: MemoryStateStore())
+        // 2 600 s into a reset period: the third refresh tips over into the next one.
+        let firstReset = Date(timeIntervalSince1970: 2_000_058_200)
+        for refresh in 0..<4 {
+            let projections = [recommendation(kind: .projectedExhaustion,
+                                              resetAt: firstReset.addingTimeInterval(Double(refresh) * 900))]
+            await evaluator.dispatch(projections: projections, through: sink,
+                                     now: now.addingTimeInterval(Double(refresh) * 900))
+        }
+        await XCTAssertEqualAsync(await sink.count(), 1)
+
+        // The cycle after it resets sixteen hours later and is a forecast of its own.
+        let nextCycle = [recommendation(kind: .projectedExhaustion,
+                                        resetAt: firstReset.addingTimeInterval(16 * 3_600))]
+        await evaluator.dispatch(projections: nextCycle, through: sink,
+                                 now: now.addingTimeInterval(16 * 3_600))
+        await XCTAssertEqualAsync(await sink.count(), 2)
+    }
+
     /// Window keys, not labels: a provider renaming "Session" must not turn one
     /// cycle's forecast into two alerts.
     func testTheIdentifierUsesTheWindowKey() throws {
