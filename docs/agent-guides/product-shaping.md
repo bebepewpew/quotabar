@@ -14,7 +14,7 @@ QuotaBar shows what three local CLIs are willing to print, and nothing else:
 | --- | --- | --- |
 | Codex | `app-server --stdio` over pipes | whatever the app-server protocol reports |
 | Claude Code | `claude -p /usage` | the usage windows that command prints |
-| Gemini CLI | interactive `/stats` in a bounded terminal session | the buckets displayed on screen |
+| Gemini CLI | interactive `/stats` and `/model` in a bounded terminal session | the buckets displayed on screen |
 
 There is no API behind this. A request for data no provider prints — cost in
 dollars, per-request history, another vendor's quota — is not a scoping problem,

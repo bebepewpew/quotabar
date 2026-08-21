@@ -44,7 +44,8 @@ release, not for the branch.
 ## Implementation constraints
 
 - Prefer public, documented CLI interfaces. Gemini quota collection must remain
-  terminal-only and use interactive `/stats`, never private JavaScript modules.
+  terminal-only and use the interactive `/stats` and `/model` views, never
+  private JavaScript modules.
   Codex uses `app-server --stdio` over pipes and Claude Code uses `-p /usage`;
   neither should acquire a pseudo-terminal dependency.
 - Keep all external processes bounded by deadlines and terminate their complete
