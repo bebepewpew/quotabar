@@ -68,6 +68,12 @@ final class TrayIconEdgeTests: XCTestCase {
         // 0.4% of one pixel still rounds down to nothing but keeps the minimum.
         XCTAssertEqual(TrayIcon.rasterise([quota(.codex, 0.4)], size: 1).pixels,
                        TrayColor(hex: Provider.codex.tint).bytes)
+        // Even where the icon is one pixel wide, that pixel is the whole
+        // difference between "0% used" and "no reading".
+        XCTAssertEqual(TrayIcon.rasterise([quota(.codex, 0)], size: 1).pixels,
+                       TrayColor(hex: Provider.codex.tint).bytes)
+        XCTAssertNotEqual(TrayIcon.rasterise([quota(.codex, 0)], size: 1),
+                          TrayIcon.rasterise([quota(.codex, nil)], size: 1))
     }
 
     // MARK: - PNG edges

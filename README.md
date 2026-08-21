@@ -304,7 +304,10 @@ quotabar-tray --interval 300     # seconds between refreshes (default 900)
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/),
 which is what KDE Plasma reads natively and what libayatana-appindicator exposes
 to most other panels. It colours bars amber at 80% and red at 95%, lists every
-window in the tooltip, and offers Refresh and Quit. A left click refreshes.
+window in the tooltip, and offers Refresh and Quit. A left click refreshes. A
+window at 0% used keeps a one-pixel stub of its bar, so an empty track always
+means there is no reading — a window that has not reported yet, or a probe that
+failed — rather than a quota that is merely untouched.
 
 The icon shows the three busiest windows. Choosing which ones appear is a macOS
 feature today — the setting is stored per platform and no Linux front-end writes
