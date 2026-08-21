@@ -365,16 +365,21 @@ struct GeminiTerminalProbe: QuotaProbe {
         }.joined(separator: " ")
     }
 
+    /// Reads "16h 14m" and its spellings into an instant. The digits are
+    /// untrusted: a row can read `99999999999999999999d`, which parses to a
+    /// perfectly finite `Double` and then to a reset no `Int` can hold. A span
+    /// longer than a quota window is a malformed number, so it yields no reset
+    /// rather than a date the renderer would trap on.
     static func parseReset(_ text: String, now: Date) -> Date? {
         let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*(d(?:ays?)?|h(?:ours?)?|m(?:inutes?)?|s(?:econds?)?)\b"#, options: .caseInsensitive)
         var interval: TimeInterval = 0
         for match in regex?.matches(in: text, range: NSRange(text.startIndex..., in: text)) ?? [] {
             guard let numberRange = Range(match.range(at: 1), in: text), let unitRange = Range(match.range(at: 2), in: text),
-                  let number = Double(text[numberRange]) else { continue }
+                  let number = Double(text[numberRange]), number.isFinite else { continue }
             let multiplier: TimeInterval = ["d": 86_400, "h": 3_600, "m": 60, "s": 1][String(text[unitRange].lowercased().prefix(1))] ?? 0
             interval += number * multiplier
         }
-        return interval > 0 ? now.addingTimeInterval(interval) : nil
+        return QuotaTime.resetInstant(after: interval, from: now)
     }
 }
 
@@ -552,9 +557,15 @@ struct CodexProbe: QuotaProbe {
                 throw ProbeError.unsupported(Self.unreadableReply)
             }
             let timestamp = jsonNumber(item["resetsAt"]) ?? jsonNumber(item["resets_at"])
-            let minutes = (jsonNumber(item["windowDurationMins"]) ?? jsonNumber(item["window_duration_mins"])).map { Int($0) }
+            // Both numbers are untrusted and both used to reach a non-failable
+            // `Int(_:)`: a duration of `1e19` trapped here, before anything was
+            // displayed. A duration no window can have leaves the caller's
+            // label standing, and an instant no calendar can hold is no reset.
+            let minutes = (jsonNumber(item["windowDurationMins"]) ?? jsonNumber(item["window_duration_mins"]))
+                .flatMap(QuotaTime.windowMinutes)
             let resolvedLabel = minutes.map { $0 >= 1_440 ? "Weekly" : ($0 <= 360 ? "Session" : label) } ?? label
-            windows.append(.init(label: resolvedLabel, usedPercent: min(max(used, 0), 100), resetAt: timestamp.map(Date.init(timeIntervalSince1970:))))
+            windows.append(.init(label: resolvedLabel, usedPercent: min(max(used, 0), 100),
+                                 resetAt: timestamp.flatMap { QuotaTime.resetInstant(epochSeconds: $0) }))
         }
         try add(root["primary"], label: "Session")
         try add(root["secondary"], label: "Weekly")

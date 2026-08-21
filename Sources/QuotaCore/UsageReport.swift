@@ -195,14 +195,18 @@ public enum UsageReport {
     /// Coarse, locale-free span text. `RelativeDateTimeFormatter` is absent from
     /// swift-corelibs-foundation, which is why `QuotaFormatting` hand-rolls its
     /// reset wording too.
+    ///
+    /// The span comes from `--since`, which is bounded where it is parsed; the
+    /// conversions here are clamped as well so that a span from anywhere else
+    /// prints a bounded number rather than trapping.
     static func spanText(_ seconds: TimeInterval) -> String {
         switch seconds {
-        case ..<90: "\(Int(seconds.rounded()))s"
-        case ..<5_400: "\(Int((seconds / 60).rounded()))m"
+        case ..<90: "\(QuotaTime.wholeSeconds(seconds))s"
+        case ..<5_400: "\(QuotaTime.wholeSeconds(seconds / 60))m"
         // A day reads as "1d", not "24h": the footer describes chart cells, and
         // a week-wide chart is easier to reason about in days.
-        case ..<86_400: "\(Int((seconds / 3_600).rounded()))h"
-        default: "\(Int((seconds / 86_400).rounded()))d"
+        case ..<86_400: "\(QuotaTime.wholeSeconds(seconds / 3_600))h"
+        default: "\(QuotaTime.wholeSeconds(seconds / 86_400))d"
         }
     }
 

@@ -214,6 +214,35 @@ final class ProbeParsingEdgeTests: XCTestCase {
         XCTAssertNil(GeminiTerminalProbe.parseReset("", now: now))
     }
 
+    /// The digits in the reset column are untrusted. `99999999999999999999d`
+    /// parses to a perfectly finite `Double`, and the reset it used to produce
+    /// trapped the first time anything tried to render it. A week is the longest
+    /// real window, so anything past a month of slack is not one.
+    func testGeminiResetRejectsASpanNoWindowCanHave() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(GeminiTerminalProbe.parseReset("Resets in 31d", now: now),
+                       now.addingTimeInterval(QuotaTime.maximumResetInterval), "the ceiling still parses")
+        XCTAssertNil(GeminiTerminalProbe.parseReset("Resets in 32d", now: now))
+        XCTAssertNil(GeminiTerminalProbe.parseReset("Resets in 99999999999999999999d", now: now))
+        XCTAssertNil(GeminiTerminalProbe.parseReset("Resets in 1d 99999999999999999999h", now: now),
+                     "one absurd term poisons the sum, not just its own unit")
+        XCTAssertNil(GeminiTerminalProbe.parseReset(String(repeating: "9", count: 400) + "s", now: now),
+                     "enough digits overflow to an infinity")
+    }
+
+    /// The same span through the whole parser: a row that is otherwise perfectly
+    /// well formed keeps its usage and loses only the reset.
+    func testGeminiParseKeepsUsageAndDropsAnAbsurdReset() throws {
+        let transcript = """
+        Model usage
+        Pro ▬▬▬▬▬▬ 37% Resets: 10:01 AM (99999999999999999999d)
+        (Press Esc to close)
+        """
+        let snapshot = try GeminiTerminalProbe.parse(transcript, now: Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [37])
+        XCTAssertNil(snapshot.windows[0].resetAt)
+    }
+
     // MARK: - Gemini: failure precedence
 
     /// `failure(in:)` reports the most specific marker in the transcript. These
@@ -420,6 +449,7 @@ final class ProbeParsingEdgeTests: XCTestCase {
         XCTAssertEqual(try label(minutes: 361), "Session", "the caller already calls the primary window a session")
         XCTAssertEqual(try label(minutes: 1_439), "Session")
         XCTAssertEqual(try label(minutes: 1_440), "Weekly")
+        XCTAssertEqual(try label(minutes: 10_080), "Weekly", "a genuine weekly window is still believable")
     }
 
     /// A window Codex sends without a readable percentage used to become an
@@ -451,6 +481,41 @@ final class ProbeParsingEdgeTests: XCTestCase {
         let failure = codexParseFailure(["rateLimits": ["primary": ["usedPercent": "sk-secret-token"]]])
         XCTAssertEqual(failure, "Codex returned an unreadable quota response. Refresh after updating Codex.")
         XCTAssertFalse(failure?.contains("sk-secret-token") ?? true)
+    }
+
+    /// `app-server` output is untrusted, and both of these numbers used to reach
+    /// a non-failable `Int(_:)`: a duration of `1e19` trapped inside `parse`
+    /// before anything was displayed at all. A duration no window can have
+    /// leaves the caller's label standing, and an instant no calendar can hold
+    /// is no reset — the usable half of the reply still reads.
+    func testCodexParseSurvivesADurationAndAResetNoIntCanHold() throws {
+        let snapshot = try CodexProbe.parse(["rateLimits": [
+            "primary": ["usedPercent": 50, "windowDurationMins": 1e19, "resetsAt": 1e19],
+            "secondary": ["usedPercent": 88, "windowDurationMins": 1e19]
+        ]])
+        XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Weekly"])
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [50, 88])
+        XCTAssertEqual(snapshot.windows.compactMap(\.resetAt), [])
+        XCTAssertNil(snapshot.error)
+    }
+
+    /// The reset instant on its own, at the boundary. Year 9999 is still a date;
+    /// past it the number is not one, and neither is anything before 1970.
+    ///
+    /// The percentage is present throughout because a window without a readable
+    /// one is a failed refresh in its own right; what is under test here is the
+    /// reset beside it, not the reply being unreadable.
+    func testCodexParseKeepsAResetItCanRepresentAndDropsTheRest() throws {
+        func reset(_ value: Double) throws -> Date? {
+            try CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": 10, "resetsAt": value]]])
+                .windows.first?.resetAt
+        }
+        XCTAssertEqual(try reset(2_000_000_000), Date(timeIntervalSince1970: 2_000_000_000))
+        XCTAssertEqual(try reset(QuotaTime.maximumEpochSeconds),
+                       Date(timeIntervalSince1970: QuotaTime.maximumEpochSeconds))
+        XCTAssertNil(try reset(QuotaTime.maximumEpochSeconds + 1))
+        XCTAssertNil(try reset(-1))
+        XCTAssertNil(try reset(1e19))
     }
 
     /// Newer Codex builds answer with an array instead of named windows.
