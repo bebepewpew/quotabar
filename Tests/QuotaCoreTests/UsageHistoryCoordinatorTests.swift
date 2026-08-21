@@ -74,6 +74,55 @@ final class UsageHistoryCoordinatorTests: XCTestCase {
         XCTAssertTrue(store.samples.isEmpty)
     }
 
+    /// The window the generation alone cannot close. `clear` bumps it
+    /// synchronously and hands the unlink back as a closure the caller runs
+    /// later, off its actor; a reload starting in between captures the
+    /// *post*-clear generation, so every generation check agrees while the file
+    /// is still on disk and still condemned. It would append to a file about to
+    /// be deleted and publish an overview built from the samples the user just
+    /// deleted.
+    func testAReloadStartedBeforeThePendingRemovalRunsRecordsAndPublishesNothing() {
+        let store = ScriptedHistoryStore()
+        store.seed([sample(at: start.addingTimeInterval(-60), 80)])
+        let coordinator = UsageHistoryCoordinator(history: store, span: 3_600, buckets: 4)
+
+        let remove = coordinator.clear()
+        // Captured after the clear, exactly as `QuotaStore.reloadHistory` does
+        // when the main actor reaches it before the detached removal runs.
+        let overview = coordinator.reload(recording: [snapshot(40)], snapshots: [snapshot(40)],
+                                          now: start, since: coordinator.generation)
+
+        XCTAssertNil(overview, "the file it would describe is already condemned")
+        XCTAssertEqual(store.appendCalls, 0, "nothing is appended to a history awaiting removal")
+        remove()
+        XCTAssertTrue(store.samples.isEmpty)
+    }
+
+    /// Two clears pressed before either removal runs. Releasing the first must
+    /// not make the file look usable while the second unlink is still coming.
+    func testASecondPendingRemovalKeepsAReloadWaitingAfterTheFirstHasRun() {
+        let store = ScriptedHistoryStore()
+        let coordinator = UsageHistoryCoordinator(history: store, span: 3_600, buckets: 4)
+
+        let first = coordinator.clear()
+        let second = coordinator.clear()
+        first()
+        // Twice, because a caller that runs one removal again must not release
+        // the other one's hold on the file.
+        first()
+
+        XCTAssertNil(coordinator.reload(recording: [snapshot(40)], snapshots: [snapshot(40)],
+                                        now: start, since: coordinator.generation))
+        XCTAssertEqual(store.appendCalls, 0)
+
+        second()
+
+        XCTAssertNotNil(coordinator.reload(recording: [snapshot(40)], snapshots: [snapshot(40)],
+                                           now: start, since: coordinator.generation),
+                        "once every removal has run the history is usable again")
+        XCTAssertEqual(store.samples.count, 1)
+    }
+
     /// Pause an in-flight reload, clear, resume it. The removal waits for the
     /// append rather than interleaving with it, and still wins.
     func testAPausedReloadResumedAfterAClearFinishesWithAnEmptyHistory() {

@@ -47,10 +47,21 @@ public final class UsageHistoryCoordinator: @unchecked Sendable {
     /// Serialises the record-and-read half of a reload against a removal, so a
     /// clear can never land between the append and the read that follows it.
     private let gate = NSLock()
-    /// Guards `clears` only. Separate from `gate` because a clear has to be able
-    /// to invalidate an in-flight reload without waiting for it to finish.
+    /// Guards `clears` and `pendingRemovals` only. Separate from `gate` because a
+    /// clear has to be able to invalidate an in-flight reload without waiting for
+    /// it to finish.
     private let counterLock = NSLock()
     private var clears: UInt64 = 0
+    /// Clears whose file removal has been handed to the caller but has not run
+    /// yet, by the generation each one produced.
+    ///
+    /// The generation alone cannot cover that window. A reload starting inside
+    /// it captures the *post*-clear generation, so every generation check agrees
+    /// while the file is still on disk and still condemned; it would append to a
+    /// file about to be unlinked and publish the samples the user just deleted.
+    /// Held as a set rather than a count so two overlapping clears both have to
+    /// finish, and so running one removal twice cannot release the other.
+    private var pendingRemovals: Set<UInt64> = []
 
     public init(history: any HistoryStore,
                 recorder: UsageRecorder? = nil,
@@ -69,7 +80,7 @@ public final class UsageHistoryCoordinator: @unchecked Sendable {
 
     /// Records the refresh and recomputes what the panel shows from everything
     /// stored, or returns `nil` when history was cleared after `generation` was
-    /// captured.
+    /// captured, or when a clear's removal is still outstanding.
     ///
     /// `nil` is not a failure; it means the caller asked about a history that no
     /// longer exists. Publishing the answer would put samples back on screen
@@ -85,7 +96,11 @@ public final class UsageHistoryCoordinator: @unchecked Sendable {
             // Checked inside the gate, where no removal can be running: a clear
             // that arrived while this reload waited for the lock has already
             // deleted the file, and recording now would put samples back into it.
-            guard self.generation == started else { return nil }
+            // A clear whose removal has not run yet condemns the file just as
+            // firmly, even though its generation is the one this reload captured.
+            guard counterLock.withLock({
+                HistoryGeneration(clears: clears) == started && pendingRemovals.isEmpty
+            }) else { return nil }
             recorder.record(successful, now: now)
             return history.read().samples
         }
@@ -100,18 +115,25 @@ public final class UsageHistoryCoordinator: @unchecked Sendable {
     /// Deletes every recorded sample.
     ///
     /// Two halves, because they belong in two places. The synchronous half runs
-    /// here, on whichever actor pressed the button: it bumps the generation, so
-    /// a reload already in flight publishes nothing and one that has not
-    /// recorded yet does not record at all. The returned half takes an exclusive
-    /// file lock and unlinks, so a main-actor caller hands it to a detached task.
+    /// here, on whichever actor pressed the button: it bumps the generation and
+    /// marks a removal outstanding, so a reload already in flight publishes
+    /// nothing and one that starts before the removal runs neither records nor
+    /// publishes. The returned half takes an exclusive file lock and unlinks, so
+    /// a main-actor caller hands it to a detached task.
     ///
     /// Running the returned closure is not optional — dropping it invalidates
-    /// the UI but leaves the file on disk.
+    /// the UI, leaves the file on disk, and leaves every later reload reporting
+    /// nothing, because the removal it is waiting on never happens.
     public func clear() -> @Sendable () -> Void {
-        counterLock.withLock { clears &+= 1 }
+        let pending = counterLock.withLock { () -> UInt64 in
+            clears &+= 1
+            pendingRemovals.insert(clears)
+            return clears
+        }
         let gate = self.gate
         let history = self.history
         let recorder = self.recorder
+        let coordinator = self
         return {
             gate.withLock {
                 history.removeAll()
@@ -119,8 +141,16 @@ public final class UsageHistoryCoordinator: @unchecked Sendable {
                 // exists; left in place, the deadband would drop the first
                 // reading of the fresh history.
                 recorder.forgetHeads()
+                // Released inside the gate, so no reload can see the file as
+                // usable between the unlink and this clear ceasing to be pending.
+                coordinator.finishRemoval(pending)
             }
         }
+    }
+
+    /// One clear's removal has happened. Called with `gate` held.
+    private func finishRemoval(_ pending: UInt64) {
+        counterLock.withLock { _ = pendingRemovals.remove(pending) }
     }
 
     /// The pure half: what a set of samples means, given the snapshots that name
