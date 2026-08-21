@@ -38,6 +38,11 @@ on:
 permissions:
   contents: read
 
+# Releases run one at a time and a superseded run is never cancelled, so a job
+# that hangs holds the group for however long it is allowed to. GitHub's default
+# is 360 minutes -- most of a working day in which no release can be cut. Every
+# job below therefore sets its own `timeout-minutes`, above what that job takes
+# with room to spare, and none of them is left at the default.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -46,6 +51,8 @@ jobs:
   version:
     name: Compute the next version
     runs-on: ubuntu-latest
+    # A checkout and some tag arithmetic; minutes are already generous.
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -154,6 +161,9 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     container: swift:6.3-noble
+    # A static release build plus an `apt-get update` and a network fetch of the
+    # nfpm .deb, so this bound covers a slow mirror as well as a slow compile.
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -279,6 +289,8 @@ jobs:
     name: Build macOS universal
     needs: version
     runs-on: macos-15
+    # A release build of two architectures on a macOS runner.
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -351,6 +363,9 @@ jobs:
     # finish before `release` publishes anything. A run that dies after this
     # job spends a version number and leaves an orphan tag; it does not leave a
     # published release pointing at a formula nobody has.
+    #
+    # A checkout, one `git ls-remote` and a tag push; minutes are generous.
+    timeout-minutes: 10
     permissions:
       contents: write
     env:
@@ -404,10 +419,9 @@ jobs:
     # Linux runner could push the commit but could not prove it works, which is
     # how a placeholder checksum once reached users.
     runs-on: macos-15
-    # `concurrency: release` has cancel-in-progress: false, so a hung
-    # `brew install --build-from-source` would hold the group for the default
-    # 360 minutes and block every later release. This is the first job here
-    # running a third-party build of unbounded duration.
+    # The longest bound here: `brew install --build-from-source` is a
+    # third-party build of unbounded duration, and `brew audit --online` then
+    # waits on the GitHub API.
     timeout-minutes: 45
     # `secrets.*` ignores `permissions:` and is readable by a workflow_dispatch
     # run on ANY branch, and the "release from main only" guard is in this same
@@ -666,6 +680,9 @@ jobs:
     # The artifacts come from the two build jobs, which `tag` already waited on.
     needs: [version, build-linux, build-macos, tag, tap]
     runs-on: ubuntu-latest
+    # No compilation, but it waits on Sigstore and on the attestation and
+    # release APIs, any of which can be slow without being hung.
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -827,6 +844,8 @@ jobs:
     name: Publish the container image
     needs: [version, release]
     runs-on: ubuntu-latest
+    # Downloads a release asset, then builds and pushes an image to ghcr.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

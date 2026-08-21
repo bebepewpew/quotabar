@@ -49,6 +49,13 @@ before the formula is proven would next be noticed by whoever cut the release.
 It uses no YAML library on purpose, so it runs the same on a macOS checkout as in
 the job, and it fails closed: a `needs:` it cannot read is an error, not a pass.
 
+The same job also asserts that **every job in `release.yml` declares a
+`timeout-minutes`** and that none of them is GitHub's 360-minute default. That
+workflow's `concurrency` group does not cancel a superseded run, so one unbounded
+job that hangs blocks every later release; the check reads job keys by
+indentation, which means a bound written on a step rather than on the job does
+not satisfy it.
+
 Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
 would stay red until its next push, long after someone applied the label. And the

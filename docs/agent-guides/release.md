@@ -68,6 +68,30 @@ policy job runs it on every pull request. Run it yourself after editing
 The workflow pushes exactly one ref here: the annotated tag. **It never pushes to
 `main`.**
 
+## Every job is bounded
+
+`concurrency: release` has `cancel-in-progress: false`, so a hung job is not
+replaced by the next dispatch — it holds the group until something kills it, and
+what kills an unbounded job is GitHub's 360-minute default, most of a working day
+in which no release can be cut. Every job therefore declares its own
+`timeout-minutes`, above what that job takes with room to spare:
+
+| Job | Bound | What dominates its duration |
+| --- | --- | --- |
+| `version` | 10 | a checkout and tag arithmetic |
+| `build-linux` | 40 | a static release build, plus `apt-get` and the nfpm fetch |
+| `build-macos` | 40 | a two-architecture release build |
+| `tag` | 10 | a checkout, one `git ls-remote` and a tag push |
+| `tap` | 45 | `brew install --build-from-source`, then `brew audit --online` |
+| `release` | 30 | Sigstore, the attestation API and the release upload |
+| `container` | 30 | an asset download, an image build and a ghcr push |
+
+The rows are in run order, which is also the order the jobs appear in the file.
+
+The `policy` job in `ci.yml` asserts that each job here declares a bound and that
+none of them is 360, so a job added without one fails a pull request instead of a
+release. Raise a bound when a job genuinely grows; do not drop one.
+
 ## The tap job, and why it is shaped that way
 
 Every constraint on it was paid for:
@@ -85,10 +109,9 @@ Every constraint on it was paid for:
   which such a branch would control. An environment's deployment branch policy is
   evaluated by GitHub against the ref, so a modified workflow on a side branch
   cannot reach the token at all. Do not move it to a repository secret.
-- `timeout-minutes: 45`, because `concurrency: release` has
-  `cancel-in-progress: false` and this is the first job running a third-party
-  build of unbounded duration. Without it a hung `brew install` holds the group
-  for the default 360 minutes and blocks every later release.
+- `timeout-minutes: 45` is the longest bound in the workflow, because
+  `brew install --build-from-source` is a third-party build of unbounded duration
+  and `brew audit --online` then waits on the GitHub API.
 - `HOMEBREW_GITHUB_API_TOKEN` is set because `brew audit --online` calls the
   GitHub API and would otherwise share the runner's IP rate limit. Rate-limited
   there now fails the run *before* anything is published, which costs a version
