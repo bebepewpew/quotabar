@@ -24,6 +24,8 @@ final class ProcessLineSession: @unchecked Sendable {
     private var closed = false
 
     init(executable: String, arguments: [String], currentDirectory: URL? = nil) throws {
+        // Before the first write can reach a child that may already be gone.
+        ProcessSignals.ignoreBrokenPipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardInput = input
@@ -69,7 +71,9 @@ final class ProcessLineSession: @unchecked Sendable {
     /// `data(using:)`: that conversion cannot fail for a Swift string, and
     /// returning quietly when it did would have dropped a request the caller
     /// believes it sent. A write that really fails — the pipe is closed, or the
-    /// child is gone — still throws.
+    /// child is gone — throws, which holds only because `SIGPIPE` is ignored:
+    /// under the default disposition a write to a child that has exited kills
+    /// this process outright instead of returning `EPIPE`.
     func send(_ line: String) throws {
         try input.fileHandleForWriting.write(contentsOf: Data((line + "\n").utf8))
     }

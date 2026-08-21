@@ -9,6 +9,9 @@ import Glibc
 @main
 struct QuotaBarCLI {
     static func main() async {
+        // A provider CLI that exits mid-write must fail one refresh, not kill the
+        // command. Installed before anything can spawn a child.
+        ProcessSignals.ignoreBrokenPipe()
         let arguments: Arguments
         do {
             arguments = try Arguments.parse(Array(CommandLine.arguments.dropFirst()))

@@ -71,13 +71,13 @@ final class AlertEvaluatorTests: XCTestCase {
 
     // MARK: - identifier(provider:window:level:)
 
-    func testIdentifierComposesProviderWindowResetPeriodAndLevel() {
+    func testIdentifierComposesProviderWindowKeyResetPeriodAndLevel() {
         XCTAssertEqual(
             AlertEvaluator.identifier(provider: .claude, window: window("Session", 82), level: .warning),
-            "quota.Claude Code.Session.2000000000.warning")
+            "quota.Claude Code.session.2000000000.warning")
         XCTAssertEqual(
             AlertEvaluator.identifier(provider: .codex, window: window("Weekly", 96), level: .critical),
-            "quota.Codex.Weekly.2000000000.critical")
+            "quota.Codex.weekly.2000000000.critical")
     }
 
     /// Gemini reports usage without a reset timestamp. The identifier still has to
@@ -87,7 +87,7 @@ final class AlertEvaluatorTests: XCTestCase {
             AlertEvaluator.identifier(provider: .gemini,
                                       window: window("Pro", 96, resetAt: nil),
                                       level: .critical),
-            "quota.Gemini CLI.Pro.no-reset.critical")
+            "quota.Gemini CLI.pro.no-reset.critical")
     }
 
     func testANewResetPeriodIsANewAlertAtTheSameLevel() async {
@@ -102,6 +102,39 @@ final class AlertEvaluatorTests: XCTestCase {
         let nextPeriod = [snapshot(.claude, [window("Session", 82, resetAt: reset.addingTimeInterval(3_600))])]
         let third = await evaluator.pending(for: nextPeriod)
         XCTAssertEqual(third.count, 1)
+    }
+
+    /// The regression #30 was filed for. Gemini genuinely ships `key != label`, so
+    /// a vendor rewording a label must not make a window the user was already
+    /// alerted about look brand new. The key is what identity is keyed on.
+    func testARewordedLabelWithTheSameKeyDoesNotReAlert() async {
+        let evaluator = AlertEvaluator(store: RecordingStateStore())
+        let original = QuotaWindow(key: "gemini-2.5-pro", label: "Pro",
+                                   usedPercent: 96, resetAt: reset)
+        let first = await evaluator.pending(for: [snapshot(.gemini, [original])])
+        XCTAssertEqual(first.count, 1)
+        for alert in first { await evaluator.markDelivered(alert) }
+
+        let reworded = QuotaWindow(key: "gemini-2.5-pro", label: "Gemini 2.5 Pro (daily)",
+                                   usedPercent: 96, resetAt: reset)
+        let afterRewording = await evaluator.pending(for: [snapshot(.gemini, [reworded])])
+        XCTAssertTrue(afterRewording.isEmpty,
+                      "a label is display data; rewording it must not re-alert a window already delivered")
+    }
+
+    /// The other half of keying on identity: two windows that happen to share a
+    /// label but not a key each get their own dedup entry, so neither goes silent.
+    func testWindowsSharingALabelButNotAKeyAlertIndependently() async {
+        let evaluator = AlertEvaluator(store: RecordingStateStore())
+        let windows = [
+            QuotaWindow(key: "gemini-2.5-pro", label: "Pro", usedPercent: 96, resetAt: reset),
+            QuotaWindow(key: "gemini-2.5-flash", label: "Pro", usedPercent: 96, resetAt: reset)
+        ]
+        let pending = await evaluator.pending(for: [snapshot(.gemini, windows)])
+        XCTAssertEqual(pending.map(\.identifier), [
+            "quota.Gemini CLI.gemini-2.5-pro.2000000000.critical",
+            "quota.Gemini CLI.gemini-2.5-flash.2000000000.critical"
+        ])
     }
 
     // MARK: - Dedup persistence
@@ -184,8 +217,8 @@ final class AlertEvaluatorTests: XCTestCase {
 
         let attempted = await sink.attemptedIdentifiers
         XCTAssertEqual(attempted, [
-            "quota.Claude Code.Session.2000000000.warning",
-            "quota.Claude Code.Weekly.2000000000.critical"
+            "quota.Claude Code.session.2000000000.warning",
+            "quota.Claude Code.weekly.2000000000.critical"
         ])
         for identifier in attempted {
             let recorded = await evaluator.hasDelivered(identifier)
