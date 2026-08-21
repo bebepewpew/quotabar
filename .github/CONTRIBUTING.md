@@ -149,8 +149,10 @@ catch-all **Other** section. That is a safety net rather than a destination: a
 change that reaches a release under Other is a change nobody categorised. It is
 also not a way around the `Labels` check, which still blocks the merge.
 
-The issue forms apply `fix` and `feature` themselves, so an issue already
-carries the label the pull request that closes it needs.
+The issue forms apply `fix` and `feature` to the issue. That is a hint about
+where the change belongs, not a head start on the pull request: GitHub does not
+carry an issue's labels across to the pull request that closes it. Label the
+pull request yourself, or the `Labels` check fails it.
 
 Adding a category to [`release.yml`](release.yml) means adding its label here in
 the same pull request. A category whose label nobody applies renders an empty
