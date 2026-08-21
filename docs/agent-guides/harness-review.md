@@ -159,6 +159,15 @@ runs it for every change. It needs Node and nothing else. It does not cover
 nothing about the prompts themselves — only about the plumbing that carries a
 failed angle to the caller and to the sign-off.
 
+Whether the two copies of a role still *say* the same thing is checked for you:
+the `Repository policy` job in `.github/workflows/ci.yml` diffs every pair and
+fails on any difference outside Claude's `tools:` line. It exists because a pair
+did drift — the `quotabar-developer` wrappers, whose one job was to tell
+`quotabar-dev` and `quotabar-developer` apart, were edited on each side until the
+Codex copy contrasted a skill with a skill. That paragraph now lives in
+`implementing.md`, which is the remedy check 1 asks for: one copy, in the guide
+both sides point at, rather than two that agree today.
+
 A role uses the same name on both sides. It did not always: the reviewing roles
 were `quotabar-review` and `quotabar-security-review` under `.codex/skills/`
 while `.claude/agents/` called them `quotabar-reviewer` and

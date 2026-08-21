@@ -258,6 +258,30 @@ jobs:
               printf 'The gh pr create line(s) above omit --head:%s\n' "$missing_head" >&2
               exit 1
           fi
+          # A role is one document with two file names: a Claude wrapper
+          # and a Codex one, both pointing at the same guide. They have
+          # drifted before, and once two copies disagree no reader can tell
+          # which is current. Only Claude's `tools:` line may differ.
+          drift=0
+          compare() {
+              if [ ! -f "$2" ]; then
+                  echo "Missing Codex wrapper: $2" >&2
+                  drift=1
+              elif ! diff -u --label "$1" --label "$2" "$3" "$2"; then
+                  echo "Wrapper drift between $1 and $2." >&2
+                  drift=1
+              fi
+          }
+          for agent in .claude/agents/*.md; do
+              name="$(basename "$agent" .md)"
+              compare "$agent" ".codex/skills/$name/SKILL.md" \
+                  <(grep -v '^tools:' "$agent")
+          done
+          for skill in .claude/skills/*/SKILL.md; do
+              name="$(basename "$(dirname "$skill")")"
+              compare "$skill" ".codex/skills/$name/SKILL.md" "$skill"
+          done
+          test "$drift" -eq 0
 
       # The Linux job is the expensive one, and both of these are about the one
       # step that now carries it. They need no toolchain, so they belong here

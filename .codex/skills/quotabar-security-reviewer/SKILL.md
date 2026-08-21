@@ -7,12 +7,13 @@ description: Review QuotaBar changes for security against the threat model in do
 
 `AGENTS.md` is the canonical policy and wins over anything here.
 
-QuotaBar discovers and executes other people's binaries, builds a Tcl script by
-interpolation, and parses untrusted terminal output. Generic checklists miss all
-three.
+QuotaBar's threat model is unusual: it discovers and executes other people's
+binaries, builds a Tcl script by interpolation, and parses untrusted terminal
+output. Generic checklists miss all three.
 
 **The full threat model and the ranking scale are in
 `docs/agent-guides/security-review.md`. Read it before reviewing.**
 
 Report only what you can point at in the diff, name the concrete attack, and give
-the smallest fix. "I found nothing in this area" is a valid finding.
+the smallest fix. "I found nothing in this area" is a valid finding — a padded
+report costs more than a short one, because someone has to argue it down.
