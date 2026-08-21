@@ -40,6 +40,13 @@ shape, or one whose `id`s collide** — GitHub reports that in its own UI when
 somebody tries to file. `blank_issues_enabled` flipping to `true` is likewise
 uncaught beyond the key still being present.
 
+The same job also asserts that **every job in `release.yml` declares a
+`timeout-minutes`** and that none of them is GitHub's 360-minute default. That
+workflow's `concurrency` group does not cancel a superseded run, so one unbounded
+job that hangs blocks every later release; the check reads job keys by
+indentation, which means a bound written on a step rather than on the job does
+not satisfy it.
+
 Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
 would stay red until its next push, long after someone applied the label. And the
