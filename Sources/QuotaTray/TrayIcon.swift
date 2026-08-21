@@ -46,20 +46,11 @@ public struct TrayColor: Equatable, Sendable {
 
     /// Parses `RRGGBB` the way `Provider.tint` stores it, with an optional `#`.
     /// Anything else is a neutral grey: an unparsable tint must still be a
-    /// visible icon, never a transparent or black one.
+    /// visible icon, never a transparent or black one. `TintRGB` owns that rule
+    /// so the tray and the macOS menu bar cannot answer it differently.
     public init(hex: String) {
-        let digits = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
-        // `UInt32(_:radix:)` accepts a leading sign, so "+12345" would otherwise
-        // parse as 0x012345 — a wrong colour rather than the documented grey.
-        // Six ASCII hex digits is the only form this reads.
-        guard digits.count == 6, digits.allSatisfy({ $0.isASCII && $0.isHexDigit }),
-              let value = UInt32(digits, radix: 16) else {
-            self.init(red: 0x8E, green: 0x8E, blue: 0x93)
-            return
-        }
-        self.init(red: UInt8((value >> 16) & 0xFF),
-                  green: UInt8((value >> 8) & 0xFF),
-                  blue: UInt8(value & 0xFF))
+        let rgb = TintRGB(hex: hex)
+        self.init(red: rgb.red, green: rgb.green, blue: rgb.blue)
     }
 
     var bytes: [UInt8] { [red, green, blue, alpha] }

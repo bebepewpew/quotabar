@@ -35,10 +35,13 @@ numbers a user may want to paste somewhere.
 
 ## A broken input must still render
 
-`TrayColor(hex:)` falls back to neutral grey for anything it cannot parse,
+`TintRGB(hex:)` falls back to neutral grey for anything it cannot parse,
 because an unparsable tint must still be a **visible** icon — never a transparent
-or a black one. Hold every new visual default to that: what does this draw when
-the value is missing, out of range, or nonsense?
+or a black one. It is one parse in `QuotaCore` for both front-ends —
+`TrayColor(hex:)` on Linux, `NSColor(hex:)` and `Color(hex:)` on macOS — because
+when the rule was written twice the second copy fell back to black. Hold every
+new visual default to that: what does this draw when the value is missing, out of
+range, or nonsense?
 
 Related, from `QuotaFormatting.rows`: a failed probe with no cached windows still
 yields a row, so a provider never silently disappears. Disappearance is the worst

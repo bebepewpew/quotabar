@@ -576,19 +576,25 @@ struct AdvisorStrip: View {
     }
 }
 
+/// Both tint helpers read the hex through `TintRGB`, so a value the menu bar
+/// cannot parse is the same neutral grey the Linux tray falls back to instead of
+/// the pure black an integer parse would have produced. An icon nobody can see
+/// is a worse failure than one in the wrong colour.
 extension Color {
     init(hex: String) {
-        let value = UInt64(hex, radix: 16) ?? 0
-        self.init(red: Double((value >> 16) & 255) / 255, green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255)
+        let rgb = TintRGB(hex: hex)
+        self.init(red: Double(rgb.red) / 255, green: Double(rgb.green) / 255, blue: Double(rgb.blue) / 255)
     }
 }
 
-private extension NSColor {
+/// Internal rather than private so `QuotaBarTests` can assert that fallback
+/// without rendering and sampling a menu-bar image.
+extension NSColor {
     convenience init(hex: String) {
-        let value = UInt64(hex, radix: 16) ?? 0
-        self.init(red: CGFloat((value >> 16) & 255) / 255,
-                  green: CGFloat((value >> 8) & 255) / 255,
-                  blue: CGFloat(value & 255) / 255,
+        let rgb = TintRGB(hex: hex)
+        self.init(red: CGFloat(rgb.red) / 255,
+                  green: CGFloat(rgb.green) / 255,
+                  blue: CGFloat(rgb.blue) / 255,
                   alpha: 1)
     }
 }
