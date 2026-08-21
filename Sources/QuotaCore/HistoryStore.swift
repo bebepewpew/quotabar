@@ -53,6 +53,15 @@ public final class HistorySeriesCatalog: @unchecked Sendable {
     /// re-salts until it finds a free slot rather than trusting the odds.
     static let maximumSaltAttempts: UInt32 = 1_000
 
+    /// The most series one installation will ever register.
+    ///
+    /// Window keys arrive in CLI output — one `gemini-<model>` row per model the
+    /// provider decides to name — and a registration is permanent, so without a
+    /// ceiling this map is unbounded storage fed by untrusted text. Three CLIs
+    /// reporting a handful of windows each use single digits; 256 leaves two
+    /// orders of magnitude of headroom and is still a bound.
+    public static let maximumSeries = 256
+
     private let store: StateStore
     private let lock = NSLock()
     private var entries: [UInt32: HistorySeriesID]
@@ -64,27 +73,60 @@ public final class HistorySeriesCatalog: @unchecked Sendable {
         entries = Dictionary(decoded.map { ($0.hash, $0.series) }, uniquingKeysWith: { first, _ in first })
     }
 
-    /// The hash for `series`, registering and persisting one if it is new.
-    public func hash(for series: HistorySeriesID) -> UInt32 {
+    /// The hash for `series`, registering and persisting one if it is new, or
+    /// `nil` when the catalogue is already holding `maximumSeries`.
+    public func hash(for series: HistorySeriesID) -> UInt32? {
+        hashes(for: [series])[series]
+    }
+
+    /// The hashes for a whole batch, registering every new series in **one**
+    /// write.
+    ///
+    /// One refresh introduces several series at once — a provider reporting a row
+    /// per model does it the first time it is seen — and registering them one at
+    /// a time costs a full `StateStore` rewrite each, of a file that grows with
+    /// every entry. A series the ceiling refuses is simply absent from the
+    /// result: the caller records the rest rather than failing the refresh.
+    public func hashes(for series: [HistorySeriesID]) -> [HistorySeriesID: UInt32] {
         lock.withLock {
-            if let existing = registeredLocked(series) { return existing }
-            // Another process may have registered this series since we loaded, and
-            // the stored map is what every reader will consult. Adopt it before
+            var resolved: [HistorySeriesID: UInt32] = [:]
+            var pending: [HistorySeriesID] = []
+            var seen: Set<HistorySeriesID> = []
+            for one in series where seen.insert(one).inserted {
+                if let existing = registeredLocked(one) { resolved[one] = existing } else { pending.append(one) }
+            }
+            guard !pending.isEmpty else { return resolved }
+
+            // Another process may have registered these since we loaded, and the
+            // stored map is what every reader will consult. Adopt it before
             // allocating, or a `--watch` process and a one-shot invocation could
             // file the same series under two different hashes.
             adoptStoredLocked()
-            if let existing = registeredLocked(series) { return existing }
 
-            var candidate = Self.fnv1a(series.hashInput)
-            var salt: UInt32 = 0
-            while let claimant = entries[candidate], claimant != series, salt < Self.maximumSaltAttempts {
-                salt += 1
-                candidate = Self.fnv1a("\(series.hashInput)|\(salt)")
+            var added = false
+            for one in pending {
+                if let existing = registeredLocked(one) { resolved[one] = existing; continue }
+                guard entries.count < Self.maximumSeries else { continue }
+                let candidate = allocateLocked(one)
+                entries[candidate] = one
+                resolved[one] = candidate
+                added = true
             }
-            entries[candidate] = series
-            persistLocked()
-            return candidate
+            if added { persistLocked() }
+            return resolved
         }
+    }
+
+    /// A free hash for `series`: its natural one, or the first salted retry that
+    /// nobody else has claimed.
+    private func allocateLocked(_ series: HistorySeriesID) -> UInt32 {
+        var candidate = Self.fnv1a(series.hashInput)
+        var salt: UInt32 = 0
+        while let claimant = entries[candidate], claimant != series, salt < Self.maximumSaltAttempts {
+            salt += 1
+            candidate = Self.fnv1a("\(series.hashInput)|\(salt)")
+        }
+        return candidate
     }
 
     private func registeredLocked(_ series: HistorySeriesID) -> UInt32? {
@@ -122,6 +164,11 @@ public final class HistorySeriesCatalog: @unchecked Sendable {
     ///
     /// A payload we cannot encode must not wipe the saved one either, so a failed
     /// encode leaves the stored bytes alone rather than writing nil over them.
+    ///
+    /// The merge can carry the map past `maximumSeries` when another process
+    /// registered while we held ours. That is deliberate: the ceiling gates new
+    /// registration and never deletes, because records already on disk resolve
+    /// through every entry here.
     private func persistLocked() {
         var merged = Dictionary(storedLocked().map { ($0.hash, $0.series) },
                                 uniquingKeysWith: { first, _ in first })
@@ -433,28 +480,47 @@ public final class FileHistoryStore: HistoryStore, @unchecked Sendable {
 
     private let url: URL
     private let catalog: HistorySeriesCatalog
+    /// The size backstop this store enforces, never smaller than a header and one
+    /// record, so trimming always has somewhere to land.
+    private let byteLimit: Int
     private let lock = NSLock()
 
-    public init(url: URL? = nil, catalog: HistorySeriesCatalog? = nil,
-                store: StateStore = StateStoreFactory.makeDefault()) {
+    public convenience init(url: URL? = nil, catalog: HistorySeriesCatalog? = nil,
+                            store: StateStore = StateStoreFactory.makeDefault()) {
+        self.init(url: url, catalog: catalog, store: store, maximumFileBytes: Self.maximumFileBytes)
+    }
+
+    /// The designated initialiser. `maximumFileBytes` is a parameter only so a
+    /// test can drive the size backstop with a few hundred bytes instead of
+    /// writing 32 MB; nothing shipping passes anything but the default.
+    init(url: URL?, catalog: HistorySeriesCatalog?, store: StateStore, maximumFileBytes: Int) {
         self.url = url ?? HistoryLocation.defaultURL()
         self.catalog = catalog ?? HistorySeriesCatalog(store: store)
+        self.byteLimit = max(HistoryFormat.headerLength + HistoryFormat.recordStride, maximumFileBytes)
     }
 
     // MARK: Writing
 
     @discardableResult
     public func append(_ samples: [UsageSample]) -> Int {
-        guard let first = samples.first else { return 0 }
-        // Resolve hashes before taking the file lock. Registering a series writes
-        // through `StateStore`, which takes a lock of its own, and taking them in
-        // this order everywhere is what keeps the two from deadlocking.
-        let resolved = samples.map { (sample: $0, hash: catalog.hash(for: $0.series)) }
+        // Resolve hashes before taking the file lock, and for the whole batch in
+        // one call. Registering a series writes through `StateStore`, which takes
+        // a lock of its own — taking them in this order everywhere is what keeps
+        // the two from deadlocking — and a batch that introduces several series
+        // rewrites the state file once rather than once per series.
+        let hashes = catalog.hashes(for: samples.map(\.series))
+        // A series the catalogue's ceiling refused has no hash, so its samples are
+        // dropped and the rest of the batch still lands: history is best effort
+        // and must not turn a working refresh into a failure.
+        let resolved = samples.compactMap { sample in
+            hashes[sample.series].map { (sample: sample, hash: $0) }
+        }
+        guard let first = resolved.first else { return 0 }
 
         var written = 0
         lock.withLock {
             FileLock.withExclusiveLock(at: FileLock.sidecarURL(for: url)) {
-                guard let handle = openForUpdate(creatingHeaderAt: first.at) else { return }
+                guard let handle = openForUpdate(creatingHeaderAt: first.sample.at) else { return }
                 defer { try? handle.close() }
                 // A file a newer build wrote is never appended to, so downgrading
                 // and running the old binary cannot corrupt it.
@@ -534,7 +600,10 @@ public final class FileHistoryStore: HistoryStore, @unchecked Sendable {
                 guard let handle = try? FileHandle(forReadingFrom: url) else { return }
                 defer { try? handle.close() }
                 guard let header = currentHeader(handle), header.isSupported,
-                      let count = recordCount(handle), count > 0 else { return }
+                      let end = try? handle.seekToEnd() else { return }
+                let fileBytes = Int(end)
+                let count = recordCount(inFileOf: fileBytes)
+                guard count > 0 else { return }
 
                 // Everything expired is a prefix, so the live range starts at the
                 // first record inside the horizon and runs to the end. Stopping at
@@ -548,6 +617,20 @@ public final class FileHistoryStore: HistoryStore, @unchecked Sendable {
                         firstLive = index
                         break
                     }
+                }
+
+                // Age alone cannot honour the size backstop: when record 0 is
+                // inside the horizon the pass above drops nothing, so a
+                // pathological refresh interval would leave `needsCompaction`
+                // true forever while the file kept growing. Trim the oldest
+                // records for size as well — down to three quarters of the limit
+                // rather than to a byte under it, so the next rewrite is a
+                // quarter of a file away instead of one record away.
+                if fileBytes - firstLive * HistoryFormat.recordStride >= byteLimit {
+                    let target = byteLimit - byteLimit / 4
+                    let excess = fileBytes - firstLive * HistoryFormat.recordStride - target
+                    let extra = (excess + HistoryFormat.recordStride - 1) / HistoryFormat.recordStride
+                    firstLive = min(count, firstLive + extra)
                 }
                 guard firstLive > 0 else { return }
 
@@ -573,7 +656,7 @@ public final class FileHistoryStore: HistoryStore, @unchecked Sendable {
         lock.withLock {
             guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
             defer { try? handle.close() }
-            if let end = try? handle.seekToEnd(), Int(end) >= Self.maximumFileBytes { return true }
+            if let end = try? handle.seekToEnd(), Int(end) >= byteLimit { return true }
             guard let header = currentHeader(handle), header.isSupported,
                   let oldest = readRecord(handle, index: 0) else { return false }
             let at = header.epoch.addingTimeInterval(TimeInterval(oldest.offsetSeconds))
@@ -617,10 +700,10 @@ public final class FileHistoryStore: HistoryStore, @unchecked Sendable {
         return HistoryFormat.Header.decode(data)
     }
 
-    /// How many whole records the file holds, ignoring any torn tail.
-    private func recordCount(_ handle: FileHandle) -> Int? {
-        guard let end = try? handle.seekToEnd() else { return nil }
-        return max(0, Int(end) - HistoryFormat.headerLength) / HistoryFormat.recordStride
+    /// How many whole records a file of `fileBytes` bytes holds, ignoring both
+    /// the header and any torn tail.
+    private func recordCount(inFileOf fileBytes: Int) -> Int {
+        max(0, fileBytes - HistoryFormat.headerLength) / HistoryFormat.recordStride
     }
 
     /// A crash between two writes can leave fewer than `stride` bytes at the end.
