@@ -110,8 +110,12 @@ public enum CommandRunner {
             throw ProbeError.message("The CLI exited but left its output stream open")
         }
         guard process.terminationStatus == 0 else {
-            let detail = diagnostic(stdout: stdout.value, stderr: stderr.value)
-            throw ProbeError.message(detail.isEmpty ? "Command failed with exit code \(process.terminationStatus)" : detail)
+            // What the child printed goes into the failure as `detail`, never
+            // into the message: it is untrusted text to be classified, not
+            // echoed. See `ProbeError.CommandFailure`.
+            throw ProbeError.commandFailed(.init(command: commandName(executable),
+                                                 status: process.terminationStatus,
+                                                 detail: diagnostic(stdout: stdout.value, stderr: stderr.value)))
         }
         return stdout.value
     }
@@ -156,6 +160,18 @@ public enum CommandRunner {
         #endif
     }
 
+    /// The bare name of the executable, so a failure can say *which* command
+    /// failed without printing the path it was found at.
+    ///
+    /// That path comes from `PATH` or from a login shell's answer, so its last
+    /// component is untrusted like everything else around a provider CLI. Only
+    /// a plain name is used; anything else is dropped rather than reworded into
+    /// something that would look official in an error card.
+    static func commandName(_ executable: String) -> String? {
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+        return name.range(of: #"^[A-Za-z0-9._+-]{1,32}$"#, options: .regularExpression) != nil ? name : nil
+    }
+
     private static func diagnostic(stdout: Data, stderr: Data) -> String {
         sanitizeDiagnostic(String(decoding: (stderr.isEmpty ? stdout : stderr).suffix(1_500), as: UTF8.self))
     }
@@ -194,11 +210,51 @@ private final class LockedData: @unchecked Sendable {
 
 public enum ProbeError: LocalizedError {
     case missing(String), timeout, message(String), unsupported(String)
+    /// A command that ran and exited non-zero for a reason no probe classified.
+    case commandFailed(CommandFailure)
+
+    /// What a failed command is allowed to say for itself.
+    ///
+    /// `detail` is the CLI's own output, stripped of terminal control sequences
+    /// but not judged: it is whatever the provider chose to print, and that has
+    /// included API keys, prompts and file paths. Every `errorDescription`
+    /// reaches the menu card, the text table and `--json`, so the message is
+    /// fixed text built from the command name and the exit status instead.
+    /// `detail` stays internal to `QuotaCore`, where a probe can match it to
+    /// produce an actionable error of its own and no front-end can render it.
+    public struct CommandFailure: Sendable {
+        /// The bare command name, when it had a plain one.
+        public let command: String?
+        public let status: Int32
+        let detail: String
+
+        init(command: String?, status: Int32, detail: String) {
+            self.command = command
+            self.status = status
+            self.detail = detail
+        }
+
+        /// Concise, actionable, and free of anything the command printed — the
+        /// output itself is one command away for whoever wants to read it.
+        public var message: String {
+            "\(command ?? "The CLI") exited with status \(status). Run it in a terminal to see what it reported."
+        }
+    }
+
     public var errorDescription: String? {
         switch self {
         case .missing(let name): "\(name) is not installed"
         case .timeout: "The CLI did not respond in time"
         case .message(let value), .unsupported(let value): value
+        case .commandFailed(let failure): failure.message
         }
+    }
+
+    /// The failing command's own output, for matching inside `QuotaCore` only,
+    /// so a probe can turn a recognised complaint into a message of its own.
+    /// Nothing may display it, which is why it is not public.
+    var diagnosticDetail: String? {
+        guard case .commandFailed(let failure) = self, !failure.detail.isEmpty else { return nil }
+        return failure.detail
     }
 }

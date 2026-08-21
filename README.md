@@ -304,6 +304,14 @@ causes:
 | `Gemini is waiting for a folder-trust decision` | Gemini CLI asks whether to trust the working directory before it will start. Run `gemini` once and answer it. |
 | `Gemini authentication is required` | Genuinely signed out. Run `gemini` and sign in. |
 | `… is not installed` | The provider's CLI was not found on `PATH` or in the usual install locations. |
+| `The CLI did not respond in time` | The command was still running at its deadline and its process group was terminated. |
+| `claude exited with status 3` | The CLI ran and failed for a reason QuotaBar does not recognise. Run that command in a terminal to read what it said. |
+
+QuotaBar never repeats what a provider CLI printed. Its output is untrusted text
+that can carry an API key or the contents of a prompt, and an error message ends
+up in a menu card, in `--json` and in screenshots, so an unrecognised failure is
+reported as the command and its exit status instead. The output itself is one
+command away for whoever wants it.
 
 A failed provider never clears the values QuotaBar already had; the last
 successful reading stays visible with the error beside it.
