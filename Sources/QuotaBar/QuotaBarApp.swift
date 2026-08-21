@@ -471,7 +471,11 @@ struct QuotaCard: View {
                             .accessibilityLabel("Usage over the last 7 days")
                     }
                     if let reset = window.resetAt {
-                        Text("Resets \(reset, style: .relative)").font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
+                        // The wording the CLI and the tray use, rather than
+                        // `Text(_:style:.relative)`, which localises and counts upward
+                        // past an elapsed reset instead of saying "now". Fixed at
+                        // render time, so it moves when the store publishes a snapshot.
+                        Text(QuotaFormatting.resetLine(reset)).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
             }

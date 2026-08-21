@@ -60,6 +60,17 @@ public enum QuotaFormatting {
         return "in " + parts.joined(separator: " ")
     }
 
+    /// The same wording on a line of its own, e.g. `Resets in 2h`, for a front-end
+    /// that gives the reset its own line rather than a table cell.
+    ///
+    /// It exists so the macOS card stops formatting the date itself: SwiftUI's
+    /// `Text(_:style:.relative)` localises and counts *upward* past an elapsed
+    /// date, so a retained snapshot whose reset had already passed read there as
+    /// time-since while every other front-end said "now".
+    public static func resetLine(_ date: Date, from now: Date = Date()) -> String {
+        "Resets \(relativeReset(date, from: now))"
+    }
+
     /// Flattens snapshots into display rows. A failed probe with no cached windows
     /// still yields one row so the provider never silently disappears.
     public static func rows(for snapshots: [QuotaSnapshot], now: Date = Date()) -> [QuotaRow] {
