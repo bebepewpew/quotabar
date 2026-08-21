@@ -61,6 +61,8 @@ jobs:
         id: next
         env:
           BUMP: ${{ inputs.bump }}
+          # Read only: the guard below asks whether `previous` was published.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -88,6 +90,30 @@ jobs:
               echo "::error::latest tag '$previous' is not a plain vMAJOR.MINOR.PATCH tag"
               exit 1
             fi
+
+            # An unfinished release is what this catches. The `release` job
+            # pushes the tag before it publishes, so a run that failed in
+            # between leaves `previous` tagged with no release behind it. Bumping
+            # from that tag is never the recovery: it cuts a new version on top
+            # of a half-released one and hands it an empty changelog, because
+            # --notes-start-tag "$previous" would then span no merged pull
+            # requests. `|| true` keeps a failed lookup out of `set -e`; its
+            # message lands in $state and is reported instead.
+            state="$(gh release view "$previous" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft --jq '.isDraft' 2>&1 || true)"
+            echo "gh release view $previous -> ${state:-no output}"
+            if [ "$state" != "false" ]; then
+              {
+                echo "::error::${previous} is tagged but has no published GitHub release,"
+                echo "::error::so the run that created that tag did not finish. Do not"
+                echo "::error::dispatch another release: that cuts a new version on top of"
+                echo "::error::a half-released one and gives it an empty changelog. Open the"
+                echo "::error::failed run and choose \"Re-run failed jobs\" instead, which"
+                echo "::error::resumes it against the tag that already exists."
+              } >&2
+              exit 1
+            fi
+
             major="${core%%.*}"
             rest="${core#*.}"
             minor="${rest%%.*}"
@@ -385,6 +411,22 @@ jobs:
             printf '%s\n' "$dirty"
             exit 1
           fi
+
+          # Re-running this job is how a release that failed after the tag was
+          # pushed is resumed, so a tag already on the released commit is a
+          # proven no-op rather than a failure -- the same treatment the tap job
+          # gives its own re-run. One pointing anywhere else is not ours to
+          # move: signatures and provenance are bound to what it names.
+          existing="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}" "refs/tags/${TAG}^{}" | cut -f1)"
+          if [ -n "$existing" ]; then
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::${TAG} already resolves to ${existing}, not the released ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "${TAG} already points at ${GITHUB_SHA}; leaving it alone."
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "QuotaBar ${VERSION}" "$GITHUB_SHA"

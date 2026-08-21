@@ -24,7 +24,9 @@ Then choose `patch`, `minor` or `major`. There is no other input.
 ## What the run does, in order
 
 1. **version** — refuses a non-`main` ref, derives the next version from the newest
-   v-tag, and fails if that tag already exists.
+   v-tag, fails if that tag already exists, and refuses to bump from a tag that has
+   no published GitHub release, because that is an unfinished release to resume
+   rather than a version to bump from.
 2. **build-linux** and **build-macos** — stamp the version into
    `Sources/QuotaBarCLI/Arguments.swift` and `Resources/Info.plist`
    **without committing it**, so the tag still points at the untouched commit the
@@ -35,7 +37,9 @@ Then choose `patch`, `minor` or `major`. There is no other input.
 3. **release** — checks the full artifact set is present, writes `SHA256SUMS`,
    signs every artifact *and* `SHA256SUMS` keylessly with cosign against the
    GitHub OIDC identity, attests build provenance, **refuses to tag a dirty
-   checkout**, pushes only `refs/tags/<tag>`, and publishes the GitHub release.
+   checkout**, pushes only `refs/tags/<tag>` — leaving a tag that already resolves
+   to this run's commit alone, so the job can be re-run — and publishes the GitHub
+   release.
 4. **container** — downloads the released Linux tarball and pushes
    `ghcr.io/<repo>:<version>` and `:latest`. The build context is `dist/` only,
    because `.dockerignore` excludes the repository root where an executable zsh
@@ -90,14 +94,40 @@ already decided.
 
 ## When a release goes wrong
 
-- **Never re-tag and never force-push a tag.** A published tag is what signatures
-  and provenance are bound to.
-- A failed run before the tag step: fix forward on `main` and dispatch again.
-- A failed run after the tag exists: cut the **next patch**. The broken version
-  number is spent.
-- The tap job runs **after** the release is published, so a failure there leaves a
-  live release whose install instructions do not work yet. Fix the tap, do not
-  re-cut the release.
+**Never re-tag and never force-push a tag.** A published tag is what signatures and
+provenance are bound to.
+
+The tag push, in the middle of the `release` job, is the line that decides the
+recovery:
+
+- **Before it.** Nothing has been published, so fix forward on `main` and dispatch
+  a new run.
+- **At it or after it.** The version is already spent. **Resume the run — open it
+  and choose "Re-run failed jobs" — never dispatch a new one.** A re-run reuses the
+  outputs of the jobs that succeeded, so it carries on against the tag that already
+  exists rather than cutting a version beside it.
+
+Dispatching again after the tag was pushed used to cut the next patch and leave the
+broken version live, with an empty changelog for the new one because
+`--notes-start-tag` then spans no merged pull requests. The `version` job now
+refuses it: if the tag it would treat as `previous` has no published GitHub
+release, it fails and names "Re-run failed jobs" as the recovery. Re-running does
+not re-run `version` at all, so the guard never stands in the way of resuming.
+
+Two jobs are shaped for that re-run and say so in their comments: the tag step
+leaves a tag that already resolves to the released commit alone — and refuses one
+that resolves to anything else — and the tap job treats an unchanged formula as a
+proven no-op.
+
+The tap and container jobs run **after** the release is published, so a failure
+there leaves a live release whose install instructions do not work yet. Fix the
+tap, re-run the failed job, and do not re-cut the release. A `patch` dispatch after
+a *complete* release is the normal path and still produces the next patch version.
+
+The one case a re-run cannot resolve on its own is a `gh release create` that
+published the release and then failed part-way through its uploads: re-running the
+job hits a release that already exists. Delete the **release**, never the tag, then
+re-run the job.
 
 ## Verification is part of the release
 
