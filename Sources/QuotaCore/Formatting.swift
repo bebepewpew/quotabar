@@ -132,15 +132,46 @@ public enum QuotaFormatting {
 
 /// Payload shape consumed by waybar's `custom/*` modules; polybar and the Plasma
 /// command-output widget read the `text` field just as happily.
+///
+/// The leading reading decides `text`, `class`, `percentage` and `stale`, while
+/// `tooltip` lists every row. Another program reads this, so keys are only ever
+/// added: renaming one breaks a status bar the way changing a storage key breaks
+/// a cache.
 public struct WaybarPayload: Encodable, Sendable {
+    /// The `class` for "no provider reported anything", which is not the same
+    /// state as a healthy `normal` and is documented alongside the three
+    /// `QuotaUrgency` names in `README.md`.
+    public static let unavailableClass = "unavailable"
+
+    /// The marker `text` carries for a retained reading, matching the glyph the
+    /// CLI table puts beside the same row so staleness survives without colour.
+    public static let staleMarker = "\u{26A0}"
+
     public let text: String
     public let tooltip: String
     public let `class`: String
-    public let percentage: Int
+    /// `nil` when nothing reported a reading. Encoded as JSON `null` rather than
+    /// dropped, so the key a status bar reads is always present, and never `0`,
+    /// which would claim a quota is untouched when it is simply unknown.
+    public let percentage: Int?
+    /// True when the leading reading is a retained one whose refresh failed, so
+    /// the number is the last good value rather than a fresh one.
+    public let stale: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case text, tooltip, `class`, percentage, stale
+    }
 
     public init(rows: [QuotaRow]) {
         let leader = QuotaFormatting.mostUrgent(rows)
-        text = leader.map { "\(QuotaBadge.preferred(for: $0.provider, window: $0.window)) \($0.percentText)" } ?? "n/a"
+        // A local rather than `self.stale`: the closure below would otherwise
+        // capture a partly initialised `self`.
+        let isStale = leader?.error != nil
+        stale = isStale
+        text = leader.map {
+            let head = "\(QuotaBadge.preferred(for: $0.provider, window: $0.window)) \($0.percentText)"
+            return isStale ? "\(head) \(Self.staleMarker)" : head
+        } ?? "n/a"
         tooltip = rows.map { row in
             guard row.usedPercent != nil else {
                 return "\(row.provider.rawValue): \(row.error ?? "unavailable")"
@@ -148,7 +179,23 @@ public struct WaybarPayload: Encodable, Sendable {
             let detail = row.error.map { " (\($0))" } ?? (row.resetText.isEmpty ? "" : " — \(row.resetText)")
             return "\(row.provider.rawValue) \(row.window): \(row.percentText)\(detail)"
         }.joined(separator: "\n")
-        `class` = (leader?.urgency ?? .normal).rawValue
-        percentage = Int((leader?.usedPercent ?? 0).rounded())
+        `class` = leader.map(\.urgency.rawValue) ?? Self.unavailableClass
+        if let used = leader?.usedPercent {
+            percentage = Int(used.rounded())
+        } else {
+            percentage = nil
+        }
+    }
+
+    /// Hand-written so `percentage` is emitted as `null` instead of being left
+    /// out: the synthesised encoding drops a `nil` optional, and a consumer that
+    /// reads the key unconditionally would then find nothing at all.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        try container.encode(tooltip, forKey: .tooltip)
+        try container.encode(`class`, forKey: .class)
+        try container.encode(percentage, forKey: .percentage)
+        try container.encode(stale, forKey: .stale)
     }
 }
