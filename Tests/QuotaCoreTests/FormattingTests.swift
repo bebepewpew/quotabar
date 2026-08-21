@@ -18,6 +18,14 @@ final class FormattingTests: XCTestCase {
                  error: error)
     }
 
+    /// The bytes a status bar actually reads, keys sorted the way
+    /// `Output.waybar` sorts them.
+    private func encoded(_ payload: WaybarPayload) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(payload), as: UTF8.self)
+    }
+
     // MARK: - QuotaUrgency
 
     /// The thresholds are exact: 80 warns, 95 is critical, and the value just
@@ -292,6 +300,9 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(payload.text, "P 96%")
         XCTAssertEqual(payload.class, "critical")
         XCTAssertEqual(payload.percentage, 96)
+        // The leader is the fresh Gemini reading, so the headline is not stale
+        // even though two other providers failed; the tooltip carries those.
+        XCTAssertFalse(payload.stale)
         XCTAssertEqual(payload.tooltip, """
         Gemini CLI Pro: 96% — resets in 2h 15m
         Claude Code Weekly limit: 42.5% (Refresh failed: timed out)
@@ -303,6 +314,41 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(json?["class"] as? String, "critical")
         XCTAssertEqual(json?["percentage"] as? Int, 96)
         XCTAssertNotNil(json?["tooltip"] as? String)
+        XCTAssertEqual(try encoded(payload), """
+        {"class":"critical","percentage":96,"stale":false,"text":"P 96%",\
+        "tooltip":"Gemini CLI Pro: 96% \u{2014} resets in 2h 15m\\nClaude Code Weekly limit: \
+        42.5% (Refresh failed: timed out)\\nCodex: codex is not installed"}
+        """)
+    }
+
+    /// A reading `QuotaEngine.retainingLastGood` kept when the refresh failed:
+    /// a percentage *and* an error. It used to lead the bar with no marker at
+    /// all, while the CLI table drew the same row with a warning glyph.
+    func testWaybarPayloadMarksARetainedReadingAsStale() {
+        let payload = WaybarPayload(rows: [row(.gemini, "Pro", 96, error: "Gemini did not respond")])
+        XCTAssertTrue(payload.stale)
+        XCTAssertEqual(payload.text, "P 96% \u{26A0}")
+        // The urgency still decides the class: a retained 96% is still critical,
+        // so existing CSS keeps colouring it.
+        XCTAssertEqual(payload.class, "critical")
+        XCTAssertEqual(payload.percentage, 96)
+        XCTAssertEqual(payload.tooltip, "Gemini CLI Pro: 96% (Gemini did not respond)")
+    }
+
+    /// A stale leader beside a fresh lower reading. The bar shows the retained
+    /// number, so it has to admit the number is retained.
+    func testWaybarPayloadIsStaleWhenTheLeadingRowIsTheRetainedOne() {
+        let payload = WaybarPayload(rows: [row(.codex, "Session", 20),
+                                           row(.claude, "Weekly limit", 81, error: "Refresh failed")])
+        XCTAssertTrue(payload.stale)
+        XCTAssertEqual(payload.text, "W 81% \u{26A0}")
+        XCTAssertEqual(payload.class, "warning")
+    }
+
+    func testWaybarPayloadIsNotStaleWhenEveryRowIsFresh() {
+        let payload = WaybarPayload(rows: [row(.codex, "Session", 20), row(.claude, "Weekly limit", 81)])
+        XCTAssertFalse(payload.stale)
+        XCTAssertEqual(payload.text, "W 81%")
     }
 
     func testWaybarPayloadOmitsResetTextWhenThereIsNone() {
@@ -313,21 +359,70 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(payload.tooltip, "Codex Session: 12%")
     }
 
-    /// A row with neither a reading nor an error still has to say something.
+    /// A row with neither a reading nor an error still has to say something, and
+    /// it is not the `normal` a healthy provider gets.
     func testWaybarPayloadWithNothingToReport() {
         let payload = WaybarPayload(rows: [row(.gemini, "—", nil)])
         XCTAssertEqual(payload.text, "n/a")
-        XCTAssertEqual(payload.class, "normal")
-        XCTAssertEqual(payload.percentage, 0)
+        XCTAssertEqual(payload.class, "unavailable")
+        XCTAssertNil(payload.percentage)
+        XCTAssertFalse(payload.stale)
         XCTAssertEqual(payload.tooltip, "Gemini CLI: unavailable")
     }
 
     func testWaybarPayloadWithNoRowsAtAll() {
         let payload = WaybarPayload(rows: [])
         XCTAssertEqual(payload.text, "n/a")
-        XCTAssertEqual(payload.class, "normal")
-        XCTAssertEqual(payload.percentage, 0)
+        XCTAssertEqual(payload.class, "unavailable")
+        XCTAssertNil(payload.percentage)
+        XCTAssertFalse(payload.stale)
         XCTAssertEqual(payload.tooltip, "")
+    }
+
+    /// Every failing provider, not just one: the class still has to be the
+    /// unavailable one rather than a healthy-looking `normal`.
+    func testWaybarPayloadWhenNoProviderReportsAReading() {
+        let payload = WaybarPayload(rows: QuotaFormatting.rows(for: [
+            QuotaSnapshot(provider: .codex, windows: [], error: "codex is not installed",
+                          probeSucceeded: false),
+            QuotaSnapshot(provider: .claude, windows: [], error: "Not logged in", probeSucceeded: false)
+        ], now: epoch))
+        XCTAssertEqual(payload.class, "unavailable")
+        XCTAssertNil(payload.percentage)
+    }
+
+    /// `percentage` is `null`, not missing and not `0`: waybar must not draw a
+    /// full-width empty bar claiming the quota is untouched, and a consumer that
+    /// reads the key unconditionally must still find it.
+    func testWaybarPayloadKeepsThePercentageKeyAsNullWithNoReading() throws {
+        let payload = WaybarPayload(rows: [row(.gemini, "—", nil, error: "expect is not installed.")])
+        XCTAssertEqual(try encoded(payload), """
+        {"class":"unavailable","percentage":null,"stale":false,"text":"n\\/a",\
+        "tooltip":"Gemini CLI: expect is not installed."}
+        """)
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any]
+        XCTAssertTrue(json?.keys.contains("percentage") ?? false)
+        XCTAssertTrue(json?["percentage"] is NSNull)
+        XCTAssertNil(json?["percentage"] as? Int)
+    }
+
+    func testWaybarStaleReadingEncodesTheMarkerAndTheFlag() throws {
+        let payload = WaybarPayload(rows: [row(.codex, "Session", 12, error: "Refresh failed: timed out")])
+        XCTAssertEqual(try encoded(payload), """
+        {"class":"normal","percentage":12,"stale":true,"text":"S 12% \u{26A0}",\
+        "tooltip":"Codex Session: 12% (Refresh failed: timed out)"}
+        """)
+    }
+
+    /// The class names are a public interface: `README.md` pins them and users
+    /// style on them, so a rename is a breaking change.
+    func testWaybarClassNamesAreStable() {
+        XCTAssertEqual(WaybarPayload.unavailableClass, "unavailable")
+        XCTAssertEqual(WaybarPayload.staleMarker, "\u{26A0}")
+        for urgency in [QuotaUrgency.normal, .warning, .critical] {
+            XCTAssertNotEqual(WaybarPayload.unavailableClass, urgency.rawValue)
+        }
     }
 
     func testWaybarPayloadRoundsThePercentage() {

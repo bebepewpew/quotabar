@@ -254,7 +254,7 @@ detail, along with how to run the tests.
 ```
 quotabar                      human-readable table
 quotabar --json               machine readable snapshots
-quotabar --format waybar      {"text","tooltip","class","percentage"}
+quotabar --format waybar      {"text","tooltip","class","percentage","stale"}
 quotabar --provider claude    limit to one provider; repeatable
 quotabar --watch              keep running and re-probe on an interval
 quotabar --watch --interval 15 --notify
@@ -283,12 +283,19 @@ waybar:
 }
 ```
 
-The `class` field is `normal`, `warning`, or `critical`, so it can be styled:
+The `class` field is `normal`, `warning`, `critical`, or `unavailable` when no
+provider reported a reading at all, so it can be styled:
 
 ```css
-#custom-quotabar.warning  { color: #d79921; }
-#custom-quotabar.critical { color: #cc241d; }
+#custom-quotabar.warning     { color: #d79921; }
+#custom-quotabar.critical    { color: #cc241d; }
+#custom-quotabar.unavailable { color: #928374; }
 ```
+
+In that `unavailable` state `percentage` is `null` rather than `0`, so nothing
+reads as 0% used; `tooltip` says why each provider is missing. `stale` is `true`
+when the number shown is a retained reading whose refresh failed, and `text`
+then ends in `⚠` so the state is visible without colour.
 
 polybar and the Plasma command-output widget can run `quotabar --format waybar`
 and read the `text` field, or use plain `quotabar` for the full table.

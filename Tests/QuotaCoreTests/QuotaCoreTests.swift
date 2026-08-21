@@ -338,6 +338,7 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertEqual(payload.text, "W 97%")
         XCTAssertEqual(payload.class, "critical")
         XCTAssertEqual(payload.percentage, 97)
+        XCTAssertFalse(payload.stale)
         XCTAssertTrue(payload.tooltip.contains("Claude Code Session: 12%"))
     }
 
@@ -347,6 +348,24 @@ final class QuotaCoreTests: XCTestCase {
         ], now: Date(timeIntervalSince1970: 0)))
         XCTAssertEqual(payload.tooltip, "Gemini CLI: expect is not installed.")
         XCTAssertEqual(payload.text, "n/a")
+        XCTAssertEqual(payload.class, "unavailable")
+        XCTAssertNil(payload.percentage)
+    }
+
+    /// The whole path the bug came in on: a failed refresh keeps the previous
+    /// windows, so the payload leads with a percentage that is no longer fresh.
+    func testWaybarPayloadMarksASnapshotRetainedByTheEngineAsStale() {
+        let now = Date(timeIntervalSince1970: 0)
+        let merged = QuotaEngine.retainingLastGood(
+            fresh: [.init(provider: .gemini, error: "Gemini did not respond", probeSucceeded: false)],
+            previous: [.init(provider: .gemini,
+                             windows: [.init(label: "Pro", usedPercent: 40, resetAt: nil)])])
+        let payload = WaybarPayload(rows: QuotaFormatting.rows(for: merged, now: now))
+        XCTAssertTrue(payload.stale)
+        XCTAssertEqual(payload.text, "P 40% \u{26A0}")
+        XCTAssertEqual(payload.percentage, 40)
+        XCTAssertEqual(payload.class, "normal")
+        XCTAssertEqual(payload.tooltip, "Gemini CLI Pro: 40% (Refresh failed: Gemini did not respond)")
     }
 
     func testRetainingLastGoodKeepsPreviousWindowsAndFlagsTheFailure() {
