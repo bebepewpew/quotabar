@@ -423,12 +423,21 @@ final class QuotaCoreTests: XCTestCase {
         let second = await evaluator.pending(for: snapshots)
         XCTAssertTrue(second.isEmpty)
 
-        // A new reset period is a new alert even at the same threshold.
-        let nextPeriod: [QuotaSnapshot] = [
+        // A reset an hour away is the same period seen through a provider that
+        // recomputes it on every probe, so it stays quiet.
+        let sameCycle: [QuotaSnapshot] = [
             .init(provider: .claude, windows: [.init(label: "Session", usedPercent: 82, resetAt: reset.addingTimeInterval(3_600))])
         ]
-        let third = await evaluator.pending(for: nextPeriod)
-        XCTAssertEqual(third.count, 1)
+        let third = await evaluator.pending(for: sameCycle)
+        XCTAssertTrue(third.isEmpty)
+
+        // A genuine reset — the shortest published window is five hours — is a new
+        // alert even at the same threshold.
+        let nextPeriod: [QuotaSnapshot] = [
+            .init(provider: .claude, windows: [.init(label: "Session", usedPercent: 82, resetAt: reset.addingTimeInterval(5 * 3_600))])
+        ]
+        let fourth = await evaluator.pending(for: nextPeriod)
+        XCTAssertEqual(fourth.count, 1)
     }
 
     func testAlertEvaluatorIgnoresSnapshotsCarryingAnError() {
