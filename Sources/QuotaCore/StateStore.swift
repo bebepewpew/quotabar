@@ -51,26 +51,52 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     private var contents: [String: JSONValue]
     private var written: Set<String> = []
 
-    /// Named per platform rather than "macOS or else", so a future Windows
-    /// front-end does not silently inherit XDG paths.
-    public static func defaultURL() -> URL {
-        let environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let base: URL
+    /// Which per-user configuration convention `defaultURL()` follows. Named per
+    /// platform rather than "macOS or else", so a future Windows front-end does
+    /// not silently inherit XDG paths.
+    enum ConfigurationBase: Sendable {
+        /// `${XDG_CONFIG_HOME:-~/.config}`.
+        case xdg
+        /// `%APPDATA%`, falling back to `~/AppData/Roaming`.
+        case windowsAppData
+    }
+
+    static var platformBase: ConfigurationBase {
         #if os(Windows)
-        if let appData = environment["APPDATA"], !appData.isEmpty {
-            base = URL(fileURLWithPath: appData, isDirectory: true)
-        } else {
-            base = home.appendingPathComponent("AppData", isDirectory: true)
-                .appendingPathComponent("Roaming", isDirectory: true)
-        }
+        .windowsAppData
         #else
-        if let xdg = environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
-            base = URL(fileURLWithPath: xdg, isDirectory: true)
-        } else {
-            base = home.appendingPathComponent(".config", isDirectory: true)
-        }
+        .xdg
         #endif
+    }
+
+    public static func defaultURL() -> URL {
+        defaultURL(environment: ProcessInfo.processInfo.environment,
+                   home: FileManager.default.homeDirectoryForCurrentUser,
+                   base: platformBase)
+    }
+
+    /// The resolution itself, taking the environment and the convention as
+    /// arguments. Selecting the convention at runtime rather than with `#if`
+    /// keeps both platforms' rules compiled — and therefore testable — wherever
+    /// the suite happens to run.
+    static func defaultURL(environment: [String: String], home: URL,
+                           base convention: ConfigurationBase) -> URL {
+        let base: URL
+        switch convention {
+        case .windowsAppData:
+            if let appData = environment["APPDATA"], !appData.isEmpty {
+                base = URL(fileURLWithPath: appData, isDirectory: true)
+            } else {
+                base = home.appendingPathComponent("AppData", isDirectory: true)
+                    .appendingPathComponent("Roaming", isDirectory: true)
+            }
+        case .xdg:
+            if let xdg = environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
+                base = URL(fileURLWithPath: xdg, isDirectory: true)
+            } else {
+                base = home.appendingPathComponent(".config", isDirectory: true)
+            }
+        }
         return base.appendingPathComponent("quotabar", isDirectory: true).appendingPathComponent("state.json")
     }
 
