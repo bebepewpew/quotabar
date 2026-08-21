@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Performance"
+  short_description: "Review process spawns, blocking and growth"
+  default_prompt: "Use $quotabar-performance to review the cost of this change against docs/agent-guides/performance-review.md, and say how you measured."
+policy:
+  allow_implicit_invocation: false

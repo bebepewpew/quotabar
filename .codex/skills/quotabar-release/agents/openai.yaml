@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Release"
+  short_description: "Prepare and verify a release"
+  default_prompt: "Use $quotabar-release to check release readiness and verify a published release against docs/agent-guides/release.md."
+policy:
+  allow_implicit_invocation: false

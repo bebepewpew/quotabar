@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Product"
+  short_description: "Scope a request into a buildable QuotaBar change"
+  default_prompt: "Use $quotabar-product to scope this request against docs/agent-guides/product-shaping.md: surfaces, assertable acceptance criteria, out of scope, the category label and a changelog-shaped title."
+policy:
+  allow_implicit_invocation: false

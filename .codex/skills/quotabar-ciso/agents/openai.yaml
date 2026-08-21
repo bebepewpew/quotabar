@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Sign-off"
+  short_description: "Ship, ship with conditions, or hold"
+  default_prompt: "Use $quotabar-ciso to decide whether this reviewed change is acceptable to ship, following docs/agent-guides/risk-signoff.md, and record what was accepted."
+policy:
+  allow_implicit_invocation: false

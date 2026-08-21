@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar DevOps"
+  short_description: "Review CI, delivery and the gates"
+  default_prompt: "Use $quotabar-devops to review this change against docs/agent-guides/ci-and-delivery.md and name the CI job that would catch a regression in it."
+policy:
+  allow_implicit_invocation: false
