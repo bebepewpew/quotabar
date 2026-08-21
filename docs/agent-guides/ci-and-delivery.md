@@ -46,6 +46,13 @@ shape, or one whose `id`s collide** — GitHub reports that in its own UI when
 somebody tries to file. `blank_issues_enabled` flipping to `true` is likewise
 uncaught beyond the key still being present.
 
+The policy job also greps every `gh pr create` line in `.claude/workflows/*.js`
+for `--head`. Those literals are commands an agent runs verbatim, from a step that
+is *not* in the worktree holding the branch, so one without `--head` opens a pull
+request for whatever is checked out — an error against `main`, and the wrong work
+against anything else. It is a grep, so it proves the flag is on the line and
+nothing about the branch it names.
+
 Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
 would stay red until its next push, long after someone applied the label. And the

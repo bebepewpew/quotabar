@@ -229,6 +229,21 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+          # Every `gh pr create` a workflow runner hands an agent has to name its
+          # head branch. The publish step runs outside the worktree holding the
+          # work, so without --head gh falls back to whatever happens to be
+          # checked out: against main it errors, and against another branch it
+          # opens a pull request for the wrong work.
+          missing_head=""
+          for runner in .claude/workflows/*.js; do
+              if grep -n 'gh pr create' "$runner" | grep -v -- '--head'; then
+                  missing_head="$missing_head $runner"
+              fi
+          done
+          if [ -n "$missing_head" ]; then
+              printf 'The gh pr create line(s) above omit --head:%s\n' "$missing_head" >&2
+              exit 1
+          fi
 
       # The Linux job is the expensive one, and both of these are about the one
       # step that now carries it. They need no toolchain, so they belong here

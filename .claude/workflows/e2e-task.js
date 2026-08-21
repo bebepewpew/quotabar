@@ -566,6 +566,12 @@ phase('Ship')
 const published = await agent(`
 Open a pull request for the branch ${branch}.
 
+This step runs in the repository checkout, NOT in the worktree that holds
+${branch}, so the branch checked out here is someone else's — very likely main. Do
+not rely on the current branch and do not check anything out: the command below
+names the head branch explicitly, which is the only reason it targets the right
+work.
+
 Use the repository template at .github/pull_request_template.md.
 
 Title (already written as a changelog line, because squash-and-merge makes it the
@@ -598,7 +604,7 @@ If the change adds or edits a GitHub Actions workflow, say plainly in Notes that
 this pull request is that workflow's first execution, so a reviewer knows the run
 on this PR is the evidence rather than something that already happened.
 
-Run: gh pr create --base main --title "..." --body "..." --label "${spec.label}"
+Run: gh pr create --base main --head ${branch} --title "..." --body "..." --label "${spec.label}"
 Return the URL. If it fails, return an empty url and the reason. Do not merge.`, {
   label: 'ship', phase: 'Ship', schema: PUBLISHED,
 })
