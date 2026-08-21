@@ -97,21 +97,26 @@ final class FormattingTests: XCTestCase {
     }
 
     func testRelativeResetMinutesHoursAndDays() {
-        let cases: [(TimeInterval, String)] = [
-            (60, "in 1m"),
-            (119, "in 1m"),
-            (1_800, "in 30m"),
-            (3_540, "in 59m"),
-            (3_600, "in 1h"),
-            (3_659, "in 1h"),
-            (3_600 + 120, "in 1h 2m"),
-            (2 * 3_600 + 15 * 60, "in 2h 15m"),
-            (86_400, "in 1d"),
-            (86_400 + 3_599, "in 1d"),
-            (86_400 + 3_600, "in 1d 1h"),
-            (3 * 86_400 + 4 * 3_600 + 30 * 60, "in 3d 4h"),
-            (10 * 86_400, "in 10d")
-        ]
+        // Spelled as literals rather than arithmetic: the mixed-expression form
+        // compiles on Linux but exceeds the macOS type-checker's budget, which
+        // fails the build rather than a test.
+        let minute: TimeInterval = 60
+        let hour: TimeInterval = 3_600
+        let day: TimeInterval = 86_400
+        var cases: [(TimeInterval, String)] = []
+        cases.append((minute, "in 1m"))
+        cases.append((119, "in 1m"))
+        cases.append((30 * minute, "in 30m"))
+        cases.append((59 * minute, "in 59m"))
+        cases.append((hour, "in 1h"))
+        cases.append((3_659, "in 1h"))
+        cases.append((hour + 2 * minute, "in 1h 2m"))
+        cases.append((2 * hour + 15 * minute, "in 2h 15m"))
+        cases.append((day, "in 1d"))
+        cases.append((day + 3_599, "in 1d"))
+        cases.append((day + hour, "in 1d 1h"))
+        cases.append((3 * day + 4 * hour + 30 * minute, "in 3d 4h"))
+        cases.append((10 * day, "in 10d"))
         for (offset, expected) in cases {
             XCTAssertEqual(QuotaFormatting.relativeReset(epoch.addingTimeInterval(offset), from: epoch), expected,
                            "offset \(offset)")
