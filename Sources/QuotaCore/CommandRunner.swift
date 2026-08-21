@@ -6,6 +6,15 @@ import Glibc
 #endif
 
 public enum CommandRunner {
+    /// The most either stream may buffer before a run is abandoned.
+    ///
+    /// A provider CLI answers a quota question in a few kilobytes, and only the
+    /// last 1_500 bytes of what it wrote ever reach a diagnostic. Without a
+    /// ceiling the child decides the resident size of a menu-bar app that stays
+    /// running for weeks, so a stream that goes past this one is treated as a
+    /// malfunctioning or hostile child rather than as output worth keeping.
+    public static let maximumCapturedBytes = 8 * 1024 * 1024
+
     public static func find(_ executable: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let explicit = ["\(home)/.local/bin/\(executable)", "\(home)/.volta/bin/\(executable)",
@@ -53,8 +62,11 @@ public enum CommandRunner {
         process.standardError = errors
         process.standardInput = stdin
         process.currentDirectoryURL = currentDirectory ?? FileManager.default.homeDirectoryForCurrentUser
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in finished.signal() }
+        // Signalled by the child exiting *and* by a reader that hits the byte
+        // cap below, so the wait further down ends on whichever comes first
+        // rather than letting an overflowing child run out the whole deadline.
+        let attention = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in attention.signal() }
         try process.run()
         #if !os(Windows)
         // Give the child its own process group so a timeout can take the whole
@@ -74,13 +86,23 @@ public enum CommandRunner {
         defer { Self.liveChildren.remove(process.processIdentifier) }
 
         let stdout = LockedData(), stderr = LockedData(), readers = DispatchGroup()
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stdout.set(output.fileHandleForReading.readDataToEndOfFile()); readers.leave()
-        }
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderr.set(errors.fileHandleForReading.readDataToEndOfFile()); readers.leave()
+        // `readDataToEndOfFile` would let the child decide how much memory this
+        // process holds, so each stream is drained in chunks up to a fixed cap.
+        // A reader that reaches the cap stops there and wakes the wait below,
+        // which takes the process group down and reports the cap rather than
+        // whatever the deadline would have said several seconds later.
+        let overflowed = LockedFlag()
+        for (pipe, sink) in [(output, stdout), (errors, stderr)] {
+            readers.enter()
+            DispatchQueue.global(qos: .utility).async {
+                let capped = Self.readCapped(pipe.fileHandleForReading, limit: Self.maximumCapturedBytes)
+                sink.set(capped.data)
+                if capped.truncated {
+                    overflowed.raise()
+                    attention.signal()
+                }
+                readers.leave()
+            }
         }
         // A child that read no stdin and exited leaves this write failing with
         // `EPIPE`. That is not the interesting failure: the exit status and the
@@ -91,13 +113,14 @@ public enum CommandRunner {
         if let input { try? stdin.fileHandleForWriting.write(contentsOf: input) }
         try? stdin.fileHandleForWriting.close()
 
-        if finished.wait(timeout: .now() + timeout) == .timedOut {
+        if attention.wait(timeout: .now() + timeout) == .timedOut {
             Self.terminate(process)
-            _ = finished.wait(timeout: .now() + 1)
+            _ = attention.wait(timeout: .now() + 1)
             Self.signalGroup(of: process, SIGKILL)
             _ = readers.wait(timeout: .now() + 2)
             throw ProbeError.message("The CLI did not respond in time")
         }
+        if overflowed.isSet { throw Self.abandonAfterOverflow(process, readers, output, errors) }
         if readers.wait(timeout: .now() + 2) == .timedOut {
             // The command itself is gone, so whatever still holds the pipes is
             // something it spawned. Leaving that behind would outlive the
@@ -111,6 +134,9 @@ public enum CommandRunner {
             try? errors.fileHandleForReading.close()
             throw ProbeError.message("The CLI exited but left its output stream open")
         }
+        // The child can exit long before whatever it spawned fills a stream, so
+        // the cap is checked again now the readers are done.
+        if overflowed.isSet { throw Self.abandonAfterOverflow(process, readers, output, errors) }
         guard process.terminationStatus == 0 else {
             let detail = diagnostic(stdout: stdout.value, stderr: stderr.value)
             throw ProbeError.message(detail.isEmpty ? "Command failed with exit code \(process.terminationStatus)" : detail)
@@ -139,6 +165,42 @@ public enum CommandRunner {
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "$", with: "\\$")
             .replacingOccurrences(of: "[", with: "\\[") + "\""
+    }
+
+    /// Drains a stream to end of file, keeping at most `limit` bytes and
+    /// reporting whether the child wrote more than that. Reading in chunks
+    /// rather than through `readDataToEndOfFile` is the whole point: the loop
+    /// can stop, and what it holds is bounded by the cap plus the chunk that
+    /// crossed it.
+    private static func readCapped(_ handle: FileHandle, limit: Int) -> (data: Data, truncated: Bool) {
+        var captured = Data()
+        var seen = 0
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { return (captured, false) }
+            seen += chunk.count
+            guard seen <= limit else {
+                captured.append(chunk.prefix(max(0, limit - captured.count)))
+                return (captured, true)
+            }
+            captured.append(chunk)
+        }
+    }
+
+    /// Ends a run the byte cap cut short. Nothing is draining that stream any
+    /// more, so a child still writing to it would block in `write` and outlive
+    /// this call: the complete group goes down, with the usual escalation, before
+    /// the error is returned.
+    private static func abandonAfterOverflow(_ process: Process, _ readers: DispatchGroup,
+                                             _ output: Pipe, _ errors: Pipe) -> ProbeError {
+        terminate(process)
+        if readers.wait(timeout: .now() + 1) == .timedOut {
+            signalGroup(of: process, SIGKILL)
+            _ = readers.wait(timeout: .now() + 1)
+        }
+        try? output.fileHandleForReading.close()
+        try? errors.fileHandleForReading.close()
+        return .outputTooLarge
     }
 
     private static func terminate(_ process: Process) {
@@ -222,12 +284,21 @@ private final class LockedData: @unchecked Sendable {
     func set(_ data: Data) { lock.withLock { storage = data } }
 }
 
+/// A one-way flag a reader thread raises and the caller reads.
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    var isSet: Bool { lock.withLock { raised } }
+    func raise() { lock.withLock { raised = true } }
+}
+
 public enum ProbeError: LocalizedError {
-    case missing(String), timeout, message(String), unsupported(String)
+    case missing(String), timeout, message(String), unsupported(String), outputTooLarge
     public var errorDescription: String? {
         switch self {
         case .missing(let name): "\(name) is not installed"
         case .timeout: "The CLI did not respond in time"
+        case .outputTooLarge: "The CLI produced more output than QuotaBar will read"
         case .message(let value), .unsupported(let value): value
         }
     }
