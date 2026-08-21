@@ -151,6 +151,12 @@ const PUBLISHED = {
 //
 // `worktree` is set only for the two angles that have to *run* something they
 // wrote. The rest read the diff, which needs no isolation.
+//
+// The harness angle is unconditional rather than gated on the paths the diff
+// touches: this runner has no shell of its own to compute a diff with, and an
+// angle that decides for itself whether to look is the very failure it exists to
+// catch. On a change that touches no guide, wrapper, workflow or template it
+// reads the diff, finds nothing in its scope, and lands in `anglesWithNothing`.
 // ---------------------------------------------------------------------------
 
 const LENSES = [
@@ -170,6 +176,8 @@ const LENSES = [
     'Follow docs/agent-guides/ci-and-delivery.md. Workflow and script changes, job permissions, action pinning, the coverage gate, the repository-policy step and executable bits. Name the CI job that would catch a regression in this change, or say plainly that none would.' },
   { key: 'docs', agentType: 'quotabar-writer', brief:
     'Follow docs/agent-guides/docs-writing.md. Does README.md, AGENTS.md, .github/SECURITY.md and docs/ still describe what the code does? Flag a claim this change made false, a documented command that no longer exists, and a behaviour change with no documentation. Policy duplicated outside AGENTS.md is a finding.' },
+  { key: 'harness', agentType: 'quotabar-harness-reviewer', brief:
+    'Follow docs/agent-guides/harness-review.md. You review the instructions an agent reads before it acts, not the code they describe: docs/agent-guides/, the .claude and .codex wrappers, .claude/workflows/, .claude/settings.json, scripts/codex-parallel, scripts/install-codex-skills, AGENTS.md, CLAUDE.md, GEMINI.md and the issue and pull-request templates. Guidance duplicated instead of pointed at, a role missing on one toolchain or missing its Codex manifest, a description that routes to the wrong role, tools or an allowlist entry beyond least authority, text somebody else wrote treated as instructions, a step with no failure branch so a number gets invented, and a report that turns "did not check" into "nothing found". If this diff touches none of those paths, say so and return an empty list.' },
 ]
 
 const diffCommands = (branch) => `  git fetch origin main ${branch}
@@ -213,7 +221,7 @@ angle, return an empty list.`, {
       })
       .then(r => ({ lens: lens.key, findings: (r && r.findings) || [], ran: true }))
       // An angle that errored must never be indistinguishable from one that
-      // looked and found nothing. Reporting seven angles as eight is how a gap
+      // looked and found nothing. Reporting eight angles as nine is how a gap
       // in coverage gets read as a clean bill of health.
       .catch(e => ({ lens: lens.key, findings: [], ran: false, error: String((e && e.message) || e) })),
 

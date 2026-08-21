@@ -303,6 +303,19 @@ jobs:
           grep -q 'image-ref: ghcr.io/.*:latest' .github/workflows/security-scan.yml
           grep -q 'package-ecosystem: docker' .github/dependabot.yml
           grep -q 'directory: /packaging' .github/dependabot.yml
+          # The harness reviewer is the one angle whose subject -- the guides,
+          # the wrappers, the workflows and the templates -- fails silently in
+          # every future session instead of going red here. A pipeline that
+          # stopped calling it would look exactly like one that called it and
+          # found nothing, so the wiring is asserted rather than left to a
+          # reader. `review-swarm.js` is deliberately not checked: its six
+          # lenses are a fixed set.
+          grep -q "agentType: 'quotabar-harness-reviewer'" .claude/workflows/e2e-task.js
+          grep -q 'docs/agent-guides/harness-review.md' .claude/workflows/e2e-task.js
+          # A lens naming an agent type or a guide that does not exist is how
+          # `review-swarm` once lost a whole angle and reported five as six.
+          test -s .claude/agents/quotabar-harness-reviewer.md
+          test -s docs/agent-guides/harness-review.md
 
       # The Linux job is the expensive one, and both of these are about the one
       # step that now carries it. They need no toolchain, so they belong here
