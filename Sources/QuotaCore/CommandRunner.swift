@@ -15,6 +15,25 @@ public enum CommandRunner {
         if let match = (explicit + fromPath).first(where: FileManager.default.isExecutableFile) { return match }
 
         guard executable.range(of: #"^[A-Za-z0-9._+-]+$"#, options: .regularExpression) != nil else { return nil }
+
+        let key = DiscoveryMemo.Key(executable: executable,
+                                    path: ProcessInfo.processInfo.environment["PATH"] ?? "",
+                                    shell: ProcessInfo.processInfo.environment["SHELL"] ?? "")
+        switch discoveryMemo.recall(key) {
+        case .resolved(let remembered): return remembered
+        case .absent: return nil
+        case .unknown: break
+        }
+        let resolved = searchLoginShells(for: executable)
+        discoveryMemo.remember(resolved, for: key)
+        return resolved
+    }
+
+    /// The expensive half of `find`, kept apart so `DiscoveryMemo` has something
+    /// to remember. Every candidate is an interactive login shell that re-executes
+    /// the user's startup files, and the loop returns early only on success, so a
+    /// binary that is genuinely absent pays for all of them.
+    private static func searchLoginShells(for executable: String) -> String? {
         for shell in loginShells() {
             guard let data = try? run(shell.path, [shell.flags, "command -v -- \(executable)"], timeout: 4) else { continue }
             if let match = String(decoding: data, as: UTF8.self)
@@ -24,22 +43,57 @@ public enum CommandRunner {
         return nil
     }
 
+    /// The one memo in the process. `find` is its only writer; `DiscoveryMemo`
+    /// documents what it keeps and when it stops trusting it.
+    static let discoveryMemo = DiscoveryMemo()
+
+    /// Forgets every remembered ladder answer. Tests stage `$PATH` and `$SHELL`
+    /// around `find` and need each case to start from an empty memo; production
+    /// has no reason to call this, because the memo invalidates itself.
+    static func resetDiscoveryMemo() { discoveryMemo.reset() }
+
     /// Interactive login shells, so PATH additions made in `.zshrc`/`.bashrc` —
     /// where version managers put CLI shims — are visible. Candidates are tried in
     /// turn rather than only the first: a `$SHELL` that rejects `-l` or `-i`
     /// (nushell, elvish, restricted shells) must not make every provider look
     /// uninstalled. `sh` gets `-lc`, since a POSIX shell need not accept `-i`
     /// alongside `-c`.
+    ///
+    /// Candidates are compared by the file they resolve to *and* the name they
+    /// are invoked under. The file matters because on a merged-`/usr` Linux
+    /// `/bin/bash` and `/usr/bin/bash` are one executable, and spawning both
+    /// runs the user's startup files twice to learn the same answer. The name
+    /// matters because bash reads `argv[0]`: invoked as `rbash` it is a
+    /// restricted shell and as `sh` it is a POSIX one. `/bin/rbash` and
+    /// `/bin/bash` are one file on Arch, Debian and Fedora but not one shell,
+    /// so deduplicating on the file alone would delete the only unrestricted,
+    /// `~/.bashrc`-sourcing rung for anyone whose `$SHELL` is `/bin/rbash` or a
+    /// bash-backed `/bin/sh`.
     static func loginShells() -> [(path: String, flags: String)] {
         var seen = Set<String>()
         return [ProcessInfo.processInfo.environment["SHELL"],
                 "/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"]
             .compactMap { $0 }
-            .filter { FileManager.default.isExecutableFile(atPath: $0) && seen.insert($0).inserted }
-            .map { path in
-                let name = URL(fileURLWithPath: path).lastPathComponent
-                return (path, ["zsh", "bash"].contains(name) ? "-lic" : "-lc")
-            }
+            .filter { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { (path: $0, name: URL(fileURLWithPath: $0).lastPathComponent) }
+            // A NUL appears in neither half, so one pair has one spelling and
+            // two different pairs cannot collide into it.
+            .filter { seen.insert("\(resolvedPath($0.path))\u{0}\($0.name)").inserted }
+            .map { ($0.path, ["zsh", "bash"].contains($0.name) ? "-lic" : "-lc") }
+    }
+
+    /// The file a candidate path actually names, so two spellings of one shell
+    /// under one name are recognised as one. Anything that cannot be resolved —
+    /// a dangling symlink, a path that vanished between the check and here —
+    /// keeps its original spelling and is simply not deduplicated.
+    static func resolvedPath(_ path: String) -> String {
+        #if os(Windows)
+        return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        #else
+        guard let resolved = realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+        #endif
     }
 
     public static func run(_ executable: String, _ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12, currentDirectory: URL? = nil) throws -> Data {
@@ -232,6 +286,94 @@ public enum CommandRunner {
             .replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Remembers what the login-shell ladder answered, so a binary that is genuinely
+/// absent stops costing a ladder run on every refresh.
+///
+/// The ladder is the expensive half of `CommandRunner.find`: up to six
+/// candidates, each an interactive login shell that re-executes the user's
+/// startup files, at a four-second deadline apiece. It returns early only on
+/// success, so a machine with Gemini installed but no `expect` paid for the
+/// whole ladder every time the Gemini probe ran, forever, and the answer never
+/// changed within a process.
+///
+/// **Lifetime and invalidation.** Nothing is written to disk; the memo dies with
+/// the process. Within it:
+///
+/// - Only the ladder is memoised. The cheap half of `find` — the known install
+///   locations, then `$PATH`, a handful of `stat` calls — still runs on every
+///   call, so an `expect` that arrives in `/usr/bin`, `/usr/local/bin`,
+///   `/opt/homebrew/bin` or anywhere on `$PATH` is picked up by the next refresh
+///   with nothing to invalidate.
+/// - An entry is keyed on the inputs that decided the answer: the executable
+///   name, `$PATH` and `$SHELL`. Change either variable and the ladder runs again.
+/// - A remembered hit is re-validated with one `stat` before it is handed back,
+///   so a binary that was uninstalled or moved is never offered as an executable.
+/// - A remembered miss expires after `missLifetime`. Without that, "install
+///   expect, then refresh" would become "install expect, then restart QuotaBar"
+///   for an install only an interactive login shell can see.
+///
+/// Two callers racing on the same absent binary can each run the ladder once;
+/// that is far cheaper than holding a lock across six subprocesses.
+final class DiscoveryMemo: @unchecked Sendable {
+    /// Everything that decides the ladder's answer, so a change to any of it
+    /// asks again instead of replaying a stale one.
+    struct Key: Hashable {
+        let executable: String, path: String, shell: String
+    }
+
+    enum Answer: Equatable {
+        /// Nothing is remembered, or what was remembered is no longer trusted.
+        case unknown
+        /// The ladder found nothing, recently enough to still believe it.
+        case absent
+        /// The ladder resolved a path that is still an executable file.
+        case resolved(String)
+    }
+
+    /// How long a "not installed" answer is trusted. Ten minutes is twice the
+    /// shortest refresh interval, so a busy cycle stops re-running the ladder,
+    /// while an install stays invisible for minutes rather than until a restart.
+    static let missLifetime: TimeInterval = 10 * 60
+
+    private struct Entry {
+        let resolved: String?, recordedAt: Date
+    }
+
+    private let lock = NSLock()
+    private var entries: [Key: Entry] = [:]
+    private let now: () -> Date
+    private let isExecutable: (String) -> Bool
+
+    init(now: @escaping () -> Date = Date.init,
+         isExecutable: @escaping (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }) {
+        self.now = now
+        self.isExecutable = isExecutable
+    }
+
+    func recall(_ key: Key) -> Answer {
+        guard let entry = lock.withLock({ entries[key] }) else { return .unknown }
+        guard let resolved = entry.resolved else {
+            guard now().timeIntervalSince(entry.recordedAt) < Self.missLifetime else { return forget(key) }
+            return .absent
+        }
+        guard isExecutable(resolved) else { return forget(key) }
+        return .resolved(resolved)
+    }
+
+    func remember(_ resolved: String?, for key: Key) {
+        lock.withLock { entries[key] = Entry(resolved: resolved, recordedAt: now()) }
+    }
+
+    func reset() {
+        lock.withLock { entries.removeAll() }
+    }
+
+    private func forget(_ key: Key) -> Answer {
+        lock.withLock { _ = entries.removeValue(forKey: key) }
+        return .unknown
     }
 }
 

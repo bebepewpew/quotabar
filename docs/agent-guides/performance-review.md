@@ -12,7 +12,7 @@ shaving microseconds off a parser.
 | --- | --- | --- |
 | Gemini probe | by far the largest | an interactive TUI driven through `expect`, needing a pseudo-terminal |
 | Codex, Claude probes | process spawn plus I/O | plain pipes, no pty |
-| Binary discovery | small, but can be large | falls back to `$SHELL -lic 'command -v …'`, which starts an **interactive login shell** |
+| Binary discovery | small, but can be large | falls back to `$SHELL -lic 'command -v …'`, which starts an **interactive login shell**; memoised per process by `DiscoveryMemo` |
 | Refresh cadence | 5 minutes to 1 hour | multiplied by every enabled provider |
 | `--watch` | user-chosen interval | the same probes, forever |
 | History append | small and fixed | one fixed-stride record per sample per series |
@@ -49,9 +49,14 @@ concurrency.
 
 - The last successful snapshot is kept and stays visible when a refresh fails.
   That is a correctness rule, and it also means a failed probe costs nothing extra.
-- Discovery is the obvious remaining candidate: explicit known-good paths first,
-  `$PATH` second, the login shell last. Keep that order — it is a security
-  property, and it happens to also be the cheap-to-expensive order.
+- Discovery searches explicit known-good paths first, `$PATH` second, the login
+  shell last. Keep that order — it is a security property, and it happens to also
+  be the cheap-to-expensive order.
+- Only the last of those steps is memoised, by `DiscoveryMemo`: it is the one that
+  spawns processes, and the cheap steps still running on every call are what keeps
+  the memo honest when a binary is installed while QuotaBar runs. Its invalidation
+  story is in the source: keyed on the executable name, `$PATH` and `$SHELL`, a hit
+  re-checked with one `stat`, a miss expiring after `missLifetime`.
 - Any cache you add needs an invalidation story and must not become a place where
   a stale value outlives a reset window.
 
