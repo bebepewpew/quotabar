@@ -8,11 +8,20 @@ on:
     # a pull request held back for a missing label would stay red until its next
     # push, long after someone applied the label.
     types: [opened, reopened, labeled, unlabeled, synchronize]
+  # The merge queue tests the commit a merge would actually produce, which is
+  # what `strict` was approximating by demanding every branch be rebased first.
+  # A required check that never reports on `merge_group` stalls the queue for
+  # good, so every context main requires has to run here too -- see the `Labels`
+  # job below, whose condition sits on its step rather than on the job for
+  # exactly that reason.
+  merge_group:
 
 # `labeled` and `unlabeled` mean a pull request now starts a run every time
 # someone corrects a label, and the label usually lands moments after `opened`.
 # Without this, each correction leaves a full macOS and Linux build running to
 # completion beside the one that supersedes it. `codeql.yml` groups the same way.
+# `github.ref` is unique per merge group, so queued batches never cancel one
+# another; only superseded pull-request runs are cancelled.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -26,12 +35,18 @@ jobs:
   # label is a changelog line in the wrong section or in no section at all.
   labels:
     name: Labels
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     steps:
+      # The condition is on the step, not the job. `Labels` is a required check,
+      # and a skipped job reports `skipped` rather than `success` -- which is
+      # what the Gate below already had to learn. Skipping the job on
+      # `merge_group` would therefore leave the queue waiting on a check that
+      # can never arrive. The label was proved on the pull request; by the time
+      # a merge group exists there is no pull request left to read it from.
       - name: Require exactly one category label
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
