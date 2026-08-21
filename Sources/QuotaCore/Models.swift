@@ -25,6 +25,47 @@ public enum Provider: String, CaseIterable, Identifiable, Sendable, Codable {
     }
 }
 
+/// The red, green and blue bytes of a tint written as `RRGGBB`, the form
+/// `Provider.tint` stores.
+///
+/// The parse lives in the core rather than once per front-end because the
+/// front-ends used to disagree about a tint they cannot read: the Linux tray
+/// fell back to a neutral grey, the macOS menu bar to pure black. One
+/// implementation cannot drift from itself.
+public struct TintRGB: Equatable, Sendable {
+    public let red: UInt8
+    public let green: UInt8
+    public let blue: UInt8
+
+    /// What a tint that cannot be parsed draws as: `secondaryLabelColor`,
+    /// opaque. An invisible icon is a worse failure than a wrong colour, so the
+    /// fallback is never black and never transparent.
+    public static let fallback = TintRGB(red: 0x8E, green: 0x8E, blue: 0x93)
+
+    public init(red: UInt8, green: UInt8, blue: UInt8) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+    }
+
+    /// Parses `RRGGBB`, with an optional leading `#`. Anything else is
+    /// ``fallback``.
+    public init(hex: String) {
+        let digits = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        // `UInt32(_:radix:)` accepts a leading sign, so "+12345" would otherwise
+        // parse as 0x012345 — a wrong colour rather than the documented grey.
+        // Six ASCII hex digits is the only form this reads.
+        guard digits.count == 6, digits.allSatisfy({ $0.isASCII && $0.isHexDigit }),
+              let value = UInt32(digits, radix: 16) else {
+            self = .fallback
+            return
+        }
+        self.init(red: UInt8((value >> 16) & 0xFF),
+                  green: UInt8((value >> 8) & 0xFF),
+                  blue: UInt8(value & 0xFF))
+    }
+}
+
 public struct QuotaSelection: Identifiable, Hashable, Codable, Sendable {
     public let provider: Provider
     public let windowKey: String
