@@ -11,12 +11,12 @@ import Glibc
 /// end of file before the awaited line ever arrives, a final line with no
 /// trailing newline, a deadline that expires while the child is halfway through
 /// writing one, a write attempted after the pipe is gone, and a teardown facing
-/// a child that ignores `SIGTERM`.
+/// a child that ignores `SIGTERM` or that exited leaving a grandchild behind.
 ///
 /// `QuotaCoreTests` covers the interleaved request/response exchange the Codex
-/// probe depends on. Everything here drives `/bin/sh` and `/bin/echo` with
-/// sub-second deadlines, so the real pipe and signal behaviour is exercised
-/// without the suite getting slow.
+/// probe depends on. Everything here drives `/bin/sh`, `/bin/echo` and — for
+/// the grandchild cases — `bash`, with sub-second deadlines, so the real pipe
+/// and signal behaviour is exercised without the suite getting slow.
 final class ProcessLineSessionTests: XCTestCase {
     private var scratch = URL(fileURLWithPath: NSTemporaryDirectory())
 
@@ -114,7 +114,187 @@ final class ProcessLineSessionTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 2, "the deadline has to bound the wait")
     }
 
+    // MARK: - ceilings
+
+    /// A child writing megabytes without a newline used to grow the buffer for
+    /// as long as it kept going, because none of it was a line yet — 64 MB of it
+    /// here. The bounded answer is the head of that line and an ended session,
+    /// so what the app holds is the stated ceiling rather than whatever the
+    /// child felt like writing.
+    ///
+    /// Against the old behaviour the first wait returns nothing at all: there is
+    /// no newline in the whole flood, so it runs to its deadline having buffered
+    /// every byte of it.
+    func testAnEndlessLineIsTruncatedOnceAndEndsTheSession() throws {
+        let shell = try systemBinary("sh")
+        let session = try ProcessLineSession(
+            executable: shell, arguments: ["-c", "head -c 67108864 /dev/zero | tr '\\0' 'a'"])
+        defer { session.close() }
+
+        var transcript: [String] = []
+        let line = session.waitForLine(matching: { _ in true },
+                                       before: Date().addingTimeInterval(10),
+                                       transcript: &transcript)
+        XCTAssertEqual(line?.utf8.count, ProcessLineSession.maximumLineBytes,
+                       "the head of the line is handed over, clamped to the ceiling")
+        XCTAssertEqual(transcript.count, 1, "a line with no end yields one truncated line and no more")
+
+        let started = Date()
+        XCTAssertNil(session.waitForLine(matching: { _ in true },
+                                         before: Date().addingTimeInterval(5),
+                                         transcript: &transcript),
+                     "the session ends instead of reading the rest of the flood")
+        XCTAssertEqual(transcript.count, 1)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "an ended session answers at once")
+    }
+
+    /// The transcript is there so a probe can find an authentication complaint
+    /// in what the CLI said, not so a chatty child can grow an array inside the
+    /// caller. It keeps the tail, the way a diagnostic does.
+    func testTheTranscriptRetainsOnlyTheMostRecentLines() throws {
+        let shell = try systemBinary("sh")
+        let session = try ProcessLineSession(
+            executable: shell,
+            arguments: ["-c", "i=0; while [ $i -lt 1000 ]; do echo line-$i; i=$((i+1)); done"])
+        defer { session.close() }
+
+        var transcript: [String] = []
+        XCTAssertNil(session.waitForLine(matching: { $0 == "never printed" },
+                                         before: Date().addingTimeInterval(10),
+                                         transcript: &transcript))
+        XCTAssertEqual(transcript.count, ProcessLineSession.maximumTranscriptLines,
+                       "1,000 lines were written and every one of them was kept")
+        XCTAssertEqual(transcript.first, "line-800")
+        XCTAssertEqual(transcript.last, "line-999")
+    }
+
+    /// Both transcript ceilings at their exact boundary, with no child in the
+    /// way. A single line larger than the byte ceiling is still kept: the
+    /// alternative is a transcript that silently holds nothing at all.
+    func testTheTranscriptCeilingsHoldExactlyAtTheirBoundary() {
+        var counted: [String] = []
+        for index in 0...ProcessLineSession.maximumTranscriptLines {
+            ProcessLineSession.retain("line-\(index)", in: &counted)
+        }
+        XCTAssertEqual(counted.count, ProcessLineSession.maximumTranscriptLines)
+        XCTAssertEqual(counted.first, "line-1", "the oldest line is the one that goes")
+
+        var bulky: [String] = []
+        let chunk = String(repeating: "a", count: 100_000)
+        for _ in 0..<5 { ProcessLineSession.retain(chunk, in: &bulky) }
+        XCTAssertEqual(bulky.count, 2, "two of these fit under the byte ceiling and a third does not")
+        XCTAssertLessThanOrEqual(bulky.reduce(0) { $0 + $1.utf8.count },
+                                 ProcessLineSession.maximumTranscriptBytes)
+
+        var oversized: [String] = []
+        ProcessLineSession.retain(String(repeating: "b", count: ProcessLineSession.maximumTranscriptBytes + 1),
+                                  in: &oversized)
+        XCTAssertEqual(oversized.count, 1, "the newest line is kept even when it alone passes the ceiling")
+    }
+
+    /// The other place a child could grow: lines that have arrived and nobody
+    /// has drained yet. Past the queue's ceiling the oldest go, so the session
+    /// costs the same whether or not a consumer is keeping up — and the reply a
+    /// caller waits for, which is the newest line, survives.
+    func testTheUndeliveredQueueDropsItsBacklogRatherThanGrowing() throws {
+        let shell = try systemBinary("sh")
+        let marker = scratch.appendingPathComponent("flood-finished").path
+        let payload = String(repeating: "q", count: 8 * 1024)
+        let session = try ProcessLineSession(
+            executable: shell, arguments: ["-c", "yes '\(payload)' | head -n 1200; touch '\(marker)'"])
+        defer { session.close() }
+
+        XCTAssertTrue(waitUntil(30) { FileManager.default.fileExists(atPath: marker) },
+                      "the child never finished writing its flood")
+        // Whatever was left in the pipe when the child exited is still on its
+        // way into the queue, and the queue is what this measures.
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Everything queued comes back without blocking; the deadline only
+        // covers the wait for end of file once the queue is empty.
+        var delivered = 0
+        var transcript: [String] = []
+        _ = session.waitForLine(matching: { _ in delivered += 1; return false },
+                                before: Date().addingTimeInterval(2),
+                                transcript: &transcript)
+        XCTAssertGreaterThan(delivered, 100, "the queue holds the newest lines rather than dropping everything")
+        XCTAssertLessThan(delivered, 900,
+                          "all 1,200 lines were still queued, so nothing bounds what the queue holds")
+        XCTAssertEqual(transcript.last, payload, "the newest line is the one that survives")
+    }
+
+    /// The same ceiling against the cheapest line there is. Charging the queue
+    /// only the bytes of each line bounded nothing here: an empty line costs
+    /// zero bytes, so `pendingBytes` never moved and the drop loop never ran,
+    /// while the array grew one entry per newline for as long as the child kept
+    /// writing them — a megabyte of newlines is a million entries that were all
+    /// free, tens of megabytes of storage out of a megabyte of output.
+    /// A fixed cost per entry is what turns the byte ceiling into a count
+    /// ceiling as well.
+    ///
+    /// Against that behaviour the `oldest` line written before the flood is
+    /// still queued behind every one of them, and the count runs past the
+    /// ceiling.
+    func testTheUndeliveredQueueBoundsAFloodOfEmptyLines() throws {
+        let shell = try systemBinary("sh")
+        let marker = scratch.appendingPathComponent("newlines-finished").path
+        let ceiling = ProcessLineSession.maximumPendingBytes / ProcessLineSession.pendingEntryBytes
+        // Four times what the queue may hold, so that the newlines the reader
+        // has taken by the time the child finishes — everything but the pipe
+        // buffer's worth still in flight — are well past the ceiling.
+        let lines = 4 * ceiling
+        let session = try ProcessLineSession(
+            executable: shell,
+            arguments: ["-c", "printf 'oldest\\n'; head -c \(lines) /dev/zero | tr '\\0' '\\n';"
+                              + " touch '\(marker)'"])
+        defer { session.close() }
+
+        XCTAssertTrue(waitUntil(60) { FileManager.default.fileExists(atPath: marker) },
+                      "the child never finished writing its newlines")
+        // What was still in the pipe when the child exited is on its way into
+        // the queue, and the queue is what this measures.
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Matching one line past the ceiling stops the drain there, so an
+        // unbounded queue fails the count below rather than taking as long as
+        // it takes to hand over everything it kept. The slack is for anything
+        // the reader had not queued yet when the drain began; the deadline only
+        // covers the wait once the queue is empty, never the drain itself.
+        var delivered = 0
+        var first: String?
+        var transcript: [String] = []
+        _ = session.waitForLine(matching: { line in
+                                    if first == nil { first = line }
+                                    delivered += 1
+                                    return delivered > ceiling + 1_024
+                                },
+                                before: Date().addingTimeInterval(1),
+                                transcript: &transcript)
+        XCTAssertEqual(first, "",
+                       "\(lines) empty lines followed `oldest` and it was still queued behind them")
+        XCTAssertLessThanOrEqual(delivered, ceiling + 1_024,
+                                 "nothing bounds how many lines the queue holds")
+        XCTAssertGreaterThan(delivered, 1_000,
+                             "the queue keeps the newest lines rather than dropping everything")
+    }
+
     // MARK: - send
+
+    /// A pipe write blocks once the child stops reading and the buffer fills.
+    /// Unbounded, one request would consume the caller's whole deadline before a
+    /// reply had even been awaited — and against the old behaviour this test
+    /// does not fail, it hangs: `FileHandle.write` never comes back.
+    func testSendGivesUpWhenTheChildIsNotReadingItsInput() throws {
+        let shell = try systemBinary("sh")
+        // Never reads stdin, so the pipe fills and stays full.
+        let session = try ProcessLineSession(executable: shell, arguments: ["-c", "sleep 10"])
+        defer { session.close() }
+
+        let started = Date()
+        XCTAssertThrowsError(try session.send(String(repeating: "x", count: 4 * 1024 * 1024), within: 0.3),
+                             "a write that cannot complete has to surface rather than block")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3, "the write is bounded by its own deadline")
+    }
 
     /// After teardown the write end is gone, so a further request cannot reach
     /// the child. That has to surface as an error rather than as a silent
@@ -208,6 +388,85 @@ final class ProcessLineSessionTests: XCTestCase {
                       "a child that ignores SIGTERM was left running after close()")
     }
 
+    /// The case #76 was filed for. A provider CLI that hands its work to a
+    /// helper and exits leaves that grandchild in the process group `init`
+    /// created, still holding the stdout it inherited. Teardown used to keep
+    /// every signal inside `if process.isRunning`, so once the direct child had
+    /// been reaped nothing was signalled at all and the grandchild outlived the
+    /// app that started it.
+    func testCloseTerminatesAGrandchildThatOutlivedTheChild() throws {
+        let shell = try systemBinary("sh")
+        let childPid = scratch.appendingPathComponent("child.pid").path
+        let grandchildPid = scratch.appendingPathComponent("grandchild.pid").path
+        let session = try ProcessLineSession(executable: shell, arguments: [
+            try grandchildScript(childPidFile: childPid,
+                                 grandchildPidFile: grandchildPid,
+                                 holdingOutput: true)
+        ])
+
+        var transcript: [String] = []
+        XCTAssertEqual(session.waitForLine(matching: { $0 == "ready" },
+                                           before: Date().addingTimeInterval(3),
+                                           transcript: &transcript),
+                       "ready")
+        let child = try readPid(at: childPid)
+        let grandchild = try readPid(at: grandchildPid)
+        XCTAssertEqual(getpgid(grandchild), child,
+                       "the grandchild has to be in the session's group for this to test anything")
+        XCTAssertTrue(waitUntil(3) { !session.isChildRunning },
+                      "the direct child has to be gone before close() for this to be the reaped path")
+
+        let started = Date()
+        session.close()
+        // Repeating it is what the probes do from nested `defer`s, and the
+        // second pass must not wait on a stream nobody is reading any more.
+        session.close()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2,
+                          "teardown stays inside the bound the running-child path already spends")
+        XCTAssertTrue(waitUntil(3) { self.hasExited(grandchild) },
+                      "a grandchild holding the session's stdout was left running after close()")
+    }
+
+    /// The other half of that. A reaped pid belongs to the kernel again, so the
+    /// only thing that justifies signalling its group is the stdout still being
+    /// held: that pipe can only be held by something the child passed it to. A
+    /// descendant that let go of the pipe is deliberately left alone rather
+    /// than risk a signal landing on whatever now owns the number.
+    func testCloseSignalsNothingWhenTheReapedChildLeftNoOneHoldingTheOutput() throws {
+        let shell = try systemBinary("sh")
+        let childPid = scratch.appendingPathComponent("child.pid").path
+        let grandchildPid = scratch.appendingPathComponent("grandchild.pid").path
+        let session = try ProcessLineSession(executable: shell, arguments: [
+            try grandchildScript(childPidFile: childPid,
+                                 grandchildPidFile: grandchildPid,
+                                 holdingOutput: false)
+        ])
+
+        var transcript: [String] = []
+        XCTAssertNil(session.waitForLine(matching: { _ in false },
+                                         before: Date().addingTimeInterval(3),
+                                         transcript: &transcript),
+                     "the stream ends when the child exits, because nothing else holds the write end")
+        XCTAssertEqual(transcript, ["ready"])
+        let child = try readPid(at: childPid)
+        let survivor = try readPid(at: grandchildPid)
+        XCTAssertEqual(getpgid(survivor), child,
+                       "a signal to the group would reach the survivor, which is what must not happen")
+        XCTAssertTrue(waitUntil(3) { !session.isChildRunning },
+                      "the direct child has to be gone before close() for this to be the reaped path")
+
+        let started = Date()
+        session.close()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1,
+                          "there is nothing to wait for once the stream has already ended")
+        // Long enough for a SIGTERM to have been delivered and acted on.
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertFalse(hasExited(survivor),
+                       "close() signalled a process group it no longer has any claim to")
+        // Nothing else will: it is not this process's child to wait on.
+        _ = kill(survivor, SIGKILL)
+    }
+
     // MARK: - Helpers
 
     private func systemBinary(_ name: String) throws -> String {
@@ -218,12 +477,69 @@ final class ProcessLineSessionTests: XCTestCase {
         return path
     }
 
+    /// A child that spawns a grandchild and exits, the shape a provider CLI
+    /// takes when it hands its work to a helper. The grandchild is forked only
+    /// after a pause: the session sets the child's process group once `run()`
+    /// has returned, and anything forked before that would land in this
+    /// process's group instead and prove nothing.
+    ///
+    /// `holdingOutput` decides whether the grandchild keeps the stdout it
+    /// inherited or redirects it away. That pipe is the only evidence teardown
+    /// has left once the child itself has been reaped.
+    ///
+    /// The grandchild drops every inherited descriptor above stdio, which is
+    /// what a helper meaning to outlive its launcher does anyway and is also
+    /// what makes this reach the reaped path on Linux: swift-corelibs-foundation
+    /// watches a socket it passes to the child, so a grandchild that keeps it
+    /// open holds `Process.isRunning` at true for as long as it lives — measured
+    /// here as the child sitting in state `Z` while Foundation still called it
+    /// running. Darwin reports the exit either way, so the loop is a no-op cost
+    /// there. `/dev/fd` names the open ones on both platforms, which a fixed
+    /// range cannot: the whole suite has far more descriptors open than one test
+    /// does, and Foundation's socket lands well above where a short range stops.
+    /// It is `bash`, not `sh`: dash takes only single-digit descriptors in a
+    /// redirection and reads `exec 30>&-` as a request to run a program called
+    /// `30`, which replaces the grandchild with a failed exec.
+    private func grandchildScript(childPidFile: String,
+                                  grandchildPidFile: String,
+                                  holdingOutput: Bool) throws -> String {
+        let bash = try systemBinary("bash")
+        let child = scratch.appendingPathComponent("child.sh")
+        try """
+        echo $$ > "\(childPidFile)"
+        sleep 0.3
+        \(bash) -c '
+            for entry in /dev/fd/*; do
+                fd="${entry##*/}"
+                case "$fd" in
+                    0|1|2|*[!0-9]*) continue ;;
+                esac
+                eval "exec $fd>&-"
+            done
+            echo $$ > "\(grandchildPidFile)"
+            # Bounded, so a run where nothing signals the group cannot leave
+            # this behind for the rest of the suite.
+            count=0
+            while [ $count -lt 100 ]; do
+                sleep 0.2
+                count=$((count + 1))
+            done
+        '\(holdingOutput ? "" : " > /dev/null") &
+        echo ready
+        """.write(to: child, atomically: true, encoding: .utf8)
+        return child.path
+    }
+
+    /// Waits for a *readable* pid rather than for the file to exist: the shell
+    /// creates it with the redirection and writes the number a moment later.
     private func readPid(at path: String) throws -> pid_t {
-        XCTAssertTrue(waitUntil(2) { FileManager.default.fileExists(atPath: path) },
-                      "the child never recorded its pid")
+        XCTAssertTrue(waitUntil(2) { self.pid(at: path) != nil }, "the child never recorded its pid")
+        return try XCTUnwrap(pid(at: path), "unreadable pid file")
+    }
+
+    private func pid(at path: String) -> pid_t? {
         let text = String(decoding: FileManager.default.contents(atPath: path) ?? Data(), as: UTF8.self)
-        return try XCTUnwrap(pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-                             "unreadable pid file: \(text)")
+        return pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private func hasExited(_ pid: pid_t) -> Bool {

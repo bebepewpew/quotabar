@@ -45,10 +45,14 @@ final class ProbeParsingEdgeTests: XCTestCase {
         XCTAssertNil(jsonNumber("-infinity"))
         XCTAssertNil(jsonNumber("1e400"))
 
-        let snapshot = CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": "NaN", "resetsAt": "inf"]]])
-        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0])
+        // A non-finite percent is not a quota, so the refresh fails rather than
+        // reporting one; a non-finite reset time only costs the countdown.
+        XCTAssertEqual(codexParseFailure(["rateLimits": ["primary": ["usedPercent": "NaN", "resetsAt": "inf"]]]),
+                       "Codex returned an unreadable quota response. Refresh after updating Codex.")
+        let snapshot = try CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": 40, "resetsAt": "inf"]]])
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [40])
         XCTAssertNil(snapshot.windows[0].resetAt)
-        XCTAssertNoThrow(try JSONEncoder().encode(snapshot), "a non-finite percent must never reach the cache")
+        XCTAssertNoThrow(try JSONEncoder().encode(snapshot), "a non-finite value must never reach the cache")
     }
 
     // MARK: - Gemini: normalize
@@ -102,6 +106,64 @@ final class ProbeParsingEdgeTests: XCTestCase {
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [60])
     }
 
+    /// Gemini omits the `Resets:` clause from a bucket it has not computed yet.
+    /// The row parser used to read straight across the line break to find one,
+    /// and reported the *next* model's percentage under the unfinished name.
+    func testGeminiParseKeepsARowWithoutAResetFromClaimingTheNextRowsPercentage() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let transcript = """
+        Model usage
+        Pro ▬▬ 3%
+        Flash ▬▬ 97% Resets: 10:05 AM (16h 18m)
+        (Press Esc to close)
+        """
+        let snapshot = try GeminiTerminalProbe.parse(transcript, now: now)
+        XCTAssertEqual(snapshot.windows.map(\.key), ["flash"], "an unfinished row must not borrow the row below it")
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [97])
+        XCTAssertEqual(try XCTUnwrap(snapshot.windows[0].resetAt).timeIntervalSince(now), 58_680)
+
+        // The same reach, one line shorter: a bare model name is not a row.
+        let bare = try GeminiTerminalProbe.parse("""
+        Model usage
+        Pro
+        Flash ▬▬ 97% Resets: 10:05 AM (16h 18m)
+        """, now: now)
+        XCTAssertEqual(bare.windows.map(\.key), ["flash"])
+    }
+
+    /// A narrow terminal breaks the reset parenthetical across the line it
+    /// opened on. That wrap is a supported row form, so confining the row to a
+    /// single line must not cost it.
+    func testGeminiParseAcceptsAResetParentheticalThatWrapsOnce() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let snapshot = try GeminiTerminalProbe.parse("""
+        Model usage
+        gemini-3.5-flash ▬▬▬ 4.5% Resets: 10:05 AM (16h
+        18m)
+        (Press Esc to close)
+        """, now: now)
+        XCTAssertEqual(snapshot.windows.map(\.key), ["gemini-3.5-flash"])
+        XCTAssertEqual(try XCTUnwrap(snapshot.windows[0].resetAt).timeIntervalSince(now), 58_680)
+    }
+
+    /// The parse runs after the process deadline is already satisfied, so
+    /// nothing bounds it, and `QuotaStore.refresh` holds `isRefreshing` until it
+    /// returns. Rows that open like a model row and never finish used to cost
+    /// quadratic time in three separate ways; 186 KB took about a minute.
+    func testGeminiParseRejectsRowsThatNeverFinishWithoutBacktrackingForever() {
+        let unfinished = ["Pro ▬▬▬ 3% used of the window\n",  // never reaches Resets:
+                          "Pro ▬▬ 3% Resets: 10:05 AM soon\n",  // never reaches an open paren
+                          "Pro ▬▬ 3% Resets: 10:05 AM (16h\n"]  // never closes the paren
+        for row in unfinished {
+            let transcript = String(repeating: row, count: 186_000 / row.count)
+            XCTAssertGreaterThan(transcript.count, 180_000)
+            let started = Date()
+            XCTAssertThrowsError(try GeminiTerminalProbe.parse(transcript, now: Date()))
+            XCTAssertLessThan(Date().timeIntervalSince(started), 1,
+                              "\(transcript.count) characters of unfinished rows took too long to reject")
+        }
+    }
+
     /// Coming back with nothing has two different causes and two different
     /// answers: a row that a redraw cut in half is not the same complaint as a
     /// screen that never held quota at all.
@@ -152,6 +214,35 @@ final class ProbeParsingEdgeTests: XCTestCase {
         XCTAssertNil(GeminiTerminalProbe.parseReset("", now: now))
     }
 
+    /// The digits in the reset column are untrusted. `99999999999999999999d`
+    /// parses to a perfectly finite `Double`, and the reset it used to produce
+    /// trapped the first time anything tried to render it. A week is the longest
+    /// real window, so anything past a month of slack is not one.
+    func testGeminiResetRejectsASpanNoWindowCanHave() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(GeminiTerminalProbe.parseReset("Resets in 31d", now: now),
+                       now.addingTimeInterval(QuotaTime.maximumResetInterval), "the ceiling still parses")
+        XCTAssertNil(GeminiTerminalProbe.parseReset("Resets in 32d", now: now))
+        XCTAssertNil(GeminiTerminalProbe.parseReset("Resets in 99999999999999999999d", now: now))
+        XCTAssertNil(GeminiTerminalProbe.parseReset("Resets in 1d 99999999999999999999h", now: now),
+                     "one absurd term poisons the sum, not just its own unit")
+        XCTAssertNil(GeminiTerminalProbe.parseReset(String(repeating: "9", count: 400) + "s", now: now),
+                     "enough digits overflow to an infinity")
+    }
+
+    /// The same span through the whole parser: a row that is otherwise perfectly
+    /// well formed keeps its usage and loses only the reset.
+    func testGeminiParseKeepsUsageAndDropsAnAbsurdReset() throws {
+        let transcript = """
+        Model usage
+        Pro ▬▬▬▬▬▬ 37% Resets: 10:01 AM (99999999999999999999d)
+        (Press Esc to close)
+        """
+        let snapshot = try GeminiTerminalProbe.parse(transcript, now: Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [37])
+        XCTAssertNil(snapshot.windows[0].resetAt)
+    }
+
     // MARK: - Gemini: failure precedence
 
     /// `failure(in:)` reports the most specific marker in the transcript. These
@@ -170,6 +261,14 @@ final class ProbeParsingEdgeTests: XCTestCase {
              "Gemini authentication is required. Open Gemini CLI and sign in."),
             ("QUOTABAR_INELIGIBLE\n",
              "Gemini rejected this client: Google no longer supports Gemini Code Assist for individual accounts here. Signing in again will not help — see https://antigravity.google."),
+            // A registry that never loads is a symptom of an unfinished sign-in
+            // as much as a stalled startup is, so the sign-in still outranks it.
+            ("Waiting for authentication...\nQUOTABAR_NOT_READY\n",
+             "Gemini has not finished signing in. Run `gemini` once and complete the prompts it shows — folder trust, then sign-in — before refreshing."),
+            // On its own it is the probe refusing to spend a model turn, which
+            // is neither a Gemini timeout nor anything the user broke.
+            ("QUOTABAR_NOT_READY\nQUOTABAR_STATS_TIMEOUT\n",
+             "Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment."),
             ("", nil)
         ]
         for row in rows {
@@ -195,6 +294,23 @@ final class ProbeParsingEdgeTests: XCTestCase {
         let output = "Current session: 120% used · resets Aug 22 at 2am (Europe/Warsaw)"
         let snapshot = try ClaudePrintProbe.parse(output, now: Date())
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [100])
+    }
+
+    /// A pool name and a time-zone name are display text on the row's own line.
+    /// Letting either cross the line break smuggled a newline into a window
+    /// label, and made an unclosed parenthesis send every attempt scanning the
+    /// rest of the transcript for a `)`: 180 KB of it used to take seconds.
+    func testClaudeParseConfinesARowToASingleLine() {
+        XCTAssertEqual(claudeParseFailure("Current week (all\nmodels): 50% used · resets Aug 22 at 2am (Europe/Warsaw)"),
+                       "Claude returned an unreadable /usage response.")
+        XCTAssertEqual(claudeParseFailure("Current week: 50% used · resets Aug 22 at 2am (Europe/\nWarsaw)"),
+                       "Claude returned an unreadable /usage response.")
+
+        let transcript = String(repeating: "Current week (aaaaaaaaaa: 50% used · resets x\n", count: 4_000)
+        let started = Date()
+        XCTAssertEqual(claudeParseFailure(transcript), "Claude returned an unreadable /usage response.")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1,
+                          "\(transcript.count) characters of unclosed parentheses took too long to reject")
     }
 
     /// Coming back with no rows is either a sign-in prompt, which is
@@ -308,7 +424,7 @@ final class ProbeParsingEdgeTests: XCTestCase {
         "primary":{"used_percent":12.5,"resets_at":2000000000,"window_duration_mins":300},\
         "secondary":{"used_percent":80,"resets_at":2000100000,"window_duration_mins":10080}}}
         """))
-        let snapshot = CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
+        let snapshot = try CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
         XCTAssertEqual(snapshot.plan, "team")
         XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Weekly"])
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [12.5, 80])
@@ -318,27 +434,96 @@ final class ProbeParsingEdgeTests: XCTestCase {
     }
 
     /// A window duration between the session and weekly cutoffs is not one we
-    /// can name, so the caller's label stands. A missing percent is 0, not a
-    /// crash, and one above the ceiling is clamped.
-    func testCodexParseKeepsTheCallersLabelForAnUnnamedDurationAndClampsThePercent() {
-        let snapshot = CodexProbe.parse(["rateLimits": [
-            "primary": ["windowDurationMins": 720],
+    /// can name, so the caller's label stands. A percent outside `0...100` is
+    /// Codex rounding, not a broken payload: it is clamped to the exact bound.
+    func testCodexParseKeepsTheCallersLabelForAnUnnamedDurationAndClampsThePercent() throws {
+        let snapshot = try CodexProbe.parse(["rateLimits": [
+            "primary": ["usedPercent": -5, "windowDurationMins": 720],
             "secondary": ["usedPercent": 250, "windowDurationMins": 720]
         ]])
         XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Weekly"])
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0, 100])
         XCTAssertNil(snapshot.windows[0].resetAt)
         XCTAssertNil(snapshot.plan)
+        XCTAssertNil(snapshot.error)
     }
 
-    func testCodexParseNamesWindowsByTheirDurationAtEachCutoff() {
-        func label(minutes: Int) -> String? {
-            CodexProbe.parse(["rateLimits": ["primary": ["windowDurationMins": minutes]]]).windows.first?.label
+    func testCodexParseNamesWindowsByTheirDurationAtEachCutoff() throws {
+        func label(minutes: Int) throws -> String? {
+            try CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": 10, "windowDurationMins": minutes]]])
+                .windows.first?.label
         }
-        XCTAssertEqual(label(minutes: 360), "Session")
-        XCTAssertEqual(label(minutes: 361), "Session", "the caller already calls the primary window a session")
-        XCTAssertEqual(label(minutes: 1_439), "Session")
-        XCTAssertEqual(label(minutes: 1_440), "Weekly")
+        XCTAssertEqual(try label(minutes: 360), "Session")
+        XCTAssertEqual(try label(minutes: 361), "Session", "the caller already calls the primary window a session")
+        XCTAssertEqual(try label(minutes: 1_439), "Session")
+        XCTAssertEqual(try label(minutes: 1_440), "Weekly")
+        XCTAssertEqual(try label(minutes: 10_080), "Weekly", "a genuine weekly window is still believable")
+    }
+
+    /// A window Codex sends without a readable percentage used to become an
+    /// invented `0%` that looked like a measurement and, being a successful
+    /// snapshot, overwrote the cached one. It is a failed refresh instead.
+    func testCodexParseRefusesAWindowWithoutAReadablePercent() {
+        let payloads: [String: [String: Any]] = [
+            "a missing percent": ["rateLimits": ["primary": ["windowDurationMins": 300]]],
+            "a quoted NaN": ["rateLimits": ["primary": ["usedPercent": "NaN"]]],
+            "an overflowing exponent": ["rateLimits": ["primary": ["usedPercent": "1e400"]]],
+            "a null percent": ["rateLimits": ["primary": ["usedPercent": NSNull()]]],
+            "a percent that is a word": ["rateLimits": ["primary": ["used_percent": "unknown"]]],
+            "a percent nested in an object": ["rateLimits": ["primary": ["usedPercent": ["value": 20]]]],
+            "a readable window beside an unreadable one":
+                ["rateLimits": ["primary": ["usedPercent": 23], "secondary": ["resetsAt": 2_000_100_000]]],
+            "an unreadable entry in the limits array":
+                ["rateLimits": ["limits": [["usedPercent": 40], ["windowDurationMins": 10_080]]]]
+        ]
+        for (description, payload) in payloads {
+            XCTAssertEqual(codexParseFailure(payload),
+                           "Codex returned an unreadable quota response. Refresh after updating Codex.",
+                           "\(description) is not a 0% window")
+        }
+    }
+
+    /// The message never carries the payload back: raw provider output in an
+    /// error string is how a token reaches a screenshot.
+    func testCodexParseFailureDoesNotEchoTheRawPayload() {
+        let failure = codexParseFailure(["rateLimits": ["primary": ["usedPercent": "sk-secret-token"]]])
+        XCTAssertEqual(failure, "Codex returned an unreadable quota response. Refresh after updating Codex.")
+        XCTAssertFalse(failure?.contains("sk-secret-token") ?? true)
+    }
+
+    /// `app-server` output is untrusted, and both of these numbers used to reach
+    /// a non-failable `Int(_:)`: a duration of `1e19` trapped inside `parse`
+    /// before anything was displayed at all. A duration no window can have
+    /// leaves the caller's label standing, and an instant no calendar can hold
+    /// is no reset — the usable half of the reply still reads.
+    func testCodexParseSurvivesADurationAndAResetNoIntCanHold() throws {
+        let snapshot = try CodexProbe.parse(["rateLimits": [
+            "primary": ["usedPercent": 50, "windowDurationMins": 1e19, "resetsAt": 1e19],
+            "secondary": ["usedPercent": 88, "windowDurationMins": 1e19]
+        ]])
+        XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Weekly"])
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [50, 88])
+        XCTAssertEqual(snapshot.windows.compactMap(\.resetAt), [])
+        XCTAssertNil(snapshot.error)
+    }
+
+    /// The reset instant on its own, at the boundary. Year 9999 is still a date;
+    /// past it the number is not one, and neither is anything before 1970.
+    ///
+    /// The percentage is present throughout because a window without a readable
+    /// one is a failed refresh in its own right; what is under test here is the
+    /// reset beside it, not the reply being unreadable.
+    func testCodexParseKeepsAResetItCanRepresentAndDropsTheRest() throws {
+        func reset(_ value: Double) throws -> Date? {
+            try CodexProbe.parse(["rateLimits": ["primary": ["usedPercent": 10, "resetsAt": value]]])
+                .windows.first?.resetAt
+        }
+        XCTAssertEqual(try reset(2_000_000_000), Date(timeIntervalSince1970: 2_000_000_000))
+        XCTAssertEqual(try reset(QuotaTime.maximumEpochSeconds),
+                       Date(timeIntervalSince1970: QuotaTime.maximumEpochSeconds))
+        XCTAssertNil(try reset(QuotaTime.maximumEpochSeconds + 1))
+        XCTAssertNil(try reset(-1))
+        XCTAssertNil(try reset(1e19))
     }
 
     /// Newer Codex builds answer with an array instead of named windows.
@@ -349,7 +534,7 @@ final class ProbeParsingEdgeTests: XCTestCase {
         {"usedPercent":64,"window_duration_mins":720},\
         {"usedPercent":91,"windowDurationMins":10080}]}}}
         """))
-        let snapshot = CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
+        let snapshot = try CodexProbe.parse(try XCTUnwrap(reply["result"] as? [String: Any]))
         XCTAssertEqual(snapshot.plan, "enterprise")
         XCTAssertEqual(snapshot.windows.map(\.label), ["Session", "Window 2", "Weekly"])
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [0, 64, 91], "a negative percent is clamped, not shown")
@@ -364,21 +549,21 @@ final class ProbeParsingEdgeTests: XCTestCase {
         {"rateLimits":{"primary":{"usedPercent":30,"windowDurationMins":300},\
         "limits":[{"usedPercent":99,"windowDurationMins":300}]}}
         """))
-        XCTAssertEqual(CodexProbe.parse(reply).windows.map(\.usedPercent), [30])
+        XCTAssertEqual(try CodexProbe.parse(reply).windows.map(\.usedPercent), [30])
     }
 
     /// Anything that is not a window object is skipped rather than counted, and
-    /// a reply holding none of them says so instead of reporting 0%.
+    /// a reply holding none of them fails the refresh instead of reporting 0%.
+    /// A snapshot carrying no windows would still read as a success, which is
+    /// what makes `SnapshotCache.update` drop the provider it had cached.
     func testCodexParseReportsNoActiveWindowsRatherThanInventingThem() throws {
         for json in [#"{"rateLimits":{"planType":"plus"}}"#,
                      #"{"rateLimits":{"primary":"soon","secondary":[1,2]}}"#,
                      #"{"rateLimits":{"limits":"soon"}}"#,
                      #"{"rateLimits":{"limits":[]}}"#,
                      "{}"] {
-            let snapshot = CodexProbe.parse(try XCTUnwrap(CodexProbe.jsonObject(json)))
-            XCTAssertTrue(snapshot.windows.isEmpty, "\(json) holds no quota window")
-            XCTAssertEqual(snapshot.error, "No active quota windows")
-            XCTAssertEqual(snapshot.provider, .codex)
+            XCTAssertEqual(codexParseFailure(try XCTUnwrap(CodexProbe.jsonObject(json))),
+                           "No active quota windows", "\(json) holds no quota window")
         }
     }
 
@@ -396,6 +581,10 @@ final class ProbeParsingEdgeTests: XCTestCase {
 
     private func claudeParseFailure(_ output: String) -> String? {
         failureMessage { try ClaudePrintProbe.parse(output, now: Date()) }
+    }
+
+    private func codexParseFailure(_ result: [String: Any]) -> String? {
+        failureMessage { try CodexProbe.parse(result) }
     }
 
     private func failureMessage(_ body: () throws -> QuotaSnapshot) -> String? {

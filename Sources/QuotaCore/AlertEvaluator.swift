@@ -86,8 +86,12 @@ public actor AlertEvaluator {
     /// the label made a reworded window look brand new — re-alerting at 80% and 95%
     /// though its key never moved — and made two windows whose labels collided
     /// share one entry, silencing the second.
+    ///
+    /// The reset joins it as clamped whole seconds. Every window at 80% or above
+    /// is named here, so identity has to exist even for one whose reset instant
+    /// is further out than an `Int` can hold rather than trapping on it.
     public static func identifier(provider: Provider, window: QuotaWindow, level: AlertLevel) -> String {
-        let period = window.resetAt.map { String(Int($0.timeIntervalSince1970)) } ?? "no-reset"
+        let period = window.resetAt.map { String(QuotaTime.epochSeconds($0)) } ?? "no-reset"
         return "quota.\(provider.id).\(window.key).\(period).\(level.rawValue)"
     }
 
@@ -152,6 +156,6 @@ extension AlertEvaluator {
     /// The reset the forecast belongs to, so one cycle raises one alert. The
     /// advisor only emits this kind when there is a reset to compare against.
     private static func cyclePeriod(of recommendation: Recommendation) -> String {
-        recommendation.cycleResetAt.map { String(Int($0.timeIntervalSince1970)) } ?? "no-reset"
+        recommendation.cycleResetAt.map { String(QuotaTime.epochSeconds($0)) } ?? "no-reset"
     }
 }

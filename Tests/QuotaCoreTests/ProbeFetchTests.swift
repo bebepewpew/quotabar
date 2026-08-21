@@ -109,6 +109,32 @@ final class ProbeFetchTests: XCTestCase {
         }
     }
 
+    /// A reply that is shaped right but carries a window without a percentage is
+    /// the same failure as an unreadable one: `fetch()` refuses it instead of
+    /// handing back an invented 0%, and the child is still torn down.
+    func testCodexFetchRejectsAWindowWithoutAPercent() {
+        let server = FakeCodexServer()
+        server.rateLimitsReply = """
+        {"id":2,"result":{"rateLimits":{"planType":"plus",\
+        "primary":{"resetsAt":2000000000,"windowDurationMins":300},\
+        "secondary":{"usedPercent":71,"windowDurationMins":10080}}}}
+        """
+        let runner = FakeProbeRunner(executables: ["codex": "/usr/bin/codex"], session: server)
+
+        XCTAssertEqual(message(from: { try CodexProbe(runner: runner).fetch() }),
+                       "Codex returned an unreadable quota response. Refresh after updating Codex.")
+        XCTAssertEqual(server.closeCount, 1, "a malformed payload must not orphan the child")
+    }
+
+    func testCodexFetchRejectsAReplyHoldingNoQuotaWindows() {
+        let server = FakeCodexServer()
+        server.rateLimitsReply = #"{"id":2,"result":{"rateLimits":{"planType":"plus"}}}"#
+        let runner = FakeProbeRunner(executables: ["codex": "/usr/bin/codex"], session: server)
+
+        XCTAssertEqual(message(from: { try CodexProbe(runner: runner).fetch() }), "No active quota windows")
+        XCTAssertEqual(server.closeCount, 1)
+    }
+
     func testCodexFetchClosesTheSessionWhenSendingFails() {
         let server = FakeCodexServer()
         server.sendError = ProbeError.message("broken pipe")
@@ -155,27 +181,41 @@ final class ProbeFetchTests: XCTestCase {
     }
 
     /// A signed-out `claude -p /usage` exits non-zero, so the sign-in prompt
-    /// arrives as a thrown command diagnostic. That branch used to reach the UI
-    /// as raw CLI text, with no mention of what to do about it.
+    /// arrives as a thrown command failure. That branch used to reach the UI as
+    /// raw CLI text, with no mention of what to do about it.
+    ///
+    /// The prompt is in the failure's detail rather than in its message, so this
+    /// also pins down that the probe classifies from the detail: matching the
+    /// message would quietly stop recognising a signed-out CLI.
     func testClaudeFetchReportsAuthenticationFromANonZeroExit() {
         for diagnostic in ["Invalid API key · Please run /login",
                            "Error: authentication required, run `claude login`"] {
-            let runner = FakeProbeRunner(executables: ["claude": "/usr/bin/claude"],
-                                         runResult: .failure(ProbeError.message(diagnostic)))
+            let runner = FakeProbeRunner(
+                executables: ["claude": "/usr/bin/claude"],
+                runResult: .failure(ProbeError.commandFailed(.init(command: "claude", status: 1, detail: diagnostic))))
             XCTAssertEqual(message(from: { try ClaudePrintProbe(runner: runner).fetch() }),
                            "Claude authentication is required. Open Claude Code once and sign in.",
                            "\(diagnostic) must become an actionable error")
         }
     }
 
-    /// Only sign-in failures are reworded; every other command failure keeps the
-    /// diagnostic that says what actually went wrong.
+    /// Only sign-in failures are reworded; every other failure keeps the message
+    /// that says what actually went wrong — and for a command failure that
+    /// message is the exit status, never the text the CLI printed.
     func testClaudeFetchKeepsUnrelatedCommandFailuresIntact() {
         for failure: ProbeError in [.message("The CLI did not respond in time"),
-                                    .message("Command failed with exit code 127")] {
+                                    .message("The CLI exited but left its output stream open")] {
             let runner = FakeProbeRunner(executables: ["claude": "/usr/bin/claude"], runResult: .failure(failure))
             XCTAssertEqual(message(from: { try ClaudePrintProbe(runner: runner).fetch() }), failure.errorDescription)
         }
+
+        let secret = "sk-ant-QUOTABARNOTAREALKEY"
+        let unclassified = ProbeError.commandFailed(
+            .init(command: "claude", status: 127, detail: "panic: config \(secret) is corrupt"))
+        let runner = FakeProbeRunner(executables: ["claude": "/usr/bin/claude"], runResult: .failure(unclassified))
+        let reported = message(from: { try ClaudePrintProbe(runner: runner).fetch() })
+        XCTAssertEqual(reported, "claude exited with status 127. Run it in a terminal to see what it reported.")
+        XCTAssertFalse(reported?.contains(secret) ?? true, "an unclassified failure must not quote the CLI")
     }
 
     func testClaudeFetchRejectsAnUnreadableResponse() {
@@ -223,9 +263,86 @@ final class ProbeFetchTests: XCTestCase {
         XCTAssertTrue(script.contains(CommandRunner.tclQuoted("/opt/quotabar test/gemini")),
                       "the discovered path must reach the script quoted, not interpolated raw")
         let timeout = try XCTUnwrap(runner.expectTimeouts.first)
-        XCTAssertGreaterThan(timeout, 0)
+        XCTAssertEqual(timeout, GeminiTerminalProbe.Budget.deadline, "the expect child has to be bounded by the probe's deadline")
         XCTAssertLessThanOrEqual(timeout, 180, "the expect child has to be bounded by a deadline")
         XCTAssertEqual(runner.expectDirectories.compactMap { $0 }.count, 1, "the expect child needs a working directory")
+    }
+
+    /// The outer deadline and the script's own waits used to be picked
+    /// independently — a literal 125 beside a script that may legitimately spend
+    /// 120.8 — so raising any `set timeout` silently ate the margin the teardown
+    /// needs, and the deadline started winning a race it should always lose.
+    /// The relation is checked against what the generated script actually asks
+    /// for, so a wait raised without the deadline following fails here.
+    func testGeminiDeadlineCoversEveryScriptTimeoutAndTheTeardownBudget() throws {
+        let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"],
+                                     expectResult: .success("Model Usage\ngemini-2.5-pro   -   0.0%\n"))
+        _ = try GeminiTerminalProbe(runner: runner).fetch()
+        let script = try XCTUnwrap(runner.expectScripts.first)
+        let deadline = try XCTUnwrap(runner.expectTimeouts.first)
+
+        // Every wait the script can perform, whichever branch it takes, plus the
+        // pauses it spends letting a view settle before it types into it.
+        let waits = try seconds(matching: #"(?m)^ *set timeout (\d+) *$"#, in: script)
+        let pauses = try seconds(matching: #"(?m)^ *after (\d+) *$"#, in: script).map { $0 / 1_000 }
+        let budget = GeminiTerminalProbe.Budget.self
+
+        // `run_command` holds one wait and one pause, and is written once but
+        // run once per command the script types, so each is spent that many
+        // times. Everything else appears exactly where it is spent.
+        let calls = script.components(separatedBy: "run_command \"").count - 1
+        XCTAssertEqual(calls, budget.commandsTyped, "the budget counts a different number of typed commands")
+        let extraRuns = TimeInterval(budget.commandsTyped - 1)
+        let repeatedWait = TimeInterval(budget.commandRegistry) * extraRuns
+        let repeatedPause = TimeInterval(budget.viewSettleMilliseconds) / 1_000 * extraRuns
+
+        XCTAssertEqual(waits.sorted(), [budget.startup, budget.authClassification, budget.commandRegistry,
+                                        budget.statsView, budget.promptReturn, budget.modelView]
+                            .map { TimeInterval($0) }.sorted(),
+                       "the script has a `set timeout` the budget does not know about")
+        XCTAssertEqual(budget.scriptTimeouts, waits.reduce(0, +) + repeatedWait, accuracy: 0.001)
+        XCTAssertEqual(budget.sendPauses, pauses.reduce(0, +) + repeatedPause, accuracy: 0.001)
+        XCTAssertGreaterThan(budget.teardown, 0, "tearing the child down needs a budget of its own")
+        XCTAssertEqual(deadline, budget.deadline, "fetch must use the derived deadline")
+        // Summed in a different order from `Budget.deadline`, so the same
+        // tolerance the equalities above use applies here too.
+        let spent = waits.reduce(0, +) + repeatedWait + pauses.reduce(0, +) + repeatedPause + budget.teardown
+        XCTAssertGreaterThanOrEqual(deadline + 0.001, spent,
+                                    "the deadline no longer covers what the script may spend")
+    }
+
+    /// The script prints its verdict and only then tears the child down, so a
+    /// teardown that outruns the deadline used to replace an actionable message
+    /// with a bare timeout. Whatever reached the caller first still says why.
+    func testGeminiFetchKeepsTheScriptVerdictWhenTheDeadlineWinsTheRace() {
+        let cases: [(partial: String, expected: String)] = [
+            ("Do you trust the files in this folder?\nQUOTABAR_TRUST\n",
+             "Gemini is waiting for a folder-trust decision. Start Gemini CLI once in your home directory and trust the folder."),
+            ("How would you like to authenticate for this project?\nQUOTABAR_AUTH\n",
+             "Gemini authentication is required. Open Gemini CLI and sign in."),
+            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time."),
+            ("QUOTABAR_STARTUP_TIMEOUT\n", "Gemini did not reach its input prompt in time.")
+        ]
+        for expectation in cases {
+            let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"],
+                                         expectResult: .failure(ProbeError.timeout(partialOutput: expectation.partial)))
+            XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: runner).fetch() }), expectation.expected,
+                           "the marker in \(expectation.partial.debugDescription) was thrown away")
+        }
+    }
+
+    /// A deadline with nothing to classify keeps the timeout it came with, and
+    /// so does a failure that is not a timeout at all. A transcript that only
+    /// completed is not a verdict either: half a `/model` view is not reported
+    /// as quota.
+    func testGeminiFetchStillReportsFailuresItCannotClassify() {
+        for failure: ProbeError in [.timeout(partialOutput: ""),
+                                    .timeout(partialOutput: "\u{1B}[2Kloading Gemini…"),
+                                    .timeout(partialOutput: "QUOTABAR_STATS_COMPLETE\n"),
+                                    .message("The CLI exited but left its output stream open")] {
+            let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"], expectResult: .failure(failure))
+            XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: runner).fetch() }), failure.errorDescription)
+        }
     }
 
     func testGeminiFetchParsesTheStatsTableEndToEnd() throws {
@@ -257,7 +374,9 @@ final class ProbeFetchTests: XCTestCase {
             ("Do you trust the files in this folder?\nQUOTABAR_TRUST\n",
              "Gemini is waiting for a folder-trust decision. Start Gemini CLI once in your home directory and trust the folder."),
             ("QUOTABAR_STARTUP_TIMEOUT\n", "Gemini did not reach its input prompt in time."),
-            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time.")
+            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time."),
+            ("QUOTABAR_NOT_READY\n",
+             "Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment.")
         ]
         for expectation in cases {
             let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"],
@@ -307,6 +426,71 @@ final class ProbeFetchTests: XCTestCase {
                        "Gemini returned incomplete quota rows.")
     }
 
+    // MARK: - Untrusted provider output
+
+    /// The whole path the fix is about, with a real child process at one end and
+    /// the machine-readable output at the other: a provider CLI fails for a
+    /// reason no probe recognises, and nothing it printed may reach the
+    /// snapshot, the display rows or `--json`.
+    func testAFailedProviderNeverLeaksItsOutputIntoTheSnapshotOrTheJSON() throws {
+        let secret = "sk-ant-QUOTABARNOTAREALKEY"
+        let runner = try ShellProbeRunner(script: "echo 'Error: credential \(secret) rejected' >&2; exit 3")
+
+        let snapshot = QuotaEngine.load(.claude) { _ in try ClaudePrintProbe(runner: runner).fetch() }
+
+        XCTAssertFalse(snapshot.probeSucceeded)
+        let reported = try XCTUnwrap(snapshot.error)
+        XCTAssertFalse(reported.contains(secret), "the CLI's stderr reached the snapshot: \(reported)")
+        XCTAssertTrue(reported.contains("exited with status 3"), reported)
+
+        let json = String(decoding: try JSONEncoder().encode([snapshot]), as: UTF8.self)
+        XCTAssertFalse(json.contains(secret), "--json carried the CLI's stderr")
+        let rows = QuotaFormatting.rows(for: [snapshot])
+        XCTAssertFalse(rows.compactMap(\.error).joined().contains(secret),
+                       "the text table carried the CLI's stderr")
+    }
+
+    /// …while a sign-in prompt arriving the same way is still recognised, out of
+    /// the detail the failure carries rather than out of its message.
+    func testAFailedProviderStillClassifiesASignInPromptItPrinted() throws {
+        let runner = try ShellProbeRunner(script: "echo 'Invalid API key · Please run /login' >&2; exit 1")
+        XCTAssertEqual(message(from: { try ClaudePrintProbe(runner: runner).fetch() }),
+                       "Claude authentication is required. Open Claude Code once and sign in.")
+    }
+
+    /// `expect` writes the pseudo-terminal transcript to its stdout, so a
+    /// non-zero exit hands the whole Gemini session over as the failure detail.
+    /// A marker in it still has to be classified — and the transcript around it
+    /// still must not be shown.
+    func testGeminiClassifiesItsMarkersWhenTheExpectRunItselfFails() throws {
+        let signedOut = try ShellProbeRunner(script: "echo QUOTABAR_AUTH; exit 1")
+        XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: signedOut).fetch() }),
+                       "Gemini authentication is required. Open Gemini CLI and sign in.")
+
+        let secret = "sk-live-GEMINITRANSCRIPTKEY"
+        let noise = try ShellProbeRunner(script: "echo 'pasted \(secret) into the prompt'; exit 1")
+        let reported = message(from: { try GeminiTerminalProbe(runner: noise).fetch() }) ?? ""
+        XCTAssertFalse(reported.contains(secret), "the transcript reached the UI: \(reported)")
+        // Asserted whole, not by substring: the command `run` was given here is
+        // the runner's `sh`, and in production it is `expect`. Either name would
+        // satisfy "exited with status 1" while telling the user to go and run a
+        // helper they never invoked, so the unclassified message must be the
+        // fixed Gemini one with no command name in it at all.
+        XCTAssertEqual(reported, "Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
+    }
+
+    /// The same when the run left nothing to classify at all. A failing `expect`
+    /// usually died on a Tcl error rather than on a marker branch, so the detail
+    /// is that error or is empty — and neither may be reported against `expect`.
+    func testGeminiNamesItselfWhenAFailedExpectRunLeftNothingToClassify() throws {
+        for script in ["exit 1", "echo 'invalid spawn id id4: spawn failed' >&2; exit 1"] {
+            let runner = try ShellProbeRunner(script: script)
+            XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: runner).fetch() }),
+                           "Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.",
+                           "`\(script)` must not be reported against the expect helper")
+        }
+    }
+
     // MARK: - The default seam
 
     /// A seam is only worth having if its default really is the old behaviour,
@@ -339,19 +523,37 @@ final class ProbeFetchTests: XCTestCase {
                                             before: Date().addingTimeInterval(10), transcript: &transcript))
     }
 
+    /// `runExpect` resolves the binary itself, so a machine without `expect`
+    /// lets the search fall through to the login shells. `ShellStartupFiles`
+    /// keeps those out of the developer's startup files, and covers the guard
+    /// as well so it resolves the same way `runExpect` will.
     func testSystemProbeRunnerRunsExpectOrExplainsItIsMissing() throws {
         let runner = SystemProbeRunner()
-        guard CommandRunner.find("expect") != nil else {
-            XCTAssertThrowsError(try runner.runExpect("puts QUOTABAR_OK", timeout: 5, currentDirectory: nil)) { error in
-                XCTAssertEqual((error as? ProbeError)?.errorDescription, CommandRunner.expectInstallHint)
+        try ShellStartupFiles.suppressed {
+            guard CommandRunner.find("expect") != nil else {
+                XCTAssertThrowsError(try runner.runExpect("puts QUOTABAR_OK", timeout: 5, currentDirectory: nil)) { error in
+                    XCTAssertEqual((error as? ProbeError)?.errorDescription, CommandRunner.expectInstallHint)
+                }
+                return
             }
-            return
+            let output = try runner.runExpect("puts QUOTABAR_OK", timeout: 10, currentDirectory: nil)
+            XCTAssertTrue(output.contains("QUOTABAR_OK"))
         }
-        let output = try runner.runExpect("puts QUOTABAR_OK", timeout: 10, currentDirectory: nil)
-        XCTAssertTrue(output.contains("QUOTABAR_OK"))
     }
 
     // MARK: - Helpers
+
+    /// Every number the pattern's first group captures, read out of the script
+    /// itself rather than restated here — a test that repeated the values would
+    /// pass however far the script and its deadline had drifted apart.
+    private func seconds(matching pattern: String, in script: String) throws -> [TimeInterval] {
+        let regex = try NSRegularExpression(pattern: pattern)
+        let matches = regex.matches(in: script, range: NSRange(script.startIndex..., in: script))
+        XCTAssertFalse(matches.isEmpty, "no `\(pattern)` in the script")
+        return matches.compactMap { match in
+            Range(match.range(at: 1), in: script).flatMap { TimeInterval(script[$0]) }
+        }
+    }
 
     private func message(from body: () throws -> QuotaSnapshot) -> String? {
         do {
@@ -364,6 +566,36 @@ final class ProbeFetchTests: XCTestCase {
             XCTFail("expected a ProbeError, got \(error)")
             return nil
         }
+    }
+}
+
+/// A runner whose commands are a real `/bin/sh` script, so a failing provider
+/// is simulated all the way down to the pipes: the error a probe catches is the
+/// one `CommandRunner` built from what the child actually wrote.
+private struct ShellProbeRunner: ProbeRunner {
+    let shell: String
+    let script: String
+
+    init(script: String) throws {
+        guard let shell = ["/bin/sh", "/usr/bin/sh"].first(where: FileManager.default.isExecutableFile) else {
+            throw XCTSkip("sh is not installed at a standard location on this machine")
+        }
+        self.shell = shell
+        self.script = script
+    }
+
+    func find(_ executable: String) -> String? { shell }
+
+    func run(_ executable: String, _ arguments: [String], timeout: TimeInterval, currentDirectory: URL?) throws -> Data {
+        try CommandRunner.run(shell, ["-c", script], timeout: timeout)
+    }
+
+    func runExpect(_ script: String, timeout: TimeInterval, currentDirectory: URL?) throws -> String {
+        String(decoding: try CommandRunner.run(shell, ["-c", self.script], timeout: timeout), as: UTF8.self)
+    }
+
+    func lineSession(executable: String, arguments: [String], currentDirectory: URL?) throws -> any LineSession {
+        throw ProbeError.message("no scripted session")
     }
 }
 

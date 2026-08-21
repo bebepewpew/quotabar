@@ -85,6 +85,32 @@ final class AlertEvaluatorTests: XCTestCase {
             "quota.Codex.weekly.2000000000.critical")
     }
 
+    /// Every window at 80% or above is named here, including one whose reset
+    /// came from a provider CLI as a number no `Int` can hold. The period is
+    /// clamped to the boundary, so the alert is still identified — and still
+    /// deduplicated — rather than crashing the refresh that raised it.
+    func testIdentifierClampsAResetPeriodNoIntCanHold() {
+        let far = window("Session", 96, resetAt: Date(timeIntervalSince1970: 1e19))
+        XCTAssertEqual(AlertEvaluator.identifier(provider: .codex, window: far, level: .critical),
+                       "quota.Codex.session.\(Int.max).critical")
+
+        let behind = window("Session", 96, resetAt: Date(timeIntervalSince1970: -Double.greatestFiniteMagnitude))
+        XCTAssertEqual(AlertEvaluator.identifier(provider: .codex, window: behind, level: .critical),
+                       "quota.Codex.session.\(Int.min).critical")
+    }
+
+    /// The whole evaluation path, not just the identifier: an alert on such a
+    /// window is raised, is delivered once, and its body renders.
+    func testAWindowWithAnUnrepresentableResetStillAlertsExactlyOnce() async {
+        let evaluator = AlertEvaluator(store: RecordingStateStore())
+        let snapshots = [snapshot(.codex, [window("Session", 96, resetAt: Date(timeIntervalSince1970: 1e19))])]
+        let pending = await evaluator.pending(for: snapshots, now: alertsNow)
+        XCTAssertEqual(pending.map(\.body), ["Session limit is 96% used and resets in over a year."])
+        for alert in pending { await evaluator.markDelivered(alert, at: alertsNow) }
+        let repeated = await evaluator.pending(for: snapshots, now: alertsNow)
+        XCTAssertTrue(repeated.isEmpty)
+    }
+
     /// Gemini reports usage without a reset timestamp. The identifier still has to
     /// be well formed rather than collapsing to an empty period component.
     func testIdentifierUsesNoResetPlaceholderWhenTheWindowHasNoResetDate() {

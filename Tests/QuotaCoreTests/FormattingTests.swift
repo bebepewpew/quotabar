@@ -123,6 +123,43 @@ final class FormattingTests: XCTestCase {
         }
     }
 
+    /// The wording is exact right up to the horizon and general past it, so a
+    /// reset a year and a day out is never rendered as a precise day count that
+    /// only looks authoritative.
+    func testRelativeResetAtTheReportingHorizon() {
+        let day: TimeInterval = 86_400
+        XCTAssertEqual(QuotaFormatting.relativeReset(epoch.addingTimeInterval(364 * day), from: epoch), "in 364d")
+        XCTAssertEqual(QuotaFormatting.relativeReset(epoch.addingTimeInterval(365 * day), from: epoch), "in 365d")
+        XCTAssertEqual(QuotaFormatting.relativeReset(epoch.addingTimeInterval(365 * day + 1), from: epoch),
+                       "in over a year")
+        XCTAssertEqual(QuotaTime.reportingHorizon, 365 * day)
+    }
+
+    /// A reset instant is display data from a provider CLI or from a cache an
+    /// older build wrote, and the status line renders it on every refresh. The
+    /// conversion to whole seconds used to sit above the `guard`, so a finite
+    /// but absurd instant trapped instead of printing anything at all.
+    func testRelativeResetSurvivesAnInstantNoIntCanHold() {
+        XCTAssertEqual(QuotaFormatting.relativeReset(Date(timeIntervalSince1970: 1e19), from: epoch),
+                       "in over a year")
+        XCTAssertEqual(QuotaFormatting.relativeReset(Date(timeIntervalSince1970: .greatestFiniteMagnitude),
+                                                     from: epoch),
+                       "in over a year")
+        XCTAssertEqual(QuotaFormatting.relativeReset(Date(timeIntervalSince1970: -Double.greatestFiniteMagnitude),
+                                                     from: epoch),
+                       "now", "an instant that far behind has already reset")
+        XCTAssertEqual(QuotaFormatting.relativeReset(Date(timeIntervalSince1970: -1e19), from: epoch), "now")
+    }
+
+    /// The same instant reaches the row builder, which is what the menu bar and
+    /// the CLI status table are both drawn from.
+    func testRowsRenderAResetInstantNoIntCanHold() throws {
+        let window = QuotaWindow(label: "Session", usedPercent: 96,
+                                 resetAt: Date(timeIntervalSince1970: 1e19))
+        let rows = QuotaFormatting.rows(for: [QuotaSnapshot(provider: .codex, windows: [window])], now: epoch)
+        XCTAssertEqual(try XCTUnwrap(rows.first).resetText, "resets in over a year")
+    }
+
     // MARK: - rows
 
     func testRowsFlattenWindowsAndKeepFailedProvidersVisible() {

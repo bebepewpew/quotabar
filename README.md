@@ -340,7 +340,18 @@ causes:
 | `Gemini rejected this client…` | Google has withdrawn this account's Gemini Code Assist tier. Signing in again cannot fix it; see <https://antigravity.google>. |
 | `Gemini is waiting for a folder-trust decision` | Gemini CLI asks whether to trust the working directory before it will start. Run `gemini` once and answer it. |
 | `Gemini authentication is required` | Genuinely signed out. Run `gemini` and sign in. |
+| `Gemini had not loaded its slash commands yet` | Gemini CLI was still discovering commands when the probe reached its prompt. QuotaBar stops there rather than let `/stats` reach the model as an ordinary prompt, so nothing is spent. Refresh again in a moment. |
 | `… is not installed` | The provider's CLI was not found on `PATH` or in the usual install locations. |
+| `The CLI did not respond in time` | The command was still running at its deadline and its process group was terminated. |
+| `claude exited with status 3` | The CLI ran and failed for a reason QuotaBar does not recognise. Run that command in a terminal to read what it said. |
+| `Gemini CLI did not finish` | The pseudo-terminal session ended for a reason QuotaBar does not recognise. Run `gemini` in a terminal to read what it says. |
+
+QuotaBar never repeats what a provider CLI printed. Its output is untrusted text
+that can carry an API key or the contents of a prompt, and an error message ends
+up in a menu card, in `--json` and in screenshots, so an unrecognised failure is
+reported as the command and its exit status instead. The Gemini probe drives its
+CLI through `expect`, so it names Gemini rather than the helper you never
+invoked. The output itself is one command away for whoever wants it.
 
 A failed provider never clears the values QuotaBar already had; the last
 successful reading stays visible with the error beside it.
@@ -349,8 +360,10 @@ successful reading stays visible with the error beside it.
 
 All probes execute installed CLIs locally. Gemini runs inside a fixed-size
 pseudo-terminal with a bounded deadline; QuotaBar sends only `/stats` and
-terminates the complete process group afterward. Failed refreshes preserve the
-last successful values rather than clearing the corresponding card.
+terminates the complete process group afterward. How much a CLI can make
+QuotaBar hold is bounded too: a probe reads at most 8 MB from a stream before it
+abandons the run, and reports that rather than the flood. Failed refreshes
+preserve the last successful values rather than clearing the corresponding card.
 
 State is stored per platform: `UserDefaults` on macOS, and
 `${XDG_CONFIG_HOME:-~/.config}/quotabar/state.json` on Linux.

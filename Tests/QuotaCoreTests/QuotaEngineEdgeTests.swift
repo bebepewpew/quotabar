@@ -18,15 +18,22 @@ final class QuotaEngineEdgeTests: XCTestCase {
 
     /// Providers with no CLI installed here. Resolved once: `CommandRunner.find`
     /// falls back to login shells, which is not worth repeating per test.
-    private static let uninstalled: [Provider] =
+    ///
+    /// The default locator is the point of these tests, so the ladder cannot be
+    /// staged the way `CommandRunnerEdgeTests` stages it. `ShellStartupFiles`
+    /// keeps the shells it runs from sourcing the developer's startup files
+    /// instead, and every call below resolves under the same staging so they
+    /// all see one answer.
+    private static let uninstalled: [Provider] = ShellStartupFiles.suppressed {
         Provider.allCases.filter { CommandRunner.find($0.executableName) == nil }
+    }
 
     // MARK: - The default locator
 
     /// Discovery with no locator injected has to agree with `CommandRunner.find`
     /// and keep `Provider.allCases` order, whatever this machine has installed.
     func testDiscoverProvidersWithTheDefaultLocatorMatchesTheInstalledCLIs() async {
-        let discovered = await QuotaEngine.discoverProviders()
+        let discovered = await ShellStartupFiles.suppressed { await QuotaEngine.discoverProviders() }
         let installed = Provider.allCases.filter { !Self.uninstalled.contains($0) }
         XCTAssertEqual(discovered, installed)
         XCTAssertEqual(discovered, Provider.allCases.filter(discovered.contains),
@@ -39,13 +46,15 @@ final class QuotaEngineEdgeTests: XCTestCase {
     /// come back as a failed snapshot naming it, not as a trap or a blank error.
     func testTheDefaultLoaderReportsEveryUninstalledProviderAsMissing() throws {
         try XCTSkipIf(Self.uninstalled.isEmpty, "every provider CLI is installed on this machine")
-        for provider in Self.uninstalled {
-            let snapshot = QuotaEngine.load(provider)
-            XCTAssertEqual(snapshot.provider, provider)
-            XCTAssertFalse(snapshot.probeSucceeded, provider.rawValue)
-            XCTAssertTrue(snapshot.windows.isEmpty, provider.rawValue)
-            // `ProbeError.missing` is spelled with the provider's display name.
-            XCTAssertEqual(snapshot.error, "\(provider.rawValue) is not installed")
+        ShellStartupFiles.suppressed {
+            for provider in Self.uninstalled {
+                let snapshot = QuotaEngine.load(provider)
+                XCTAssertEqual(snapshot.provider, provider)
+                XCTAssertFalse(snapshot.probeSucceeded, provider.rawValue)
+                XCTAssertTrue(snapshot.windows.isEmpty, provider.rawValue)
+                // `ProbeError.missing` is spelled with the provider's display name.
+                XCTAssertEqual(snapshot.error, "\(provider.rawValue) is not installed")
+            }
         }
     }
 
@@ -56,11 +65,11 @@ final class QuotaEngineEdgeTests: XCTestCase {
         let provider = try XCTUnwrap(Self.uninstalled.first)
         let expected = "\(provider.rawValue) is not installed"
 
-        let single = await QuotaEngine.loadAsync(provider)
+        let single = await ShellStartupFiles.suppressed { await QuotaEngine.loadAsync(provider) }
         XCTAssertEqual(single.error, expected)
         XCTAssertFalse(single.probeSucceeded)
 
-        let refreshed = await QuotaEngine.refresh([provider])
+        let refreshed = await ShellStartupFiles.suppressed { await QuotaEngine.refresh([provider]) }
         XCTAssertEqual(refreshed.map(\.provider), [provider])
         XCTAssertEqual(refreshed.map(\.error), [expected])
     }

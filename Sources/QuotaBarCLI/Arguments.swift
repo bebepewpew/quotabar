@@ -104,18 +104,23 @@ struct Arguments {
 
     /// `90m`, `24h`, `7d`, `3w`. Bare digits are days, which is what people mean
     /// when they type `--since 30`.
+    ///
+    /// `Double(_:)` reads `1e400` as an infinity and `1e300` as a span no report
+    /// can describe, and either became a history window that overflowed the
+    /// seconds-to-`Int` conversions downstream. `QuotaTime.span` bounds them
+    /// here, at the edge, so the invocation is rejected with the same message as
+    /// any other unusable `--since` instead of crashing later.
     static func duration(_ text: String) -> TimeInterval? {
         let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
         guard !trimmed.isEmpty else { return nil }
         let multipliers: [Character: TimeInterval] = ["m": 60, "h": 3_600, "d": 86_400, "w": 604_800]
         guard let unit = trimmed.last else { return nil }
         if unit.isNumber {
-            guard let days = Double(trimmed), days > 0 else { return nil }
-            return days * 86_400
+            guard let days = Double(trimmed) else { return nil }
+            return QuotaTime.span(days * 86_400)
         }
-        guard let multiplier = multipliers[unit],
-              let value = Double(trimmed.dropLast()), value > 0 else { return nil }
-        return value * multiplier
+        guard let multiplier = multipliers[unit], let value = Double(trimmed.dropLast()) else { return nil }
+        return QuotaTime.span(value * multiplier)
     }
 
     static let usage = """

@@ -84,13 +84,100 @@ private func probeWorkingDirectory() -> URL {
 
 
 struct GeminiTerminalProbe: QuotaProbe {
+    /// The time the expect script may spend, named once and read twice: the
+    /// script interpolates these values, and `deadline` — the bound `fetch()`
+    /// puts on the child — is derived from the same numbers.
+    ///
+    /// They used to be chosen independently, a literal 125 beside a script whose
+    /// own waits summed to 120.8, and raising any `set timeout` silently ate the
+    /// margin the teardown needs. When the outer deadline wins that race the
+    /// script is killed mid-`stop_child`, so "Gemini is waiting for a
+    /// folder-trust decision" degrades to "The CLI did not respond in time".
+    ///
+    /// `scriptTimeouts` sums *every* wait, including branches that cannot both
+    /// run. Each `set timeout` bounds at most one `expect`, so their sum bounds
+    /// any path through the script, and a branch added later cannot quietly
+    /// break the relation. The one wait that is written once and spent more than
+    /// once is `run_command`'s, so it is counted `commandsTyped` times.
+    enum Budget {
+        /// Reaching the trust prompt, the sign-in menu, or the input prompt.
+        static let startup = 30
+        /// The tier rejection that arrives a moment after the sign-in menu.
+        static let authClassification = 6
+        /// Waiting for Gemini's command registry to offer a typed slash command
+        /// back as a suggestion, which is the proof that Return will run it
+        /// rather than send it to the model. Spent inside `run_command`, so once
+        /// per command the script types.
+        static let commandRegistry = 10
+        /// `/stats` rendering its session view, which is what refreshes quota.
+        static let statsView = 45
+        /// Returning to the input prompt once `/stats` has finished.
+        static let promptReturn = 15
+        /// `/model` rendering the account-wide buckets.
+        static let modelView = 30
+        /// Milliseconds to let a view settle before typing into it. Also inside
+        /// `run_command`, so also spent once per command.
+        static let viewSettleMilliseconds = 300
+        /// The slash commands the script types: `/stats`, then `/model`.
+        static let commandsTyped = 2
+        /// `stop_child`: a Ctrl-C, two signals to the process group, a close and
+        /// a wait, plus the interpreter exiting and its pipes draining. The
+        /// script has to fit all of that inside the deadline, because a caller
+        /// that kills it mid-teardown loses the verdict it already printed.
+        static let teardown: TimeInterval = 5
+
+        /// What the script's own `expect` waits can add up to.
+        static var scriptTimeouts: TimeInterval {
+            TimeInterval(startup + authClassification + statsView + promptReturn + modelView
+                         + commandRegistry * commandsTyped)
+        }
+        /// The pauses the script spends letting a view settle before typing.
+        static var sendPauses: TimeInterval {
+            TimeInterval(commandsTyped * viewSettleMilliseconds) / 1_000
+        }
+        /// The bound `fetch()` puts on the child: never less than the script can
+        /// legitimately spend, so the script's own diagnostic wins the race.
+        static var deadline: TimeInterval { scriptTimeouts + sendPauses + teardown }
+    }
+
     let runner: any ProbeRunner
 
     init(runner: any ProbeRunner = SystemProbeRunner()) { self.runner = runner }
 
     func fetch() throws -> QuotaSnapshot {
         guard let binary = runner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
-        let output = try runner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
+        let output: String
+        do {
+            output = try runner.runExpect(Self.expectScript(binary: binary),
+                                          timeout: Budget.deadline, currentDirectory: probeWorkingDirectory())
+        } catch {
+            // `expect` writes the whole pseudo-terminal transcript to its stdout,
+            // so a non-zero exit carries the session — markers and all — as the
+            // command failure's detail, and an expired deadline carries whatever
+            // reached us before it. The markers still say what blocked the probe;
+            // the transcript itself must never reach the UI.
+            //
+            // Neither may the failure's own message. The executable handed to
+            // `run` is the `expect` helper, so the message names *that* —
+            // "expect exited with status 1" points at a binary the user never
+            // invoked and cannot usefully run. Anything this probe cannot
+            // classify is reported against the CLI it is actually for.
+            guard let probeError = error as? ProbeError else { throw error }
+            switch probeError {
+            case .commandFailed(let commandFailure):
+                throw Self.failure(in: commandFailure.detail)
+                    ?? .unsupported("Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
+            case .timeout(let partial):
+                // The script prints its marker and only then tears the child
+                // down, so a teardown that outlives the deadline used to throw
+                // away an actionable message. What arrived before the deadline
+                // still says why; anything else keeps the error it came with.
+                guard let failure = Self.failure(in: partial) else { throw error }
+                throw failure
+            default:
+                throw error
+            }
+        }
         if let failure = Self.failure(in: output) { throw failure }
         return try Self.parse(output, now: Date())
     }
@@ -123,7 +210,8 @@ struct GeminiTerminalProbe: QuotaProbe {
         // outranks them. The phrase alone is not a verdict — a signed-in client
         // shows it briefly while refreshing a token and then reaches its prompt.
         if Self.mentions("waiting for authentication", in: output),
-           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT") {
+           output.contains("QUOTABAR_TRUST") || output.contains("QUOTABAR_STARTUP_TIMEOUT")
+            || output.contains("QUOTABAR_NOT_READY") {
             return .unsupported("Gemini has not finished signing in. Run `gemini` once and complete the prompts it shows — folder trust, then sign-in — before refreshing.")
         }
         if output.contains("QUOTABAR_TRUST") {
@@ -131,6 +219,12 @@ struct GeminiTerminalProbe: QuotaProbe {
         }
         if output.contains("QUOTABAR_AUTH") {
             return .unsupported("Gemini authentication is required. Open Gemini CLI and sign in.")
+        }
+        // Not a timeout of Gemini's: the probe stopped itself, on purpose,
+        // because pressing Enter on a slash command the registry has not
+        // registered yet submits it to the model as a billed prompt.
+        if output.contains("QUOTABAR_NOT_READY") {
+            return .unsupported("Gemini had not loaded its slash commands yet, so QuotaBar stopped instead of sending /stats to the model. Refresh again in a moment.")
         }
         if output.contains("QUOTABAR_STARTUP_TIMEOUT") {
             return .unsupported("Gemini did not reach its input prompt in time.")
@@ -149,6 +243,10 @@ struct GeminiTerminalProbe: QuotaProbe {
             # comes back and the probe reports a bare timeout instead of the
             # reason. Signal the spawned process *group*, which is what
             # AGENTS.md requires and what actually releases the pipe.
+            # End of file says the slave side of the pty was closed, not that
+            # everything Gemini spawned has exited, so the eof branches call
+            # this too. Every step is caught: on eof the spawn id is already
+            # closed, and the send and the close then fail harmlessly.
             set child [exp_pid]
             catch {send -- "\\003"}
             catch {exec kill -TERM -$child}
@@ -160,7 +258,7 @@ struct GeminiTerminalProbe: QuotaProbe {
             # The sign-in menu is also what Gemini shows when Google has withdrawn
             # the account's tier, and the rejection arrives a moment later. Wait for
             # it rather than reporting a sign-in that cannot succeed.
-            set timeout 6
+            set timeout \(Budget.authClassification)
             expect {
                 -re {(?i)(no longer supported|migrate to the antigravity|ineligible)} {puts "QUOTABAR_INELIGIBLE"}
                 timeout {puts "QUOTABAR_AUTH"}
@@ -169,7 +267,45 @@ struct GeminiTerminalProbe: QuotaProbe {
             stop_child
             exit 0
         }
-        set timeout 30
+        proc run_command {text description} {
+            # Typing a slash command is not the same as running one. Gemini's
+            # handleSlashCommand returns early for as long as the command
+            # registry is still loading -- filesystem, MCP and skill discovery,
+            # none of which the composer placeholder waits for -- and the text
+            # is then submitted to the model as an ordinary, billed prompt
+            # against the quota this probe exists to read. It is silent, too:
+            # the transcript never matches, so the only trace is a stray turn.
+            #
+            # The suggestion list renders from the loaded registry and from
+            # nothing else, and every row carries the command's own description,
+            # so seeing that description is proof that Enter will run the
+            # command rather than send it. Each pattern is the loosest
+            # distinctive fragment of one description, so a reworded one still
+            # matches; when none arrives Enter is never pressed and the probe
+            # reports why instead of spending a turn.
+            #
+            # Anything buffered before the keystrokes predates this command and
+            # can prove nothing about it, so drop it first.
+            expect *
+            after \(Budget.viewSettleMilliseconds)
+            send -- $text
+            set timeout \(Budget.commandRegistry)
+            expect {
+                -re $description {}
+                -re {(?i)(no longer supported|migrate to the antigravity)} {puts "QUOTABAR_INELIGIBLE"; stop_child; exit 0}
+                -re {(?i)do you trust the files in this folder} {puts "QUOTABAR_TRUST"; stop_child; exit 0}
+                -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
+                timeout {puts "QUOTABAR_NOT_READY"; stop_child; exit 0}
+                eof {puts "QUOTABAR_NOT_READY"; stop_child; exit 0}
+            }
+            # A suggestion row names the command the next stage is about to wait
+            # for, so drop the redraws of it that are still in flight. Otherwise
+            # that stage matches the row it can already see instead of waiting
+            # for the output the command has yet to print.
+            expect *
+            send -- "\\r"
+        }
+        set timeout \(Budget.startup)
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
         spawn -noecho \(CommandRunner.tclQuoted(binary)) --screen-reader --skip-trust
@@ -180,39 +316,33 @@ struct GeminiTerminalProbe: QuotaProbe {
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
             -re {Type your message or @path/to/file} {}
             timeout {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STARTUP_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STARTUP_TIMEOUT"; stop_child; exit 0}
         }
         # Full /stats performs the quota refresh in Gemini 0.56, but its default
         # view contains session data only. Wait for it to finish before opening
         # /model, which renders the freshly updated account-wide quota buckets.
-        after 300
-        send -- "/stats"
-        after 100
-        send -- "\\r"
-        set timeout 45
+        run_command "/stats" {(?i)(check\\s+session\\s+stats|usage:\\s*/stats)}
+        set timeout \(Budget.statsView)
         expect {
             -re {(?i)Session Stats} {}
             -re {(?i)(no longer supported|migrate to the antigravity)} {puts "QUOTABAR_INELIGIBLE"; stop_child; exit 0}
             -re {(?i)do you trust the files in this folder} {puts "QUOTABAR_TRUST"; stop_child; exit 0}
             -re {(?i)(sign in|log in|authentication required|select.*auth)} {classify_auth}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
         }
-        set timeout 15
+        set timeout \(Budget.promptReturn)
         expect {
             -re {Type your message or @path/to/file} {}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
         }
-        after 300
-        send -- "/model"
-        after 100
-        send -- "\\r"
-        set timeout 30
+        run_command "/model" {(?i)(manage\\s+model\\s+configuration|model\\s+configuration)}
+        set timeout \(Budget.modelView)
         expect {
             -re {(?i)\\(Press Esc to close\\)} {puts "QUOTABAR_STATS_COMPLETE"}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
-            eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
+            eof {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
         }
         stop_child
         """
@@ -220,7 +350,14 @@ struct GeminiTerminalProbe: QuotaProbe {
 
     static func parse(_ raw: String, now: Date) throws -> QuotaSnapshot {
         let output = normalize(raw)
-        let modelPattern = #"(?ims)^\s*(Flash Lite|Flash|Pro|gemini-[a-z0-9._-]+)\s+.*?(\d{1,3}(?:\.\d+)?)%\s+Resets:\s+.*?\(([^)]*)\)"#
+        // Every run here is confined to one line, and the parenthetical to two.
+        // A dotall `.*?` between the model name and the percent let a row
+        // without a `Resets:` clause reach into the row below and report the
+        // neighbour's percentage under its own name, and made a transcript of
+        // rows that never complete cost quadratic time to reject. `[^\S\n]` is
+        // `\s` minus the newline; the reset parenthetical may still wrap once,
+        // which is how a narrow terminal breaks `(16h 18m)`.
+        let modelPattern = #"(?im)^[^\S\n]*(Flash Lite|Flash|Pro|gemini-[a-z0-9._-]+)[^\S\n]+[^\n]*?(\d{1,3}(?:\.\d+)?)%[^\S\n]+Resets:[^\S\n]+[^\n]*?\(([^)\n]*(?:\n[^)\n]*)?)\)"#
         let modelRegex = try NSRegularExpression(pattern: modelPattern)
         var windows: [QuotaWindow] = []
         var seen = Set<String>()
@@ -275,16 +412,21 @@ struct GeminiTerminalProbe: QuotaProbe {
         }.joined(separator: " ")
     }
 
+    /// Reads "16h 14m" and its spellings into an instant. The digits are
+    /// untrusted: a row can read `99999999999999999999d`, which parses to a
+    /// perfectly finite `Double` and then to a reset no `Int` can hold. A span
+    /// longer than a quota window is a malformed number, so it yields no reset
+    /// rather than a date the renderer would trap on.
     static func parseReset(_ text: String, now: Date) -> Date? {
         let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*(d(?:ays?)?|h(?:ours?)?|m(?:inutes?)?|s(?:econds?)?)\b"#, options: .caseInsensitive)
         var interval: TimeInterval = 0
         for match in regex?.matches(in: text, range: NSRange(text.startIndex..., in: text)) ?? [] {
             guard let numberRange = Range(match.range(at: 1), in: text), let unitRange = Range(match.range(at: 2), in: text),
-                  let number = Double(text[numberRange]) else { continue }
+                  let number = Double(text[numberRange]), number.isFinite else { continue }
             let multiplier: TimeInterval = ["d": 86_400, "h": 3_600, "m": 60, "s": 1][String(text[unitRange].lowercased().prefix(1))] ?? 0
             interval += number * multiplier
         }
-        return interval > 0 ? now.addingTimeInterval(interval) : nil
+        return QuotaTime.resetInstant(after: interval, from: now)
     }
 }
 
@@ -300,13 +442,25 @@ struct ClaudePrintProbe: QuotaProbe {
             data = try runner.run(binary, ["-p", "/usage"], timeout: 45, currentDirectory: probeWorkingDirectory())
         } catch {
             // A signed-out `claude -p /usage` exits non-zero, so its "Please run
-            // /login" arrives as a thrown command diagnostic rather than as
-            // output to parse. Only the zero-exit branch used to be classified,
-            // which left the actionable step buried under raw CLI text.
-            throw Self.authenticationFailure(in: (error as? ProbeError)?.errorDescription ?? error.localizedDescription) ?? error
+            // /login" arrives as a thrown command failure rather than as output
+            // to parse. Only the zero-exit branch used to be classified, which
+            // left the actionable step buried under raw CLI text.
+            throw Self.authenticationFailure(in: Self.classifiableText(of: error)) ?? error
         }
         let output = String(decoding: data, as: UTF8.self)
         return try Self.parse(output, now: Date())
+    }
+
+    /// The text a thrown failure may be classified from.
+    ///
+    /// A command failure keeps the CLI's own output out of its message on
+    /// purpose, so the sign-in prompt is only in the detail — reading the
+    /// message instead would silently stop recognising a signed-out CLI. The
+    /// detail is matched here and never returned: what comes back out of
+    /// `authenticationFailure` is fixed text.
+    static func classifiableText(of error: Error) -> String {
+        guard let probe = error as? ProbeError else { return error.localizedDescription }
+        return probe.diagnosticDetail ?? probe.localizedDescription
     }
 
     /// Untrusted CLI text in, one concise actionable error out — or nil when the
@@ -318,7 +472,10 @@ struct ClaudePrintProbe: QuotaProbe {
 
     static func parse(_ output: String, now: Date) throws -> QuotaSnapshot {
         var windows: [QuotaWindow] = []
-        let pattern = #"(?im)^Current (session|week)(?: \(([^)]+)\))?:\s*(\d{1,3}(?:\.\d+)?)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)\s*$"#
+        // `[^)\n]` rather than `[^)]`: an unclosed parenthesis used to send
+        // each attempt scanning the rest of the transcript for a `)`, which is
+        // quadratic over untrusted output. A row is one line.
+        let pattern = #"(?im)^Current (session|week)(?: \(([^)\n]+)\))?:\s*(\d{1,3}(?:\.\d+)?)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)\n]+)\)\s*$"#
         let regex = try NSRegularExpression(pattern: pattern)
         for match in regex.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
             guard let kindRange = Range(match.range(at: 1), in: output),
@@ -371,6 +528,9 @@ struct CodexProbe: QuotaProbe {
         #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"QuotaBar","title":"QuotaBar","version":"0.1.0"},"capabilities":{}}}"#
     static let initializedNotification = #"{"method":"initialized"}"#
     static let rateLimitsRequest = #"{"id":2,"method":"account/rateLimits/read"}"#
+    /// One message for every shape of unreadable reply: a payload that is not a
+    /// result object, and a window inside one whose percentage is not a number.
+    static let unreadableReply = "Codex returned an unreadable quota response. Refresh after updating Codex."
 
     let runner: any ProbeRunner
 
@@ -401,9 +561,9 @@ struct CodexProbe: QuotaProbe {
         guard let reply = session.waitForLine(matching: { Self.identifier(of: $0) == 2 },
                                               before: deadline, transcript: &transcript),
               let result = Self.jsonObject(reply)?["result"] as? [String: Any] else {
-            throw Self.failure(transcript, detail: "Codex returned an unreadable quota response. Refresh after updating Codex.")
+            throw Self.failure(transcript, detail: Self.unreadableReply)
         }
-        return Self.parse(result)
+        return try Self.parse(result)
     }
 
     static func jsonObject(_ line: String) -> [String: Any]? {
@@ -423,23 +583,43 @@ struct CodexProbe: QuotaProbe {
         return .unsupported(detail)
     }
 
-    static func parse(_ result: [String: Any]) -> QuotaSnapshot {
+    /// Reads the quota windows out of an `account/rateLimits/read` result, or
+    /// throws the reason the payload could not be read.
+    ///
+    /// A window whose percentage is missing, quoted `"NaN"` or otherwise not a
+    /// finite number is a failed refresh, not a `0%` window. Inventing the zero
+    /// both reported a quota nobody measured and, because the snapshot then
+    /// looked successful, let it overwrite — or, with no windows at all, delete —
+    /// the last good reading the cache was holding. Throwing keeps the retention
+    /// seam in `QuotaEngine.load` and `SnapshotCache.update` in charge instead. A
+    /// percentage that *is* a number is still clamped rather than refused, since
+    /// `-5` and `250` are Codex rounding, not a broken payload.
+    static func parse(_ result: [String: Any]) throws -> QuotaSnapshot {
         let root = (result["rateLimits"] as? [String: Any]) ?? result
         let plan = root["planType"] as? String ?? root["plan_type"] as? String
         var windows: [QuotaWindow] = []
-        func add(_ value: Any?, label: String) {
+        func add(_ value: Any?, label: String) throws {
             guard let item = value as? [String: Any] else { return }
-            let used = jsonNumber(item["usedPercent"]) ?? jsonNumber(item["used_percent"]) ?? 0
+            guard let used = jsonNumber(item["usedPercent"]) ?? jsonNumber(item["used_percent"]) else {
+                throw ProbeError.unsupported(Self.unreadableReply)
+            }
             let timestamp = jsonNumber(item["resetsAt"]) ?? jsonNumber(item["resets_at"])
-            let minutes = (jsonNumber(item["windowDurationMins"]) ?? jsonNumber(item["window_duration_mins"])).map { Int($0) }
+            // Both numbers are untrusted and both used to reach a non-failable
+            // `Int(_:)`: a duration of `1e19` trapped here, before anything was
+            // displayed. A duration no window can have leaves the caller's
+            // label standing, and an instant no calendar can hold is no reset.
+            let minutes = (jsonNumber(item["windowDurationMins"]) ?? jsonNumber(item["window_duration_mins"]))
+                .flatMap(QuotaTime.windowMinutes)
             let resolvedLabel = minutes.map { $0 >= 1_440 ? "Weekly" : ($0 <= 360 ? "Session" : label) } ?? label
-            windows.append(.init(label: resolvedLabel, usedPercent: min(max(used, 0), 100), resetAt: timestamp.map(Date.init(timeIntervalSince1970:))))
+            windows.append(.init(label: resolvedLabel, usedPercent: min(max(used, 0), 100),
+                                 resetAt: timestamp.flatMap { QuotaTime.resetInstant(epochSeconds: $0) }))
         }
-        add(root["primary"], label: "Session")
-        add(root["secondary"], label: "Weekly")
+        try add(root["primary"], label: "Session")
+        try add(root["secondary"], label: "Weekly")
         if windows.isEmpty, let limits = root["limits"] as? [[String: Any]] {
-            for (index, item) in limits.enumerated() { add(item, label: index == 0 ? "Session" : "Window \(index + 1)") }
+            for (index, item) in limits.enumerated() { try add(item, label: index == 0 ? "Session" : "Window \(index + 1)") }
         }
-        return .init(provider: .codex, windows: windows, plan: plan, error: windows.isEmpty ? "No active quota windows" : nil)
+        guard !windows.isEmpty else { throw ProbeError.unsupported("No active quota windows") }
+        return .init(provider: .codex, windows: windows, plan: plan)
     }
 }

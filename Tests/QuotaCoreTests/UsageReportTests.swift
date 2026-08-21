@@ -235,6 +235,28 @@ final class UsageReportTests: XCTestCase {
         XCTAssertEqual(UsageReport.spanText(7 * 86_400), "7d")
     }
 
+    /// The span behind the footer comes from `--since`, which the CLI bounds
+    /// before it gets here. These are the same conversions with the bound gone:
+    /// clamped, so a span from anywhere else prints a number instead of
+    /// trapping on `Int(_:)` while a history report is being drawn.
+    func testSpanTextClampsASpanNoIntCanHold() {
+        XCTAssertEqual(UsageReport.spanText(QuotaTime.maximumSpan), "36500d")
+        XCTAssertEqual(UsageReport.spanText(1e300), "\(Int.max)d")
+        XCTAssertEqual(UsageReport.spanText(.infinity), "\(Int.max)d")
+        XCTAssertEqual(UsageReport.spanText(.nan), "0d", "a NaN falls to the default arm and reads as zero")
+    }
+
+    /// And through the report the footer is part of. This is the shape an
+    /// unbounded `--since` produced: a `from` so far behind `to` that the span
+    /// in days overflowed the conversion the footer is built from.
+    func testHistoryFooterRendersASpanNoIntCanHold() throws {
+        let report = UsageReport.history(samples: ramp(session, from: 0, to: 10, count: 2),
+                                         from: Date(timeIntervalSince1970: -1e19), to: start)
+        let footer = try XCTUnwrap(report.components(separatedBy: "\n").last)
+        XCTAssertNotNil(footer.range(of: #"^\d+d to 2023-11-14 · each cell \d+d$"#, options: .regularExpression),
+                        footer)
+    }
+
     // MARK: - Fixtures
 
     private func ramp(_ series: HistorySeriesID, from: Double, to: Double, count: Int) -> [UsageSample] {

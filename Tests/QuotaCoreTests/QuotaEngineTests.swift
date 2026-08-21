@@ -53,12 +53,18 @@ final class QuotaEngineTests: XCTestCase {
         XCTAssertNil(snapshot.error)
     }
 
+    /// A timeout carries whatever the child had already printed so the probe can
+    /// classify it. That payload is untrusted CLI output and must never reach the
+    /// snapshot the menu and the CLI display.
     func testLoadTurnsAThrownProbeErrorIntoAFailedSnapshot() {
-        let snapshot = QuotaEngine.load(.gemini) { _ in throw ProbeError.timeout }
+        let timeout = ProbeError.timeout(partialOutput: "QUOTABAR_TRUST\nsecret-transcript-42")
+        let snapshot = QuotaEngine.load(.gemini) { _ in throw timeout }
         XCTAssertEqual(snapshot.provider, .gemini)
         XCTAssertFalse(snapshot.probeSucceeded)
         XCTAssertTrue(snapshot.windows.isEmpty)
-        XCTAssertEqual(snapshot.error, ProbeError.timeout.localizedDescription)
+        XCTAssertEqual(snapshot.error, "The CLI did not respond in time")
+        XCTAssertFalse(snapshot.error?.contains("secret-transcript-42") ?? true,
+                       "the partial transcript is diagnostic input, not display text")
     }
 
     /// Anything a probe throws has to survive as readable text, not just
@@ -241,13 +247,52 @@ final class QuotaEngineTests: XCTestCase {
         let good = await QuotaEngine.refresh(Provider.allCases) { provider in
             .init(provider: provider, windows: [.init(label: "Session", usedPercent: 20, resetAt: nil)])
         }
-        let outage = await QuotaEngine.refresh(Provider.allCases) { _ in throw ProbeError.timeout }
+        let outage = await QuotaEngine.refresh(Provider.allCases) { _ in throw ProbeError.timeout(partialOutput: "") }
         let merged = QuotaEngine.retainingLastGood(fresh: outage, previous: good)
 
         XCTAssertEqual(merged.map(\.provider), Provider.allCases)
         XCTAssertEqual(merged.map(\.windows.first?.usedPercent), [20, 20, 20])
         XCTAssertTrue(merged.allSatisfy { $0.probeSucceeded == false })
         XCTAssertTrue(merged.allSatisfy { $0.error?.hasPrefix("Refresh failed: ") == true })
+    }
+
+    /// A malformed Codex payload used to reach retention as a *successful* 0%
+    /// snapshot, so the seam waved it through and the cache stored it over the
+    /// real reading — or, when the payload held no windows at all, deleted the
+    /// provider outright. Driven through the real parser, both shapes have to end
+    /// as a failed refresh with yesterday's 42% still on screen and still cached.
+    func testAMalformedCodexPayloadKeepsTheLastGoodQuota() {
+        let previous: [QuotaSnapshot] = [
+            .init(provider: .codex, windows: [.init(label: "Session", usedPercent: 42, resetAt: nil)], plan: "plus")
+        ]
+        let malformed = [
+            #"{"rateLimits":{"primary":{"resetsAt":2000000000,"windowDurationMins":300}}}"#: "unreadable",
+            #"{"rateLimits":{"primary":{"usedPercent":"NaN"}}}"#: "unreadable",
+            #"{"rateLimits":{"planType":"plus"}}"#: "no windows"
+        ]
+        for (json, shape) in malformed {
+            let cache = SnapshotCache(store: MemoryStateStore())
+            cache.update(with: previous)
+
+            let fresh = QuotaEngine.load(.codex) { _ in
+                guard let result = CodexProbe.jsonObject(json) else { throw ProbeError.message("bad fixture") }
+                return try CodexProbe.parse(result)
+            }
+            XCTAssertFalse(fresh.probeSucceeded, "\(shape) is not a successful refresh")
+            if shape == "unreadable" {
+                XCTAssertEqual(fresh.error,
+                               "Codex returned an unreadable quota response. Refresh after updating Codex.")
+            }
+
+            let merged = QuotaEngine.retainingLastGood(fresh: [fresh], previous: previous)
+            XCTAssertEqual(merged[0].windows.map(\.usedPercent), [42], "\(shape) must keep the last good quota")
+            XCTAssertFalse(merged[0].probeSucceeded)
+            XCTAssertEqual(merged[0].error?.hasPrefix("Refresh failed: "), true)
+
+            cache.update(with: merged)
+            XCTAssertEqual(cache.snapshot(for: .codex)?.windows.first?.usedPercent, 42,
+                           "\(shape) must not replace or delete the cached quota")
+        }
     }
 
     // MARK: - SnapshotCache
