@@ -217,8 +217,12 @@ angle, return an empty list.`, {
       // in coverage gets read as a clean bill of health.
       .catch(e => ({ lens: lens.key, findings: [], ran: false, error: String((e && e.message) || e) })),
 
-    ({ lens, findings }) =>
-      parallel(findings.map(f => () =>
+    // This stage forwards the run, not a bare array of verdicts. An angle that
+    // errored has nothing to attack, so it would arrive here as an empty array —
+    // the same empty array an angle that looked and found nothing produces.
+    // Dropping the flag here is what made the distinction above unobservable.
+    (run) =>
+      parallel(run.findings.map(f => () =>
         agent(`
 Try to REFUTE this review finding about QuotaBar. Default to refuted when you are
 uncertain — the cost of a false finding is a person changing working code.
@@ -231,21 +235,20 @@ uncertain — the cost of a false finding is a person changing working code.
 Read the actual code on branch ${branch} and the surrounding context. Run something
 if it settles it. It survives only if the described failure genuinely occurs.
 Correct the severity if it was overstated or understated. ${noCIYet}`, {
-          label: `verify:${lens}${roundTag}`,
+          label: `verify:${run.lens}${roundTag}`,
           phase: 'Verify',
           schema: VERDICT,
         })
-          .then(v => ({ ...f, lens, verdict: v }))
+          .then(v => ({ ...f, lens: run.lens, verdict: v }))
           // An unverifiable finding is surfaced, not silently dropped.
-          .catch(e => ({ ...f, lens, verdict: null, verifyError: String((e && e.message) || e) }))
-      )).then(rows => rows.filter(Boolean)),
+          .catch(e => ({ ...f, lens: run.lens, verdict: null, verifyError: String((e && e.message) || e) }))
+      )).then(rows => ({ lens: run.lens, ran: run.ran, error: run.error, rows: rows.filter(Boolean) })),
   ).then(perLens => ({
-    rows: perLens.flat().filter(f => f && f.claim),
-    runs: perLens.map((rows, i) => ({
-      key: lenses[i].key,
-      ran: Array.isArray(rows) ? rows.every(r => r && r.ran !== false) : false,
-      error: Array.isArray(rows) ? (rows.find(r => r && r.ran === false) || {}).error : 'the angle produced no result',
-    })),
+    rows: perLens.flatMap(run => (run && run.rows) || []).filter(f => f && f.claim),
+    runs: perLens.map((run, i) => (run && run.ran)
+      ? { key: lenses[i].key, ran: true, error: '' }
+      // A stage that threw leaves nothing behind, so an absent entry is a failure too.
+      : { key: lenses[i].key, ran: false, error: (run && run.error) || 'the angle produced no result' }),
   }))
 }
 

@@ -67,3 +67,12 @@ the log says how many of the angles were actually covered.
 reading, because a lens that always finds nothing is either pointed at the wrong
 thing or being ignored. `unverified` holds findings whose refutation step itself
 failed; they are surfaced rather than dropped.
+
+That distinction was recorded and then thrown away for a while. The review stage
+set `ran: false` on a lens whose agent had errored, but the verification stage
+passed on a bare array of verdicts, which a failed lens and a silent one both
+leave empty — so `complete` came back `true` and the failed lens was listed in
+`lensesWithNothing`. `scripts/test-workflows` now runs this workflow with one
+lens's agent forced to reject and asserts the result, so the next such
+regression fails the repository-policy CI job rather than reaching a reader as a
+clean bill of health.

@@ -170,7 +170,7 @@ jobs:
               # for every change regardless.
               docs/*|.claude/*|.codex/*|.github/ISSUE_TEMPLATE/*|.githooks/*) ;;
               *.md|LICENSE|.gitignore|.gitattributes) ;;
-              scripts/install-codex-skills|scripts/codex-parallel) ;;
+              scripts/install-codex-skills|scripts/codex-parallel|scripts/test-workflows) ;;
               .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
 
               *)
@@ -209,6 +209,7 @@ jobs:
           test -x scripts/install-codex-skills
           test -x scripts/codex-parallel
           test -x scripts/coverage
+          test -x scripts/test-workflows
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
@@ -223,6 +224,14 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+
+      # The multi-agent runners in .claude/workflows are the one part of the
+      # agent harness a machine can execute rather than only read, and their
+      # defects are the silent kind: an angle whose agent failed reported as one
+      # that looked and found nothing. This runs them against a stub engine --
+      # seconds, no toolchain -- so that stops being invisible.
+      - name: Test the agent workflows
+        run: scripts/test-workflows
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)

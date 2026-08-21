@@ -116,6 +116,15 @@ sign-off treats it as a reason to hold.
 angle that always finds nothing is either pointed at the wrong thing or being
 ignored.
 
+The sign-off is told both lists by name, under `ANGLES COVERED` and `ANGLES THAT
+DID NOT RUN`. Both lines lied for a while. The flag was recorded when an angle's
+agent errored and then dropped by the verification stage, which returned only
+verdicts — and a failed angle leaves the same empty list of those as a silent
+one — so a failed angle arrived at sign-off listed as covered, and `complete` was
+`true`. `scripts/test-workflows` now runs this workflow with one angle's agent
+forced to reject and asserts the prompt and the result, so that failure is a red
+repository-policy job rather than a quiet pass.
+
 `refuted` is kept so a claim that was already knocked down is not raised again by
 the next run, and `unverified` holds findings whose refutation step itself failed —
 surfaced rather than dropped.
