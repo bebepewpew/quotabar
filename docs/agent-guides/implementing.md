@@ -31,6 +31,13 @@ never pushed.
 Always go through `./quotabar`; it picks the toolchain and keeps `.build` owned by
 you. `docs/agent-guides/quotabar-dev.md` has the build and coverage detail.
 
+`quotabar-dev` and `quotabar-developer` are two names a keystroke apart. The first
+is the build-and-test guidance — the commands, the toolchain, the coverage report.
+This guide is the second: the change itself, from branch to pushed branch, and it
+uses those commands at step 4. Which of the pair is packaged as a skill and which
+as an agent depends on the toolchain, so tell them apart by what they cover rather
+than by their kind.
+
 ## Never claim a suite you did not run
 
 On macOS `./quotabar test` needs full Xcode; with only Command Line Tools it

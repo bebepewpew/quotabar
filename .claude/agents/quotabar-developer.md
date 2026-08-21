@@ -28,6 +28,3 @@ needs full Xcode, and an honest "tests did not run here" beats a false green.
 repository has already paid for — is `docs/agent-guides/implementing.md`.**
 Build and coverage detail is `docs/agent-guides/quotabar-dev.md`; fixtures are
 `docs/agent-guides/probe-fixture.md`.
-
-Not to be confused with the `quotabar-dev` **skill**, which is how to build and
-test. This agent is who implements a change, and it uses that skill's commands.
