@@ -274,10 +274,15 @@ jobs:
   # is the one that decides.
   gate:
     name: Gate
-    # `always()`, not `success()`: with `success()` this job would itself be
-    # skipped the moment a job it needs was skipped, and a skipped required check
-    # satisfies nothing.
-    if: always()
+    # Not `success()`: that would skip this job the moment a job it needs was
+    # skipped, and a skipped required check satisfies nothing.
+    #
+    # Not `always()` either. `always()` runs this job even when the whole run was
+    # cancelled, and the `concurrency` group above cancels a superseded run every
+    # time a label lands moments after `opened` — so the gate reported a red
+    # check for a run nobody was waiting on. `!cancelled()` keeps the skip-is-a-
+    # pass behaviour and lets a cancelled run stay cancelled.
+    if: ${{ !cancelled() }}
     needs: [labels, policy, changes, build-and-test, build-and-test-linux]
     runs-on: ubuntu-latest
     steps:

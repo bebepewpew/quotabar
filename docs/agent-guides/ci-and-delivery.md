@@ -69,9 +69,9 @@ somebody makes in that job rather than a hole that silently skips the suite.
   by branch protection stays **pending** and the pull request is unmergeable
   rather than fast — which is why the filtering is a job, not a path filter;
 - `if: success()` on an aggregating job makes that job skip as soon as anything
-  it needs is skipped, and a skipped required check satisfies nothing. `gate` is
-  `if: always()` and inspects `needs.*.result` itself, counting `skipped` as a
-  pass and everything that is not `success` as a failure.
+  it needs is skipped, and a skipped required check satisfies nothing. `gate`
+  inspects `needs.*.result` itself instead, counting `skipped` as a pass and
+  everything that is not `success` as a failure.
 
 `codeql.yml` is the one workflow that may use `paths-ignore`, and does: it is not
 a required check, so a run that never starts leaves nothing pending. Its ignore
@@ -105,6 +105,12 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
   line in that job.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
+- **`always()` on the gate reports a red check for a cancelled run.** The
+  `concurrency` group cancels a superseded run every time a label lands just
+  after `opened`, and `always()` runs even then — so the gate failed on a run
+  nobody was waiting on, next to a live run that was still building. `gate` uses
+  `if: ${{ !cancelled() }}`, which keeps skip-is-a-pass and lets a cancelled run
+  stay cancelled. This one was caught by the pull request that introduced it.
 
 ## Pinning
 
