@@ -201,6 +201,67 @@ final class StateStoreTests: XCTestCase {
         }
     }
 
+    /// The clobber the merge exists to prevent, one key at a time: an instance
+    /// only replays a key until it lands, so writing an unrelated key later must
+    /// not push its own start-of-process copy back over the other writer's newer
+    /// value. Before the fix the reopened store read `quota=1`.
+    func testAPersistedKeyIsNotReplayedOverAnotherWritersNewerValue() {
+        let url = stateURL()
+        let instanceA = JSONFileStateStore(url: url)
+        let instanceB = JSONFileStateStore(url: url)
+
+        instanceA.setInteger(1, forKey: "quota")
+        instanceB.setInteger(2, forKey: "quota")
+        instanceA.setInteger(15, forKey: "interval")
+
+        let fresh = JSONFileStateStore(url: url)
+        XCTAssertEqual(fresh.integer(forKey: "quota"), 2,
+                       "writing `interval` must not revert `quota` to A's copy")
+        XCTAssertEqual(fresh.integer(forKey: "interval"), 15)
+        // A adopted the merge, so its own reads agree with the file.
+        XCTAssertEqual(instanceA.integer(forKey: "quota"), 2)
+    }
+
+    /// The same sequence with the keys that actually pay for it: losing the dedup
+    /// map re-delivers alerts already shown, and a reverted series catalogue files
+    /// one series under two hashes.
+    func testTheDedupMapSurvivesTheWatchersNextUnrelatedWrite() {
+        let url = stateURL()
+        let watcher = JSONFileStateStore(url: url)
+        watcher.setData(Data("first".utf8), forKey: AlertEvaluator.deliveredKey)
+
+        let oneShot = JSONFileStateStore(url: url)
+        oneShot.setData(Data("second".utf8), forKey: AlertEvaluator.deliveredKey)
+
+        watcher.setInteger(30, forKey: "interval")
+
+        let fresh = JSONFileStateStore(url: url)
+        XCTAssertEqual(fresh.data(forKey: AlertEvaluator.deliveredKey), Data("second".utf8),
+                       "the watcher must not resurrect the dedup map it wrote first")
+        XCTAssertEqual(fresh.integer(forKey: "interval"), 30)
+    }
+
+    /// Dropping a key from the pending set is conditional on the write actually
+    /// succeeding. A key whose write failed is still owed to the file and is
+    /// carried into the next write; one that succeeded is not.
+    func testAKeyWhoseWriteFailedIsRetriedByTheNextWrite() throws {
+        let url = stateURL()
+        // A directory where the state file belongs: writes fail until it is gone.
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+
+        let store = JSONFileStateStore(url: url)
+        store.setInteger(1, forKey: "first")
+        XCTAssertNil(JSONFileStateStore(url: url).integer(forKey: "first"),
+                     "the write cannot have landed while a directory is in the way")
+
+        try FileManager.default.removeItem(at: url)
+        store.setInteger(2, forKey: "second")
+
+        let fresh = JSONFileStateStore(url: url)
+        XCTAssertEqual(fresh.integer(forKey: "first"), 1, "the failed write is retried")
+        XCTAssertEqual(fresh.integer(forKey: "second"), 2)
+    }
+
     // MARK: - Damaged and unusable files
 
     func testCorruptStateFileIsIgnoredAndOverwrittenOnTheNextWrite() throws {

@@ -45,6 +45,12 @@ public final class UserDefaultsStateStore: StateStore, @unchecked Sendable {
 /// actually changed. Without that, a long-lived watcher would rewrite its
 /// start-of-process snapshot over the other process's keys and, in particular,
 /// discard the notification dedup map — re-delivering alerts already shown.
+///
+/// "Actually changed" means *not yet on disk*, not *ever touched*: `written`
+/// holds only the keys still pending. A key the instance already persisted is
+/// dropped from the set, because replaying it on the next unrelated write would
+/// push this instance's older value back over whatever the other process has
+/// stored since — the same clobber, one key at a time.
 public final class JSONFileStateStore: StateStore, @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
@@ -149,9 +155,18 @@ public final class JSONFileStateStore: StateStore, @unchecked Sendable {
             var merged = Self.read(url)
             for key in written { merged[key] = contents[key] }
             guard let encoded = try? JSONEncoder().encode(merged) else { return }
-            try? encoded.write(to: url, options: .atomic)
             // Adopt the other process's keys so later reads are not stale.
             contents = merged
+            do {
+                try encoded.write(to: url, options: .atomic)
+            } catch {
+                // Nothing landed, so every pending key is still pending and the
+                // next write retries it.
+                return
+            }
+            // These keys are in the file now. Carrying them into the next write
+            // would overlay this instance's copy on a fresher re-read.
+            written.removeAll()
         }
     }
 
