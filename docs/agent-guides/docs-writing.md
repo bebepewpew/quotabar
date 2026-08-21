@@ -26,6 +26,23 @@ are each a few lines that point at one guide. Guidance lives once. If you find
 yourself pasting a paragraph into a second file, the guide is the right home and
 the wrapper should link it.
 
+A role is three files and a roster line, and adding one means writing all four:
+
+- `.claude/agents/<name>.md` — or `.claude/skills/<name>/SKILL.md` where the
+  wrapper is a skill rather than an agent.
+- `.codex/skills/<name>/SKILL.md`.
+- `.codex/skills/<name>/agents/openai.yaml` — the Codex manifest.
+- a line naming the role in the `AGENTS.md` roster.
+
+The manifest is the one that is easy to forget and the only one that fails
+silently. `scripts/install-codex-skills` copies whole directories, so a skill
+without it installs perfectly, errors nowhere, and is then never offered — the
+role simply does not exist as far as Codex is concerned. Codex also reads skills
+only from `$CODEX_HOME/skills` and never from the repository, so adding or
+renaming a role is inert until that installer is re-run; a change that does either
+says so. `docs/agent-guides/harness-review.md` reviews wrappers against this same
+list.
+
 Do not propose moving `Package.swift`, `Sources/`, `Tests/` or `Resources/` —
 SwiftPM finds them by convention, and the README says so. The Homebrew formula is
 **not** in this repository at all: it lives in `bebepewpew/homebrew-tap`, which the
