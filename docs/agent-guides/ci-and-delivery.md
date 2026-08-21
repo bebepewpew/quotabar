@@ -10,7 +10,7 @@ without knowing which is how a gate quietly stops gating.
 | `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
-| `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
+| `release.yml` | `workflow_dispatch` only | building, tagging, proving the Homebrew formula, then signing and publishing a release — in that order |
 
 ## The Labels gate
 
@@ -40,6 +40,15 @@ shape, or one whose `id`s collide** — GitHub reports that in its own UI when
 somebody tries to file. `blank_issues_enabled` flipping to `true` is likewise
 uncaught beyond the key still being present.
 
+The release ordering has a check of its own in the same job:
+`scripts/check-release-order` reads `release.yml`'s job graph and fails unless
+`tap` needs `tag`, `release` needs `tap`, only `tag` pushes the tag and only
+`release` publishes. It exists because `release.yml` is `workflow_dispatch` only
+— no pull request ever executes it, so a reordering that went back to publishing
+before the formula is proven would next be noticed by whoever cut the release.
+It uses no YAML library on purpose, so it runs the same on a macOS checkout as in
+the job, and it fails closed: a `needs:` it cannot read is an error, not a pass.
+
 Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
 would stay red until its next push, long after someone applied the label. And the
@@ -64,10 +73,11 @@ point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, th
 `quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
 pipeline change is only ever proven by running it. **Skips:** `docs/`,
 `.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
-`.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
-that configure GitHub rather than the build. **Unclassified:** anything else — it
-builds, *and the job prints it by name*, which is the signal that the case
-statement needs a line rather than a silent guess in either direction.
+`.gitignore`, `.gitattributes`, the two Codex scripts,
+`scripts/check-release-order`, and the `.github` files that configure GitHub
+rather than the build. **Unclassified:** anything else — it builds, *and the job
+prints it by name*, which is the signal that the case statement needs a line
+rather than a silent guess in either direction.
 
 Both lists are explicit on purpose. An include-only list fails towards skipping,
 which is how a real change stops being tested; an exclude-only list fails towards
@@ -143,8 +153,11 @@ A floating `@main` is a remote-code-execution path into CI. It is never acceptab
 
 `permissions: contents: read` at the top of each workflow, escalated **per job**
 and only where needed — `security-events: write` for SARIF upload,
-`contents: write`/`id-token: write`/`attestations: write` for the release job,
-`packages: write` for the container push.
+`contents: write` for the tag job that pushes the ref and the release job that
+publishes, `id-token: write`/`attestations: write` for the signing and
+attestation in that release job, `packages: write` for the container push. The
+`tap` job keeps `contents: read`: it writes to another repository, with a token
+from an environment rather than from `permissions:`.
 
 The only credentials in play are `GITHUB_TOKEN` and the OIDC identity that keyless
 signing derives from. There is no long-lived secret, and adding one is a
