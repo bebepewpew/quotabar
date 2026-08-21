@@ -1,0 +1,136 @@
+#!/bin/sh
+set -eu
+
+# Check that the one required status check still decides every merge.
+#
+#   scripts/check-ci-gate                  # check .github/workflows/ci.yml
+#   scripts/check-ci-gate some/other.yml   # check a copy, to prove this can fail
+#
+# Branch protection on `main` requires two contexts by name, `Gate` and
+# `Labels`, and `gate` can only `needs:` jobs in its own workflow. Three ways
+# that arrangement stops gating, all of them silent:
+#
+#   1. a job is added and nobody adds it to `gate`'s `needs`, so it can go red
+#      beside a green Gate and block nothing;
+#   2. a job's `name:` changes, so the required context never reports again and
+#      the merge waits on a check that no longer exists;
+#   3. the leaked-secret scan stops failing, or moves to a workflow the Gate
+#      cannot depend on, and a committed credential becomes mergeable.
+#
+# The workflow is read as text rather than parsed as YAML, so a shape this does
+# not recognise fails the check instead of quietly passing it.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+workflow=${1:-$root/.github/workflows/ci.yml}
+
+[ -f "$workflow" ] || {
+    printf '%s\n' "check-ci-gate: no such workflow: $workflow" >&2
+    exit 1
+}
+
+# `q` carries the apostrophe the single-quoted awk program cannot spell itself:
+# `exit-code` is a quoted string in YAML, and the quotes come off before the
+# value is matched.
+awk -v q="'" '
+    # Only the top-level `jobs:` mapping. The next top-level key ends it.
+    /^jobs: *$/ { injobs = 1; next }
+    /^[A-Za-z]/ { injobs = 0 }
+    injobs != 1 { next }
+
+    # A job id: two spaces of indent, and nothing after the colon.
+    /^  [A-Za-z0-9_-]+: *$/ {
+        job = $1
+        sub(/:$/, "", job)
+        ids[++count] = job
+        current = job
+        inneeds = 0
+        next
+    }
+
+    # The job name, which is the string branch protection requires. A step name
+    # is a list entry two levels further in, so it cannot match this.
+    current != "" && /^    name: / {
+        label = $0
+        sub(/^    name: */, "", label)
+        gsub(q, "", label)
+        gsub(/"/, "", label)
+        named[label] = current
+        next
+    }
+
+    # `needs:` in either the flow form or the block form: everything indented
+    # past the key belongs to the list, and the first line that is not ends it.
+    current != "" && /^    needs:/ {
+        line = $0
+        sub(/^    needs:/, "", line)
+        needs[current] = needs[current] " " line
+        inneeds = 1
+        next
+    }
+    inneeds == 1 {
+        if ($0 ~ /^      /) { needs[current] = needs[current] " " $0; next }
+        inneeds = 0
+    }
+
+    # A leaked-secret scan that actually fails the job it runs in. Both halves
+    # matter: the same action with `exit-code: 0` only reports.
+    {
+        line = $0
+        gsub(q, "", line)
+        if (line ~ /^ +scanners: *secret *$/) { scans[current] = 1 }
+        if (line ~ /^ +exit-code: *1 *$/)     { fails[current] = 1 }
+    }
+
+    END {
+        # The contexts branch protection requires, spelled the way it requires
+        # them. Renaming one here without renaming it there leaves a required
+        # check that never reports again.
+        if (!("Gate" in named)) {
+            print "No job is named Gate, which branch protection requires." > "/dev/stderr"
+            exit 1
+        }
+        if (!("Labels" in named)) {
+            print "No job is named Labels, which branch protection requires." > "/dev/stderr"
+            exit 1
+        }
+
+        gate = named["Gate"]
+        list = needs[gate]
+        gsub(/[][,]/, " ", list)
+        split(list, tokens, / +/)
+        for (i in tokens) {
+            if (tokens[i] != "" && tokens[i] != "-") {
+                gated[tokens[i]] = 1
+                gatedcount++
+            }
+        }
+        if (gatedcount == 0) {
+            printf "Could not read the needs list of the %s job.\n", gate > "/dev/stderr"
+            exit 1
+        }
+
+        bad = 0
+        for (i = 1; i <= count; i++) {
+            if (ids[i] == gate) { continue }
+            if (!(ids[i] in gated)) {
+                printf "Job %s is not in the needs of %s, so it cannot fail a merge.\n", \
+                    ids[i], gate > "/dev/stderr"
+                bad = 1
+            }
+        }
+
+        enforcing = ""
+        for (job in scans) {
+            if (job in fails && job in gated) { enforcing = enforcing " " job }
+        }
+        if (enforcing == "") {
+            print "No job the Gate needs fails on a leaked secret, so a committed" > "/dev/stderr"
+            print "credential would be mergeable. A scan with exit-code 1 belongs in" > "/dev/stderr"
+            print "this workflow and in the needs list of the Gate." > "/dev/stderr"
+            bad = 1
+        }
+
+        if (bad) { exit 1 }
+        printf "Gate needs %d jobs; leaked secrets enforced by:%s\n", gatedcount, enforcing
+    }
+' "$workflow"

@@ -7,9 +7,9 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, the leaked-secret scan, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
-| `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
+| `security-scan.yml` | push, pull request, Mondays 06:17 UTC | publishing working-tree and toolchain-image findings to code scanning, and re-scanning a `main` nobody has pushed to. Its secret scan fails as well, but the copy that blocks a **merge** is the one in `ci.yml` |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
 
 ## The Labels gate
@@ -49,7 +49,7 @@ macOS and Linux build running beside the one replacing it.
 
 ## The Gate, and why the required check is not a build
 
-`ci.yml` has six jobs, and only one of them is a required status check.
+`ci.yml` has seven jobs, and only one of them is a required status check.
 
 `changes` diffs the pull request against its base and decides whether anything
 compiled was touched. If not — documentation, `.claude/`, `.codex/`, the issue
@@ -64,10 +64,11 @@ point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, th
 `quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
 pipeline change is only ever proven by running it. **Skips:** `docs/`,
 `.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
-`.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
-that configure GitHub rather than the build. **Unclassified:** anything else — it
-builds, *and the job prints it by name*, which is the signal that the case
-statement needs a line rather than a silent guess in either direction.
+`.gitignore`, `.gitattributes`, the two Codex scripts, `scripts/check-ci-gate`,
+and the `.github` files that configure GitHub rather than the build.
+**Unclassified:** anything else — it builds, *and the job prints it by name*,
+which is the signal that the case statement needs a line rather than a silent
+guess in either direction.
 
 Both lists are explicit on purpose. An include-only list fails towards skipping,
 which is how a real change stops being tested; an exclude-only list fails towards
@@ -97,6 +98,21 @@ the two build jobs and not `CodeQL`. Renaming a job in this file without renamin
 a merge blocks on a check that no longer exists; adding a job means adding it to
 `gate`'s `needs`, or it cannot fail a merge.
 
+`secret-scan` sits in that list with no `changes` guard, because a credential can
+arrive in any file, including one that compiles nothing. It is a job here rather
+than a required context on `security-scan.yml` for the same reason CodeQL is called
+from this workflow: `gate` can only `needs:` jobs in its own. The copy in
+`security-scan.yml` still runs, still publishes SARIF and still covers the weekly
+cron; the copy here is the one a merge waits on. It uploads nothing, so it needs no
+token and a fork's pull request runs the same failing scan.
+
+These invariants are checked rather than remembered. `scripts/check-ci-gate` reads
+this workflow and fails when a job is missing from `gate`'s `needs`, when the job
+named `Gate` or the job named `Labels` has been renamed out from under the required
+context, or when no gated job runs a secret scan with `exit-code: '1'`. The policy
+job runs it for every change, and it takes a path argument, so you can point it at a
+modified copy and watch it fail before trusting it.
+
 ## Traps this repository has already paid for
 
 - **A container job defaults to `sh -e`, which has no `pipefail`.** Both container
@@ -117,7 +133,9 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
   job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
   line in that job.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
-  nothing: the only required check never learns it failed.
+  nothing: the only required check never learns it failed. `scripts/check-ci-gate`
+  in the policy job fails on exactly that, and on a `Gate` or `Labels` renamed away
+  from the context branch protection requires.
 - **`always()` on the gate reports a red check for a cancelled run.** The
   `concurrency` group cancels a superseded run every time a label lands just
   after `opened`, and `always()` runs even then — so the gate failed on a run
