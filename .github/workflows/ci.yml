@@ -44,10 +44,14 @@ jobs:
         run: |
           swift run quotabar --version
           swift run quotabar --help
-      # Reported only. There is deliberately no threshold yet, so a coverage
-      # drop is visible in the step summary without failing the run.
+      # Enforced. The threshold went in only once the suite actually cleared it:
+      # main was at 95.18% region / 98.27% line when this was switched on, so it
+      # has never been a gate that main could not pass.
       - name: Coverage
+        env:
+          MINIMUM_REGION: '90'
         run: |
+          set -euo pipefail
           scripts/coverage --lcov coverage.lcov > coverage.txt
           {
             printf '## Coverage (Linux: QuotaCore, QuotaTray)\n\n'
@@ -55,6 +59,21 @@ jobs:
             cat coverage.txt
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # llvm-cov's TOTAL row; the region percentage is the fourth column.
+          region="$(awk '/^TOTAL/ {gsub(/%/,"",$4); print $4}' coverage.txt)"
+          if [ -z "$region" ]; then
+            echo "Could not read a TOTAL row from the coverage report." >&2
+            exit 1
+          fi
+          awk -v got="$region" -v min="$MINIMUM_REGION" '
+            BEGIN {
+              if (got + 0 < min + 0) {
+                printf "Region coverage %.2f%% is below the %s%% minimum.\n", got, min > "/dev/stderr"
+                exit 1
+              }
+              printf "Region coverage %.2f%% meets the %s%% minimum.\n", got, min
+            }' | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage lcov
         uses: actions/upload-artifact@v7
         with:
