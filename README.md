@@ -272,6 +272,11 @@ quotabar advise --json        the same findings, machine readable
 Exit codes: `0` every probe succeeded, `1` at least one provider failed to
 report, `2` invalid usage.
 
+With no provider CLI installed there is still exactly one document to read:
+`--json` writes `[]` and `--format waybar` writes an `n/a` object, so a status
+bar shows a state rather than staying blank. The reason goes to stderr and the
+exit code is `1`, as it is whenever a provider fails to report.
+
 ### Status bar integration
 
 waybar:
