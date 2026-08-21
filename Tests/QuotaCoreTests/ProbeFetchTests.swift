@@ -366,7 +366,24 @@ final class ProbeFetchTests: XCTestCase {
         let noise = try ShellProbeRunner(script: "echo 'pasted \(secret) into the prompt'; exit 1")
         let reported = message(from: { try GeminiTerminalProbe(runner: noise).fetch() }) ?? ""
         XCTAssertFalse(reported.contains(secret), "the transcript reached the UI: \(reported)")
-        XCTAssertTrue(reported.contains("exited with status 1"), reported)
+        // Asserted whole, not by substring: the command `run` was given here is
+        // the runner's `sh`, and in production it is `expect`. Either name would
+        // satisfy "exited with status 1" while telling the user to go and run a
+        // helper they never invoked, so the unclassified message must be the
+        // fixed Gemini one with no command name in it at all.
+        XCTAssertEqual(reported, "Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
+    }
+
+    /// The same when the run left nothing to classify at all. A failing `expect`
+    /// usually died on a Tcl error rather than on a marker branch, so the detail
+    /// is that error or is empty — and neither may be reported against `expect`.
+    func testGeminiNamesItselfWhenAFailedExpectRunLeftNothingToClassify() throws {
+        for script in ["exit 1", "echo 'invalid spawn id id4: spawn failed' >&2; exit 1"] {
+            let runner = try ShellProbeRunner(script: script)
+            XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: runner).fetch() }),
+                           "Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.",
+                           "`\(script)` must not be reported against the expect helper")
+        }
     }
 
     // MARK: - The default seam

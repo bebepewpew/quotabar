@@ -98,9 +98,15 @@ struct GeminiTerminalProbe: QuotaProbe {
             // so a non-zero exit carries the session — markers and all — as the
             // command failure's detail. The markers still say what blocked the
             // probe; the transcript itself must never reach the UI.
-            guard let detail = (error as? ProbeError)?.diagnosticDetail,
-                  let failure = Self.failure(in: detail) else { throw error }
-            throw failure
+            //
+            // Neither may the failure's own message. The executable handed to
+            // `run` is the `expect` helper, so the message names *that* —
+            // "expect exited with status 1" points at a binary the user never
+            // invoked and cannot usefully run. Anything this probe cannot
+            // classify is reported against the CLI it is actually for.
+            guard case .commandFailed(let commandFailure)? = error as? ProbeError else { throw error }
+            throw Self.failure(in: commandFailure.detail)
+                ?? .unsupported("Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
         }
         if let failure = Self.failure(in: output) { throw failure }
         return try Self.parse(output, now: Date())
