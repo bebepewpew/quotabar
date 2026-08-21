@@ -8,7 +8,6 @@ import Foundation
 final class UsageAnalysisTests: XCTestCase {
     private let start = Date(timeIntervalSince1970: 1_700_000_000)
     private let session = HistorySeriesID(provider: .codex, windowKey: "session")
-    private let weekly = HistorySeriesID(provider: .claude, windowKey: "weekly")
 
     // MARK: - Admission
 
@@ -134,15 +133,19 @@ final class UsageAnalysisTests: XCTestCase {
         XCTAssertTrue(UsageAnalysis.cycles(for: []).isEmpty)
     }
 
-    func testCyclesAreGroupedPerSeriesAndOrderedStably() {
-        let samples = [sample(series: weekly, at: start, percent: 5),
-                       sample(series: session, at: start, percent: 5)]
-        // Codex precedes Claude in `Provider.allCases`? Order is by declaration,
-        // whatever it is — the point is that it does not vary between runs.
-        let first = UsageAnalysis.cycles(for: samples).map(\.series)
-        let second = UsageAnalysis.cycles(for: samples.reversed()).map(\.series)
-        XCTAssertEqual(first, second)
-        XCTAssertEqual(Set(first), [session, weekly])
+    /// `quotabar history --json` publishes these cycles in a documented order, so
+    /// the expectation is built from `UsageAnalysis.order` itself. Comparing one
+    /// grouping with a grouping of the same samples reversed would not pin it:
+    /// `Dictionary(grouping:)` iterates in an order fixed by the per-process hash
+    /// seed, so both calls agree with each other whether or not the sort is there.
+    func testCyclesAreGroupedPerSeriesInTheDocumentedOrder() {
+        let expected = Self.documentedSeriesOrder
+        // One sample per series, so each series contributes exactly one cycle.
+        let samples = expected.reversed().map { sample(series: $0, at: start, percent: 5) }
+
+        XCTAssertEqual(UsageAnalysis.cycles(for: samples).map(\.series), expected)
+        // And the input order does not reach the output.
+        XCTAssertEqual(UsageAnalysis.cycles(for: samples.reversed()).map(\.series), expected)
     }
 
     /// A cycle watched end to end scores 1; the same cycle with the laptop shut
@@ -308,4 +311,18 @@ final class UsageAnalysisTests: XCTestCase {
                         resetAt: Date? = nil) -> UsageSample {
         UsageSample(series: series ?? session, at: at, usedPercent: percent, resetAt: resetAt)
     }
+
+    /// Every provider crossed with several window keys, arranged the way this
+    /// module documents. Which arrangement that is stays out of the assertion on
+    /// purpose — the test pins that the output follows `order`, not what `order`
+    /// says. Fifteen series rather than two because an unsorted grouping picks an
+    /// arrangement out of the hash seed: with two it would match by luck about
+    /// half the time, with fifteen there are 15! ways to be wrong.
+    private static let documentedSeriesOrder: [HistorySeriesID] = Provider.allCases
+        .flatMap { provider in
+            ["5h", "24h", "session", "weekly", "monthly"].map {
+                HistorySeriesID(provider: provider, windowKey: $0)
+            }
+        }
+        .sorted { UsageAnalysis.order($0) < UsageAnalysis.order($1) }
 }

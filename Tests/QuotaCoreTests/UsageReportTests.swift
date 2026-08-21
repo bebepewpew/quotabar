@@ -116,12 +116,21 @@ final class UsageReportTests: XCTestCase {
         XCTAssertTrue(populated.contains("2 damaged records ignored"), populated)
     }
 
-    func testSeriesAreOrderedStably() {
-        let samples = ramp(weekly, from: 0, to: 10, count: 2) + ramp(session, from: 0, to: 10, count: 2)
-        let forward = UsageReport.history(samples: samples, from: start, to: start.addingTimeInterval(900))
-        let reversed = UsageReport.history(samples: samples.reversed(),
-                                           from: start, to: start.addingTimeInterval(900))
-        XCTAssertEqual(forward, reversed)
+    /// One row per series, in the order this module documents, so the expectation
+    /// comes from `UsageAnalysis.order`. Rendering the same samples twice and
+    /// comparing the two texts would not pin it: `Dictionary(grouping:)` iterates
+    /// in an order fixed by the per-process hash seed, so both renderings agree
+    /// with each other whether or not the sort is there.
+    func testSeriesAreRenderedInTheDocumentedOrder() {
+        let expected = Self.documentedSeriesOrder.map { UsageReport.name(for: $0, labels: [:]) }
+        let samples = Self.documentedSeriesOrder.reversed().flatMap { ramp($0, from: 0, to: 10, count: 2) }
+
+        let text = UsageReport.history(samples: samples, from: start, to: start.addingTimeInterval(900))
+        // Every line but the trailing scale footer names one series, padded out
+        // to a common width before the sparkline.
+        let rows = text.split(separator: "\n").dropLast()
+        let named = rows.map { row in expected.first { row.hasPrefix($0) } ?? String(row) }
+        XCTAssertEqual(named, expected)
     }
 
     // MARK: - Cycles text
@@ -246,6 +255,21 @@ final class UsageReportTests: XCTestCase {
                                resetAt: nil)
         }
     }
+
+    /// Every provider crossed with several window keys, arranged the way the
+    /// reports document. Which arrangement that is stays out of the assertion on
+    /// purpose — the test pins that the rows follow `order`, not what `order`
+    /// says. Fifteen series rather than two because an unsorted grouping picks an
+    /// arrangement out of the hash seed: with two it would match by luck about
+    /// half the time, with fifteen there are 15! ways to be wrong. No key is a
+    /// prefix of another, so a row belongs to exactly one series.
+    private static let documentedSeriesOrder: [HistorySeriesID] = Provider.allCases
+        .flatMap { provider in
+            ["5h", "24h", "session", "weekly", "monthly"].map {
+                HistorySeriesID(provider: provider, windowKey: $0)
+            }
+        }
+        .sorted { UsageAnalysis.order($0) < UsageAnalysis.order($1) }
 
     private func cycle(peak: Double, coverage: Double, isComplete: Bool = true) -> CycleSummary {
         CycleSummary(series: session, startedAt: start, endedAt: start.addingTimeInterval(86_400),
