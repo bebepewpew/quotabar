@@ -70,6 +70,8 @@ public enum CommandRunner {
         // happens to close a handle, not to fix a failure anyone has seen.
         try? output.fileHandleForWriting.close()
         try? errors.fileHandleForWriting.close()
+        Self.liveChildren.insert(process.processIdentifier)
+        defer { Self.liveChildren.remove(process.processIdentifier) }
 
         let stdout = LockedData(), stderr = LockedData(), readers = DispatchGroup()
         readers.enter()
@@ -145,6 +147,34 @@ public enum CommandRunner {
         process.terminate()
     }
 
+    /// Process groups of children that are running right now.
+    ///
+    /// A one-shot `quotabar` run exits with its probes, so nothing needed this.
+    /// The tray is long-lived and exits on a click or when the bus goes away —
+    /// from a different thread than the one probing — and the deadline that
+    /// would have killed a stuck child is enforced by this process. Leaving
+    /// without them orphans exactly what AGENTS.md says must not be orphaned.
+    private static let liveChildren = LockedPIDs()
+
+    /// Records a child spawned outside `run`, such as a `ProcessLineSession`.
+    public static func registerLiveChild(_ pid: Int32) { liveChildren.insert(pid) }
+
+    /// Forgets a child that has been reaped by its owner.
+    public static func deregisterLiveChild(_ pid: Int32) { liveChildren.remove(pid) }
+
+    /// Terminates every probe still running, group and all.
+    ///
+    /// Call it before exiting from anywhere that is not the probing thread.
+    /// Safe to call when nothing is running.
+    public static func terminateLiveChildren() {
+        #if !os(Windows)
+        for pid in liveChildren.drain() {
+            _ = kill(-pid, SIGTERM)
+            _ = kill(-pid, SIGKILL)
+        }
+        #endif
+    }
+
     /// Signals the child's complete process group. Every child gets a group of
     /// its own above, so this also reaches the grandchildren a provider CLI
     /// spawned — a bare signal to the child would orphan them.
@@ -200,5 +230,33 @@ public enum ProbeError: LocalizedError {
         case .timeout: "The CLI did not respond in time"
         case .message(let value), .unsupported(let value): value
         }
+    }
+}
+
+
+/// The set of process groups a `terminateLiveChildren()` should reach.
+///
+/// Its own type so the locking is in one place: probes register from a worker
+/// thread and the tray drains from whichever thread is exiting.
+private final class LockedPIDs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pids = Set<Int32>()
+
+    func insert(_ pid: Int32) {
+        guard pid > 1 else { return }
+        lock.lock(); pids.insert(pid); lock.unlock()
+    }
+
+    func remove(_ pid: Int32) {
+        lock.lock(); pids.remove(pid); lock.unlock()
+    }
+
+    /// Takes the set and empties it, so a second exit path cannot signal a pid
+    /// the kernel may already have recycled.
+    func drain() -> Set<Int32> {
+        lock.lock(); defer { lock.unlock() }
+        let current = pids
+        pids.removeAll()
+        return current
     }
 }

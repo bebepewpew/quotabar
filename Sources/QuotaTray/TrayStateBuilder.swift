@@ -15,7 +15,12 @@ public enum TrayStateBuilder {
                             selections: [QuotaSelection],
                             revision: UInt32,
                             now: Date = Date()) -> TrayState {
-        let quotas = menuBarQuotas(snapshots: snapshots, selections: selections)
+        // No Linux front-end writes tray selections yet, so an install would
+        // otherwise draw the empty track forever and never reach NeedsAttention.
+        // Falling back to what the probes actually reported makes the icon mean
+        // something on first run; an explicit selection still wins.
+        let effective = selections.isEmpty ? defaultSelections(from: snapshots) : selections
+        let quotas = menuBarQuotas(snapshots: snapshots, selections: effective)
         return TrayState(quotas: quotas,
                          bitmaps: [TrayIcon.rasterise(quotas, size: iconSize)],
                          toolTipLines: toolTipLines(snapshots: snapshots, now: now),
@@ -31,8 +36,13 @@ public enum TrayStateBuilder {
     public static func menuBarQuotas(snapshots: [QuotaSnapshot],
                                      selections: [QuotaSelection]) -> [MenuBarQuota] {
         selections.map { selection in
-            let window = snapshots.first { $0.provider == selection.provider }?
-                .windows.first { $0.key == selection.windowKey || $0.label == selection.windowLabel }
+            let windows = snapshots.first { $0.provider == selection.provider }?.windows ?? []
+            // The key is identity and the label is display text, so the key wins
+            // outright rather than per-window: matching `key || label` in one
+            // pass let a label collision on an earlier window beat the real key
+            // match on a later one.
+            let window = windows.first { $0.key == selection.windowKey }
+                ?? windows.first { $0.label == selection.windowLabel }
             return MenuBarQuota(selection: selection,
                                 usedPercent: window?.usedPercent,
                                 badge: QuotaBadge.preferred(for: selection))
@@ -54,6 +64,19 @@ public enum TrayStateBuilder {
             if let error = row.error, !error.isEmpty { line += "  — \(error)" }
             return line
         }
+    }
+
+    /// The busiest windows the probes reported, capped the way the macOS menu
+    /// bar caps its own selection. Ordered by usage so the one closest to
+    /// running out is the one the icon shows.
+    public static func defaultSelections(from snapshots: [QuotaSnapshot]) -> [QuotaSelection] {
+        snapshots
+            .flatMap { snapshot in
+                snapshot.windows.map { (snapshot.provider, $0) }
+            }
+            .sorted { $0.1.usedPercent > $1.1.usedPercent }
+            .prefix(TrayPreferences.maximumSelections)
+            .map { QuotaSelection(provider: $0.0, windowKey: $0.1.key, windowLabel: $0.1.label) }
     }
 
     /// dbusmenu revisions must strictly increase, and 0 is reserved, so this

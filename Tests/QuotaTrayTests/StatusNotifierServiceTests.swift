@@ -164,9 +164,10 @@ final class StatusNotifierServiceTests: XCTestCase {
     }
 
     func testClickingAReadoutRowDoesNothing() {
-        // Row 1 is a quota readout, which is not in the dispatch table.
+        // Readouts are numbered from firstReadoutID and are not in the dispatch
+        // table; the low ids are reserved for the actions.
         let response = call(StatusNotifierService.menuInterface, "Event",
-                            body: [.int32(1), .string("clicked"),
+                            body: [.int32(DBusMenuLayout.firstReadoutID), .string("clicked"),
                                    .variant(.string("")), .uint32(0)])
         XCTAssertNil(response.action)
     }
@@ -191,6 +192,15 @@ final class StatusNotifierServiceTests: XCTestCase {
         let response = call(StatusNotifierService.menuInterface, "EventGroup", body: [events])
         XCTAssertEqual(response.action, .quit)
         XCTAssertEqual(response.replies[0].body, [.array(element: "i", values: [])])
+
+        // Reversed, which is the ordering that actually tests precedence: with
+        // quit first, "last one wins" would answer .refresh.
+        let reversed = DBusValue.array(element: "(isvu)", values: [
+            .struct([.int32(quitID), .string("clicked"), .variant(.string("")), .uint32(0)]),
+            .struct([.int32(refreshID), .string("clicked"), .variant(.string("")), .uint32(0)]),
+        ])
+        XCTAssertEqual(call(StatusNotifierService.menuInterface, "EventGroup",
+                            body: [reversed]).action, .quit)
     }
 
     // MARK: Menu

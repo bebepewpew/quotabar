@@ -94,10 +94,19 @@ public final class DBusConnection: @unchecked Sendable {
     /// Blocks until one whole message has been read.
     public func receive() throws -> DBusMessage {
         while true {
+            // Not `try?`: swallowing a framing or parse error turns a protocol
+            // fault into a stall that later surfaces as a read timeout, pointing
+            // at the peer rather than at the real reason.
+            let buffered: DBusMessage?
             lock.lock()
-            let buffered = try? takeBufferedLocked()
+            do {
+                buffered = try takeBufferedLocked()
+            } catch {
+                lock.unlock()
+                throw error
+            }
             lock.unlock()
-            if let message = buffered ?? nil { return message }
+            if let message = buffered { return message }
 
             let chunk = try channel.read(upTo: 65_536)
             guard !chunk.isEmpty else { throw DBusConnectionError.disconnected }

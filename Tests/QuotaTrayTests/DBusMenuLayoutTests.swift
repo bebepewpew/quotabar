@@ -67,7 +67,51 @@ final class DBusMenuLayoutTests: XCTestCase {
             action("Quit", TrayMenu.quitActionID),
         ]
         let layout = DBusMenuLayout.build(from: items)
-        XCTAssertEqual(layout.actions, [4: TrayMenu.refreshActionID, 5: TrayMenu.quitActionID])
+        XCTAssertEqual(layout.actions, [1: TrayMenu.refreshActionID, 2: TrayMenu.quitActionID])
+    }
+
+    /// The invariant that matters. Rows come and go as providers fail and
+    /// recover, so a position-numbered id shifts under a menu the user already
+    /// has open — and a click still in flight lands on whatever now occupies the
+    /// slot. One row fewer and a click on Refresh would arrive as Quit's old id
+    /// and exit the app.
+    func testActionIdsDoNotShiftWhenTheRowsAroundThemChange() {
+        func actions(readouts: Int) -> [Int32: String] {
+            var items = (0..<readouts).map {
+                TrayMenuItem(kind: .quota, title: "row \($0)", detail: "1%")
+            }
+            items.append(TrayMenuItem(kind: .separator, title: ""))
+            items.append(action("Refresh", TrayMenu.refreshActionID))
+            items.append(action("Quit", TrayMenu.quitActionID))
+            return DBusMenuLayout.build(from: items).actions
+        }
+        let expected: [Int32: String] = [1: TrayMenu.refreshActionID, 2: TrayMenu.quitActionID]
+        for readouts in 0...6 {
+            XCTAssertEqual(actions(readouts: readouts), expected,
+                           "ids shifted with \(readouts) readout rows")
+        }
+    }
+
+    /// Readouts are numbered above every reserved action id, so a stale click on
+    /// one can never collide with an action.
+    func testReadoutIdsCannotCollideWithActionIds() {
+        let layout = DBusMenuLayout.build(from: [
+            TrayMenuItem(kind: .quota, title: "a", detail: "1%"),
+            TrayMenuItem(kind: .quota, title: "b", detail: "2%"),
+            action("Quit", TrayMenu.quitActionID),
+        ])
+        let readoutIDs = children(of: layout).compactMap { child -> Int32? in
+            guard case .struct(let fields) = child, case .int32(let id) = fields[0] else { return nil }
+            return layout.actions[id] == nil ? id : nil
+        }
+        XCTAssertFalse(readoutIDs.isEmpty)
+        for id in readoutIDs {
+            XCTAssertGreaterThanOrEqual(id, DBusMenuLayout.firstReadoutID)
+            XCTAssertNil(layout.actions[id])
+        }
+        for reserved in DBusMenuLayout.actionIDs.values {
+            XCTAssertLessThan(reserved, DBusMenuLayout.firstReadoutID)
+        }
     }
 
     /// A row that highlights on hover and then does nothing reads as broken, so

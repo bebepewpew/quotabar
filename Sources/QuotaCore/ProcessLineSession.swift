@@ -71,6 +71,9 @@ final class ProcessLineSession: @unchecked Sendable {
             _ = setpgid(process.processIdentifier, process.processIdentifier)
         }
         #endif
+        // The tray exits from a thread that is not this one, so it needs a way
+        // to reach a session still running. `close()` deregisters.
+        CommandRunner.registerLiveChild(process.processIdentifier)
     }
 
     /// Writing through the string's own UTF-8 view rather than the optional
@@ -126,6 +129,7 @@ final class ProcessLineSession: @unchecked Sendable {
             }
         }
         try? output.fileHandleForReading.close()
+        CommandRunner.deregisterLiveChild(pid)
     }
 
     private func waitForExit(within seconds: TimeInterval) -> Bool {

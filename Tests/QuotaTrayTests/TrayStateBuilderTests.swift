@@ -57,7 +57,51 @@ final class TrayStateBuilderTests: XCTestCase {
         XCTAssertEqual(quotas[0].usedPercent, 30)
     }
 
-    func testNoSelectionsMeansNoQuotas() {
+    /// A key match must win outright, not per-window: matching `key || label`
+    /// in one pass let a label collision on an earlier window beat the real key
+    /// match on a later one.
+    func testAKeyMatchWinsOverALabelCollisionOnAnEarlierWindow() {
+        let quotas = TrayStateBuilder.menuBarQuotas(
+            snapshots: [snapshot(.gemini, windows: [
+                window("other-key", "Weekly", 10),      // label matches, key does not
+                window("weekly", "Renamed", 90),        // the real key match
+            ])],
+            selections: [selection(.gemini, "weekly", "Weekly")])
+        XCTAssertEqual(quotas[0].usedPercent, 90)
+    }
+
+    /// Nothing on Linux writes tray selections yet, so without a fallback the
+    /// icon would draw the empty track forever and never reach NeedsAttention.
+    func testWithNoStoredSelectionsTheIconStillShowsSomething() {
+        let snapshots = [snapshot(.codex, windows: [window("a", "Weekly", 20)]),
+                         snapshot(.claude, windows: [window("b", "Weekly", 95)])]
+        let state = TrayStateBuilder.make(snapshots: snapshots, selections: [],
+                                          revision: 1, now: now)
+        XCTAssertFalse(state.quotas.isEmpty)
+        // Busiest first, so the icon shows the one closest to running out.
+        XCTAssertEqual(state.quotas.first?.usedPercent, 95)
+        XCTAssertEqual(StatusNotifierItemProperties.status(for: state.quotas), "NeedsAttention")
+    }
+
+    func testAnExplicitSelectionStillWinsOverTheFallback() {
+        let snapshots = [snapshot(.codex, windows: [window("a", "Weekly", 20)]),
+                         snapshot(.claude, windows: [window("b", "Weekly", 95)])]
+        let state = TrayStateBuilder.make(snapshots: snapshots,
+                                          selections: [selection(.codex, "a", "Weekly")],
+                                          revision: 1, now: now)
+        XCTAssertEqual(state.quotas.count, 1)
+        XCTAssertEqual(state.quotas[0].usedPercent, 20)
+    }
+
+    func testTheFallbackIsCappedTheWayTheMenuBarIs() {
+        let many = (0..<10).map { window("k\($0)", "W\($0)", Double($0)) }
+        let selections = TrayStateBuilder.defaultSelections(from: [snapshot(.codex, windows: many)])
+        XCTAssertEqual(selections.count, TrayPreferences.maximumSelections)
+    }
+
+    /// `menuBarQuotas` itself takes the selections it is given; the fallback
+    /// lives in `make`, so this still maps nothing to nothing.
+    func testMenuBarQuotasMapsNoSelectionsToNoQuotas() {
         XCTAssertTrue(TrayStateBuilder.menuBarQuotas(
             snapshots: [snapshot(.codex, windows: [window("w", "W", 10)])],
             selections: []).isEmpty)
@@ -136,6 +180,19 @@ final class TrayStateBuilderTests: XCTestCase {
 }
 
 final class TrayArgumentsTests: XCTestCase {
+    /// Pinned to the literals `--help` promises, not to the constants
+    /// themselves: asserting a value against its own constant passes however
+    /// that constant drifts away from what the usage text says.
+    func testTheDocumentedNumbersAreTheRealOnes() {
+        XCTAssertEqual(TrayArguments.parse([]).interval, 900)
+        XCTAssertEqual(TrayArguments.parse(["--interval", "1"]).interval, 30)
+        XCTAssertEqual(TrayArguments.parse(["--interval", "999999999"]).interval, 86_400)
+        for promised in ["900", "30", "86400"] {
+            XCTAssertTrue(TrayArguments.usage.contains(promised),
+                          "usage does not mention \(promised)")
+        }
+    }
+
     func testDefaultsAreTheDocumentedOnes() {
         let parsed = TrayArguments.parse([])
         XCTAssertEqual(parsed.interval, TrayArguments.defaultInterval)
@@ -191,8 +248,17 @@ final class TrayArgumentsTests: XCTestCase {
         XCTAssertTrue(parsed.help)
     }
 
+    func testTheAutostartFlagsAreRecognised() {
+        XCTAssertTrue(TrayArguments.parse(["--install-autostart"]).installAutostart)
+        XCTAssertTrue(TrayArguments.parse(["--remove-autostart"]).removeAutostart)
+        XCTAssertFalse(TrayArguments.parse([]).installAutostart)
+        XCTAssertFalse(TrayArguments.parse([]).removeAutostart)
+        XCTAssertTrue(TrayArguments.parse(["--install-autostart"]).unknown.isEmpty)
+    }
+
     func testUsageNamesEveryFlagItAccepts() {
-        for flag in ["--interval", "--version", "--help"] {
+        for flag in ["--interval", "--version", "--help",
+                     "--install-autostart", "--remove-autostart"] {
             XCTAssertTrue(TrayArguments.usage.contains(flag), flag)
         }
     }

@@ -9,14 +9,22 @@ public struct TrayArguments: Equatable, Sendable {
     public var interval: TimeInterval
     public var help: Bool
     public var version: Bool
+    /// Write the systemd user unit and exit.
+    public var installAutostart: Bool
+    /// Remove it and exit.
+    public var removeAutostart: Bool
     /// Anything the parser did not recognise, reported rather than ignored.
     public var unknown: [String]
 
     public init(interval: TimeInterval = TrayArguments.defaultInterval,
-                help: Bool = false, version: Bool = false, unknown: [String] = []) {
+                help: Bool = false, version: Bool = false,
+                installAutostart: Bool = false, removeAutostart: Bool = false,
+                unknown: [String] = []) {
         self.interval = interval
         self.help = help
         self.version = version
+        self.installAutostart = installAutostart
+        self.removeAutostart = removeAutostart
         self.unknown = unknown
     }
 
@@ -41,6 +49,8 @@ public struct TrayArguments: Equatable, Sendable {
         OPTIONS
           --interval <seconds>   Seconds between refreshes (default 900,
                                  clamped to 30…86400)
+          --install-autostart    Write the systemd user unit and exit
+          --remove-autostart     Remove the systemd user unit and exit
           --version              Print the version and exit
           --help                 Print this message and exit
 
@@ -59,6 +69,10 @@ public struct TrayArguments: Equatable, Sendable {
                 parsed.help = true
             case "--version":
                 parsed.version = true
+            case "--install-autostart":
+                parsed.installAutostart = true
+            case "--remove-autostart":
+                parsed.removeAutostart = true
             case "--interval":
                 index += 1
                 guard index < arguments.count, let seconds = Double(arguments[index]),
