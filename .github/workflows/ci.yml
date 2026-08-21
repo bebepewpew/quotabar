@@ -509,6 +509,29 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      # Debug is not the configuration a release ships. The universal build and
+      # the `lipo` assertion below lived only in `release.yml`, which is
+      # `workflow_dispatch` only, so a regression in either was invisible until
+      # somebody cut a release. This is behind the `changes` gate with the rest
+      # of the job, because it roughly doubles the build.
+      - name: Build the release configuration
+        # `pipefail` is bash-only, and a job that later gained a container would
+        # silently drop to `sh -e` and lose it.
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift build -c release --product quotabar --arch arm64 --arch x86_64
+          bin_dir="$(swift build -c release --product quotabar --arch arm64 --arch x86_64 --show-bin-path)"
+          bin="${bin_dir}/quotabar"
+          test -x "$bin"
+          archs="$(lipo -archs "$bin")"
+          echo "architectures: $archs"
+          for arch in arm64 x86_64; do
+            case " $archs " in
+              *" $arch "*) ;;
+              *) echo "::error::universal binary is missing $arch"; exit 1 ;;
+            esac
+          done
 
   # CodeQL builds the whole package on macOS, so it belongs behind the same
   # filter as the build jobs -- and behind the Gate, which is the only way it can
@@ -587,6 +610,24 @@ jobs:
               esac
             done
           done
+
+      # The Linux half of the same argument as the macOS job: the statically
+      # linked command a release ships, and the assertion `release.yml` makes
+      # about it, built where a pull request can still fail on them.
+      - name: Build the release configuration
+        run: |
+          set -euo pipefail
+          swift build -c release --static-swift-stdlib --product quotabar
+          bin_dir="$(swift build -c release --static-swift-stdlib --product quotabar --show-bin-path)"
+          bin="${bin_dir}/quotabar"
+          test -x "$bin"
+          # --static-swift-stdlib only claims the Swift runtime; glibc stays
+          # dynamic. Assert the Swift half really was linked in.
+          if ldd "$bin" | grep -q 'libswift'; then
+            echo "::error::the Swift runtime is still linked dynamically"
+            ldd "$bin"
+            exit 1
+          fi
 
       # This is the job's only run of the suite. `scripts/coverage` runs
       # `swift test --enable-code-coverage`, and instrumentation changes the

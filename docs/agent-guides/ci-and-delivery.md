@@ -7,7 +7,7 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, the agent-harness drift check, the agent-workflow tests, the leaked-secret scan, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, the agent-harness drift check, the agent-workflow tests, the leaked-secret scan, build and test on macOS and Linux, the release-configuration builds a release depends on, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | publishing findings from the working tree, the toolchain image and the published image to code scanning, and re-scanning a `main` nobody has pushed to. Its secret scan fails as well, but the copy that blocks a **merge** is the one in `ci.yml` |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
@@ -166,6 +166,7 @@ named `Gate` or the job named `Labels` has been renamed out from under the requi
 context, or when no gated job runs a secret scan with `exit-code: '1'`. The policy
 job runs it for every change, and it takes a path argument, so you can point it at a
 modified copy and watch it fail before trusting it.
+
 ## What the security scan actually covers
 
 Three jobs, three different artefacts, three SARIF categories — a shared category
@@ -196,6 +197,31 @@ Monday cron must not be red for a package nobody has published. Job-level
 `/packaging`. Being honest about its limits: a moving tag mostly moves *under* the
 pin, so Dependabot only speaks up when the pin itself should change — a new Debian
 stable codename, say. The weekly scan is what catches everything in between.
+
+## The release-configuration builds
+
+Debug is not what a release ships, so both build jobs also build the
+configuration that does, and assert the property that makes it a release binary:
+
+- **Linux** runs `swift build -c release --static-swift-stdlib --product quotabar`
+  and fails if `ldd` still reports a `libswift` dependency. `--static-swift-stdlib`
+  claims only the Swift runtime — glibc stays dynamic — so that assertion is the
+  only thing proving the Swift half was linked in. It also links in release only;
+  a debug static link dies on missing ICU symbols.
+- **macOS** runs `swift build -c release --product quotabar --arch arm64 --arch
+  x86_64` and fails if `lipo -archs` does not list both slices.
+
+Both builds and both assertions used to live only in `release.yml`, which is
+`workflow_dispatch` only — so a regression in either was invisible until somebody
+cut a release, and the release run was where it was found. They are steps of the
+existing build jobs rather than jobs of their own, which puts them behind the
+`changes` filter and inside the Gate without another line in `gate`'s `needs`.
+They roughly double the build on the `code=true` path: that is the argument for
+keeping the filter, not for dropping the check.
+
+Still built only by `release.yml`, and still first proven by a release run: the
+version stamping, the statically linked `quotabar-tray` with its `libdbus`
+assertion, the packaging, the signing and the artifacts.
 
 ## Traps this repository has already paid for
 
