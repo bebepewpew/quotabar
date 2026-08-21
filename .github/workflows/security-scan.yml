@@ -2,11 +2,14 @@ name: Security scan
 
 # QuotaBar has no third-party Swift package dependencies, so there is no
 # dependency graph worth scanning. The supply-chain risk that does exist lives
-# in three places, and this workflow covers each of them:
+# in four places, and this workflow covers each of them:
 #
 #   1. the working tree      - a credential or token committed by accident
 #   2. swift:6.3-noble       - the image both CI and ./quotabar build inside
-#   3. the GitHub Actions we depend on - kept patched by .github/dependabot.yml
+#   3. ghcr.io/<repo>:latest - the image users actually pull and run, which is
+#                              FROM debian:stable-slim and so freezes whatever
+#                              base existed at release time
+#   4. the GitHub Actions we depend on - kept patched by .github/dependabot.yml
 #
 # Actions are pinned by major version, matching ci.yml. aquasecurity/trivy-action
 # is the exception because it publishes no moving major tag - it is still 0.x, so
@@ -114,3 +117,68 @@ jobs:
           # A distinct category keeps these alerts from overwriting the
           # working-tree results uploaded by the other job.
           category: trivy-toolchain-image
+
+  shipped-image:
+    name: Shipped image (ghcr.io/<repo>:latest)
+    runs-on: ubuntu-latest
+    # Job-level permissions replace the workflow-level ones outright, so the two
+    # the other jobs rely on are repeated here. packages: read is the addition:
+    # it is what reads the container package this repository publishes.
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        # upload-sarif resolves the commit it is annotating from the checkout.
+        uses: actions/checkout@v7
+
+      - name: Look for a published image
+        id: published
+        env:
+          # Written the same way release.yml pushes it, so a fork scans its own
+          # package rather than this repository's, and the two cannot drift.
+          IMAGE: ghcr.io/${{ github.repository }}:latest
+        run: |
+          set -uo pipefail
+          # Before the first release there is no such image, and the Monday cron
+          # must not go red for that. A manifest lookup costs no pull and tells
+          # the difference between "nothing published yet" and a real failure.
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              echo "Scanning $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          else
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              echo "No image published at $IMAGE yet - nothing to scan." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Scan the published image
+        if: steps.published.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          # The artefact users run carries the release binary plus expect,
+          # ca-certificates and tini on top of debian:stable-slim. Secrets as
+          # well as vulnerabilities, because a layer can bake in a token that a
+          # working-tree scan would never see.
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-shipped-image.sarif
+          # Same reasoning as the toolchain image: the only lever this repository
+          # has over a base-image CVE is rebuilding on a newer debian:stable-slim,
+          # which needs a fix to exist first. An unfixed finding would bury the
+          # rebuildable ones rather than inform anyone.
+          ignore-unfixed: true
+          # Never fails the build. A CVE published against an already-released
+          # image is news, not a defect in the pull request that ran the scan.
+          exit-code: '0'
+
+      - name: Upload shipped-image findings to code scanning
+        if: steps.published.outputs.found == 'true' && github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-shipped-image.sarif
+          # A distinct category keeps these alerts separate from the working-tree
+          # and toolchain-image results, which are different artefacts entirely.
+          category: trivy-shipped-image

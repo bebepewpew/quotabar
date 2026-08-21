@@ -3,7 +3,7 @@ version: 2
 # QuotaBar declares no third-party Swift packages, and Dependabot has no Swift
 # Package Manager ecosystem anyway. The dependencies this repository actually
 # ships are the GitHub Actions in .github/workflows, which run with access to
-# the repository and its token.
+# the repository and its token, and the base image of the container it publishes.
 updates:
   - package-ecosystem: github-actions
     directory: /
@@ -20,4 +20,19 @@ updates:
       github-actions:
         patterns:
           - "*"
+    open-pull-requests-limit: 5
+
+  # packaging/Dockerfile is FROM debian:stable-slim, which is what users pull as
+  # ghcr.io/<repo>:latest. The tag moves, so the published image freezes whatever
+  # base existed at release time and nothing here re-pulls it - Dependabot only
+  # notices when the pin itself should change, such as a new Debian stable
+  # codename. The weekly image scan in .github/workflows/security-scan.yml is the
+  # half of this that catches a CVE landing against the base already shipped.
+  - package-ecosystem: docker
+    directory: /packaging
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
     open-pull-requests-limit: 5

@@ -223,6 +223,16 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+          # The weekly scan once covered only the image QuotaBar is built in and
+          # never the one users pull, and no updater watched the shipped base
+          # image at all. Both are structure, so both are asserted here.
+          # Nothing below may contain a workflow expression: Actions expands one
+          # inside `run:` before the shell sees it, and the grep would then look
+          # for the expanded text rather than the literal in the file.
+          grep -q 'category: trivy-shipped-image' .github/workflows/security-scan.yml
+          grep -q 'image-ref: ghcr.io/.*:latest' .github/workflows/security-scan.yml
+          grep -q 'package-ecosystem: docker' .github/dependabot.yml
+          grep -q 'directory: /packaging' .github/dependabot.yml
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)

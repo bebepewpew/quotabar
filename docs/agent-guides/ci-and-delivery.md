@@ -9,7 +9,7 @@ without knowing which is how a gate quietly stops gating.
 | --- | --- | --- |
 | `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
-| `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
+| `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational findings from the working tree, the toolchain image and the published image |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
 
 ## The Labels gate
@@ -97,6 +97,37 @@ the two build jobs and not `CodeQL`. Renaming a job in this file without renamin
 a merge blocks on a check that no longer exists; adding a job means adding it to
 `gate`'s `needs`, or it cannot fail a merge.
 
+## What the security scan actually covers
+
+Three jobs, three different artefacts, three SARIF categories — a shared category
+would have each upload overwrite the last.
+
+| Job | Artefact | Category |
+| --- | --- | --- |
+| `repository` | the working tree | `trivy-working-tree` |
+| `toolchain-image` | `swift:6.3-noble`, what CI and `./quotabar` build inside | `trivy-toolchain-image` |
+| `shipped-image` | `ghcr.io/<repo>:latest`, what users pull and run | `trivy-shipped-image` |
+
+The third exists because the first two miss the artefact with the longest life.
+`packaging/Dockerfile` is `FROM debian:stable-slim`, a **moving** tag: the image
+`release.yml` pushes freezes whatever base existed on release day, and nothing
+rebuilds it until the next release. Scanning the registry tag is the only thing
+that sees a CVE land against what is already out there — along with `expect`,
+`ca-certificates` and `tini`, which no other job looks at.
+
+Two details in that job. It resolves the image as `ghcr.io/${{ github.repository }}`,
+matching how `release.yml` pushes it, so a fork scans its own package and the two
+spellings cannot drift. And it runs `docker manifest inspect` first, skipping the
+scan when that fails: before the first release there is no such image, and the
+Monday cron must not be red for a package nobody has published. Job-level
+`permissions:` replaces the workflow-level block outright, so that job repeats
+`contents: read` and `security-events: write` alongside its `packages: read`.
+
+`.github/dependabot.yml` covers the other half, with a `docker` ecosystem on
+`/packaging`. Being honest about its limits: a moving tag mostly moves *under* the
+pin, so Dependabot only speaks up when the pin itself should change — a new Debian
+stable codename, say. The weekly scan is what catches everything in between.
+
 ## Traps this repository has already paid for
 
 - **A container job defaults to `sh -e`, which has no `pipefail`.** Both container
@@ -114,8 +145,12 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
   A `pull_request`-triggered workflow cannot have run before its PR existed. Say
   that in the PR rather than letting a reviewer read the absence as a failure.
 - **`scripts/` and `.githooks/` entries are asserted executable** by the policy
-  job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
-  line in that job.
+  job, along with `test ! -e REVIEW.md` and the scan targets above. A new script
+  needs `chmod +x` *and* a line in that job.
+- **A `${{ }}` expression inside `run:` is expanded before the shell sees it.**
+  The policy job greps `security-scan.yml` for its image reference, so it has to
+  match on `ghcr.io/.*:latest` — a grep written with the literal expression would
+  search for the *expanded* repository name and never match the file.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
 - **`always()` on the gate reports a red check for a cancelled run.** The
