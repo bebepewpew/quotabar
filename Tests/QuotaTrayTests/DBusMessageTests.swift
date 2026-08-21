@@ -80,11 +80,43 @@ final class DBusMessageTests: XCTestCase {
         XCTAssertNil(decoded.sender)
     }
 
+    /// Asserted on the header array itself. An empty body decodes empty whether
+    /// or not a SIGNATURE field is present, so the previous assertion could not
+    /// distinguish the behaviour it was named for.
     func testAMessageWithNoBodySendsNoSignatureField() throws {
         let bytes = try hello().encoded()
-        // 'g' as a header field code 8 would appear in the header array; the
-        // simplest observable proof is that decoding yields an empty body.
+        var offset = DBusMessage.prologueLength
+        let fields = try DBusWire.decode(signature: "a(yv)", from: bytes, offset: &offset)
+        guard case .array(_, let entries) = fields else { return XCTFail("expected a(yv)") }
+        let codes: [UInt8] = entries.compactMap { entry in
+            guard case .struct(let pair) = entry, case .byte(let code) = pair[0] else { return nil }
+            return code
+        }
+        XCTAssertFalse(codes.contains(DBusMessage.Field.signature.rawValue),
+                       "no body means no SIGNATURE field, got codes \(codes)")
         XCTAssertTrue(try DBusMessage.decode(bytes).body.isEmpty)
+    }
+
+    /// And the converse, so the assertion above cannot pass by the field never
+    /// being written at all.
+    func testAMessageWithABodyDoesSendItsSignatureField() throws {
+        var message = hello()
+        message.body = [.string("x")]
+        var offset = DBusMessage.prologueLength
+        let fields = try DBusWire.decode(signature: "a(yv)", from: try message.encoded(),
+                                         offset: &offset)
+        guard case .array(_, let entries) = fields else { return XCTFail("expected a(yv)") }
+        let signature = entries.compactMap { entry -> DBusValue? in
+            guard case .struct(let pair) = entry, case .byte(let code) = pair[0],
+                  code == DBusMessage.Field.signature.rawValue,
+                  case .variant(let value) = pair[1] else { return nil }
+            return value
+        }.first
+        XCTAssertEqual(signature, .signature("s"))
+    }
+
+    func testTheMessageLimitIsTheOneTheSpecificationSets() {
+        XCTAssertEqual(DBusMessage.maximumLength, 134_217_728)   // 128 MiB
     }
 
     // MARK: Framing

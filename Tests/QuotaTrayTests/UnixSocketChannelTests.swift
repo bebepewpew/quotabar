@@ -34,6 +34,14 @@ private final class SocketServer: @unchecked Sendable {
         address.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)
         let capacity = MemoryLayout.size(ofValue: address.sun_path)
+        // The same guard `UnixSocketChannel` has. Without it this wrote
+        // `path.utf8.count + 1` bytes into a fixed C array — fine on Linux,
+        // where sun_path is 108 and NSTemporaryDirectory() is "/tmp/", and an
+        // out-of-bounds stack write on Darwin, where sun_path is 104 and the
+        // per-user temp directory alone is 48 characters.
+        guard bytes.count + 1 <= capacity else {
+            throw XCTSkip("socket path does not fit sun_path here: \(path)")
+        }
         withUnsafeMutablePointer(to: &address.sun_path) { field in
             field.withMemoryRebound(to: UInt8.self, capacity: capacity) { buffer in
                 for (index, byte) in bytes.enumerated() { buffer[index] = byte }
@@ -98,8 +106,11 @@ final class UnixSocketChannelTests: XCTestCase {
     private var directory: URL!
 
     override func setUpWithError() throws {
-        directory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("quotabar-socket-\(UUID().uuidString)")
+        // Deliberately not NSTemporaryDirectory(): on macOS that is a ~48
+        // character per-user path, which with a UUID leaves no room in the
+        // 104-byte sun_path and would skip every test here.
+        directory = URL(fileURLWithPath: "/tmp")
+            .appendingPathComponent("qb-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -161,6 +172,37 @@ final class UnixSocketChannelTests: XCTestCase {
         channel.close()
     }
 
+    /// A peer that accepts and then says nothing used to hold the tray forever:
+    /// the handshake is bounded in bytes but was not bounded in time.
+    func testAStalledPeerTimesOutRatherThanBlockingForever() throws {
+        let server = try SocketServer(directory: directory)
+        let channel = try UnixSocketChannel(address: .path(server.path), timeout: 0.25)
+        server.waitForClient()
+
+        let started = Date()
+        XCTAssertThrowsError(try channel.read(upTo: 64)) { error in
+            guard case .connectFailed(let reason)? = error as? DBusConnectionError else {
+                return XCTFail("expected connectFailed, got \(error)")
+            }
+            XCTAssertEqual(reason, "read timed out")
+        }
+        // Proves it returned because of the deadline, not because the peer
+        // closed: the server is still up and has sent nothing.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        channel.close()
+    }
+
+    /// A timeout must not be mistaken for the orderly hang-up that ends a
+    /// connection, which reads as an empty result rather than an error.
+    func testATimeoutIsDistinctFromAPeerHangingUp() throws {
+        let server = try SocketServer(directory: directory)
+        let channel = try UnixSocketChannel(address: .path(server.path), timeout: 0.25)
+        server.waitForClient()
+        server.hangUp()
+        XCTAssertEqual(try channel.read(upTo: 64), [])
+        channel.close()
+    }
+
     func testConnectingToANonexistentPathFails() {
         let missing = directory.appendingPathComponent("absent").path
         XCTAssertThrowsError(try UnixSocketChannel(address: .path(missing))) { error in
@@ -173,13 +215,41 @@ final class UnixSocketChannelTests: XCTestCase {
 
     /// sun_path is a fixed C array, so an over-long name has to be refused
     /// rather than silently truncated to address a different socket.
-    func testAnOverLongPathIsRefusedRatherThanTruncated() {
-        let long = "/tmp/" + String(repeating: "a", count: 200)
-        XCTAssertThrowsError(try UnixSocketChannel(address: .path(long))) { error in
+    ///
+    /// Asserted at the exact boundary, from the platform's own capacity: a name
+    /// tested far past the limit would still pass with an off-by-one in the very
+    /// guard that protects the array.
+    func testTheLengthGuardSitsExactlyAtTheCapacityOfSunPath() {
+        let capacity = MemoryLayout.size(ofValue: sockaddr_un().sun_path)
+
+        // One byte spare for the terminator: allowed past the guard, and so it
+        // fails later on connect instead.
+        let longest = "/tmp/" + String(repeating: "a", count: capacity - 1 - 5)
+        XCTAssertThrowsError(try UnixSocketChannel(address: .path(longest))) { error in
+            guard case .connectFailed? = error as? DBusConnectionError else {
+                return XCTFail("a name of capacity-1 should reach connect, got \(error)")
+            }
+        }
+
+        // One byte longer, and there is no room for the terminator.
+        let tooLong = longest + "a"
+        XCTAssertThrowsError(try UnixSocketChannel(address: .path(tooLong))) { error in
             guard case .unsupportedAddress(let reason)? = error as? DBusConnectionError else {
                 return XCTFail("expected unsupportedAddress, got \(error)")
             }
             XCTAssertTrue(reason.contains("too long"), reason)
+        }
+    }
+
+    /// The abstract form spends the same spare byte on its leading NUL, so the
+    /// boundary is identical rather than one larger.
+    func testTheLengthGuardAppliesToAbstractNamesToo() {
+        let capacity = MemoryLayout.size(ofValue: sockaddr_un().sun_path)
+        let tooLong = String(repeating: "a", count: capacity)
+        XCTAssertThrowsError(try UnixSocketChannel(address: .abstract(tooLong))) { error in
+            guard case .unsupportedAddress? = error as? DBusConnectionError else {
+                return XCTFail("expected unsupportedAddress, got \(error)")
+            }
         }
     }
 
@@ -211,7 +281,16 @@ final class UnixSocketChannelTests: XCTestCase {
     }
 
     func testAnEmptyBusAddressIsTreatedAsAbsent() {
-        XCTAssertThrowsError(try UnixSocketChannel(environment: ["DBUS_SESSION_BUS_ADDRESS": ""]))
+        XCTAssertThrowsError(
+            try UnixSocketChannel(environment: ["DBUS_SESSION_BUS_ADDRESS": ""])
+        ) { error in
+            // "Treated as absent" means the same error as absent, not merely
+            // that something was thrown.
+            guard case .unsupportedAddress(let reason)? = error as? DBusConnectionError else {
+                return XCTFail("expected unsupportedAddress, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("DBUS_SESSION_BUS_ADDRESS"), reason)
+        }
     }
 
     func testAnUnsupportedTransportIsReportedWithItsAddress() {

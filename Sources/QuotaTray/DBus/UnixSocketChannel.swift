@@ -18,8 +18,16 @@ public final class UnixSocketChannel: DBusChannel, @unchecked Sendable {
     private var descriptor: Int32
     private let lock = NSLock()
 
+    /// How long a single read or write may stall before it is an error.
+    ///
+    /// The handshake is bounded in bytes but was not bounded in time, so a peer
+    /// that accepted the connection and then said nothing held the tray forever.
+    /// AGENTS.md requires external processes to be bounded by a deadline; a
+    /// socket someone else is on the other end of is the same hazard.
+    public static let defaultTimeout = 30.0
+
     /// Connects to a session bus socket.
-    public init(address: DBusAddress) throws {
+    public init(address: DBusAddress, timeout: TimeInterval = UnixSocketChannel.defaultTimeout) throws {
         // A write to a socket whose peer has gone raises SIGPIPE, which kills
         // the process by default. The tray must fail the write and report it
         // instead — the same hazard the probes have.
@@ -79,6 +87,22 @@ public final class UnixSocketChannel: DBusChannel, @unchecked Sendable {
             close()
             throw DBusConnectionError.connectFailed("connect \(name): \(reason)")
         }
+
+        // Applied after connect so a stalled peer surfaces as an error rather
+        // than a hang. A timed-out recv sets EAGAIN, which `read` reports.
+        // Seconds AND microseconds. `Int(0.25)` is 0, and a zero timeval means
+        // "block forever" in POSIX — so truncating here does not shorten the
+        // deadline, it removes it. Rounded up so a sub-microsecond value can
+        // never land on zero either.
+        let seconds = timeout.rounded(.down)
+        var window = timeval(tv_sec: Int(seconds),
+                             tv_usec: Int(((timeout - seconds) * 1_000_000).rounded(.up)))
+        for option in [SO_RCVTIMEO, SO_SNDTIMEO] {
+            _ = withUnsafePointer(to: &window) {
+                setsockopt(descriptor, SOL_SOCKET, option, $0,
+                           socklen_t(MemoryLayout<timeval>.size))
+            }
+        }
     }
 
     /// Resolves the bus from the environment, the way every D-Bus client does.
@@ -125,6 +149,11 @@ public final class UnixSocketChannel: DBusChannel, @unchecked Sendable {
             // Zero is an orderly shutdown by the peer.
             if received == 0 { return [] }
             if errno == EINTR { continue }
+            // A timeout is not a broken socket, and saying so is the difference
+            // between a diagnosable stall and "the tray did not start".
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                throw DBusConnectionError.connectFailed("read timed out")
+            }
             throw DBusConnectionError.connectFailed("read: \(errorText())")
         }
     }
