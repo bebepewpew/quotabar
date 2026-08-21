@@ -282,6 +282,17 @@ jobs:
               compare "$skill" ".codex/skills/$name/SKILL.md" "$skill"
           done
           test "$drift" -eq 0
+          # The Homebrew formula is held here and says so in its own header;
+          # `Formula/` is a path in the generated tap and never one in this
+          # repository. A document claiming the formula is absent sends a writer
+          # to delete the accurate passages, so every document that describes
+          # where it lives has to name the real file.
+          test -s packaging/homebrew/quotabar.rb
+          formula_docs="README.md docs/agent-guides/docs-writing.md"
+          formula_docs="$formula_docs docs/agent-guides/release.md"
+          for doc in $formula_docs; do
+              grep -q 'packaging/homebrew/quotabar.rb' "$doc"
+          done
 
       # The Linux job is the expensive one, and both of these are about the one
       # step that now carries it. They need no toolchain, so they belong here

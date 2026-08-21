@@ -27,10 +27,14 @@ yourself pasting a paragraph into a second file, the guide is the right home and
 the wrapper should link it.
 
 Do not propose moving `Package.swift`, `Sources/`, `Tests/` or `Resources/` —
-SwiftPM finds them by convention, and the README says so. The Homebrew formula is
-**not** in this repository at all: it lives in `bebepewpew/homebrew-tap`, which the
-release workflow pushes. A document that still points at a local `Formula/` is out
-of date.
+SwiftPM finds them by convention, and the README says so. The Homebrew formula
+**is** in this repository: `packaging/homebrew/quotabar.rb` is the source of truth,
+and its own header says so, because its `install` and `test` blocks run on every
+user's machine and belong behind this repository's review.
+`bebepewpew/homebrew-tap` is generated output — the release workflow renders that
+file into the tap as `Formula/quotabar.rb`, so `Formula/` is a path in the tap and
+never one here. A document that points at a `Formula/` directory in *this*
+repository is out of date; `README.md` has the passage to match.
 
 ## The pull-request title is the changelog
 
