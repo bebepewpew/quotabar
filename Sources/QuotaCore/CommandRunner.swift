@@ -63,7 +63,7 @@ public enum CommandRunner {
         if process.processIdentifier > 1 { _ = setpgid(process.processIdentifier, process.processIdentifier) }
         #endif
         // Same reason the stdin write end is closed below: the child holds its
-        // own copies, and `readDataToEndOfFile` returns only once every other
+        // own copies, and a reader reaches end of file only once every other
         // write end is gone. This one has never been observed to stall — unlike
         // `ProcessLineSession`, which held its pipe in a stored property and did
         // — so it is here to stop the invariant depending on when Foundation
@@ -73,15 +73,8 @@ public enum CommandRunner {
         Self.liveChildren.insert(process.processIdentifier)
         defer { Self.liveChildren.remove(process.processIdentifier) }
 
-        let stdout = LockedData(), stderr = LockedData(), readers = DispatchGroup()
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stdout.set(output.fileHandleForReading.readDataToEndOfFile()); readers.leave()
-        }
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderr.set(errors.fileHandleForReading.readDataToEndOfFile()); readers.leave()
-        }
+        let readers = DispatchGroup()
+        let stdout = PipeReader(output, in: readers), stderr = PipeReader(errors, in: readers)
         // A child that read no stdin and exited leaves this write failing with
         // `EPIPE`. That is not the interesting failure: the exit status and the
         // child's own stderr below say far more than "broken pipe", so the write
@@ -95,7 +88,14 @@ public enum CommandRunner {
             Self.terminate(process)
             _ = finished.wait(timeout: .now() + 1)
             Self.signalGroup(of: process, SIGKILL)
-            _ = readers.wait(timeout: .now() + 2)
+            if readers.wait(timeout: .now() + 2) == .timedOut {
+                // Whatever still holds the write ends left the process group, so
+                // the kill above never reached it — a grandchild that called
+                // `setsid()` is exactly this case. Both readers would then sit on
+                // a thread and a descriptor apiece until the process exits, and a
+                // menu bar refreshing for weeks accumulates a pair per deadline.
+                Self.stopReading(stdout, stderr, in: readers)
+            }
             throw ProbeError.message("The CLI did not respond in time")
         }
         if readers.wait(timeout: .now() + 2) == .timedOut {
@@ -105,10 +105,10 @@ public enum CommandRunner {
             Self.signalGroup(of: process, SIGTERM)
             if readers.wait(timeout: .now() + 1) == .timedOut {
                 Self.signalGroup(of: process, SIGKILL)
-                _ = readers.wait(timeout: .now() + 1)
+                if readers.wait(timeout: .now() + 1) == .timedOut {
+                    Self.stopReading(stdout, stderr, in: readers)
+                }
             }
-            try? output.fileHandleForReading.close()
-            try? errors.fileHandleForReading.close()
             throw ProbeError.message("The CLI exited but left its output stream open")
         }
         guard process.terminationStatus == 0 else {
@@ -145,6 +145,21 @@ public enum CommandRunner {
         guard process.processIdentifier > 1 else { return }
         signalGroup(of: process, SIGTERM)
         process.terminate()
+    }
+
+    /// Ends readers that are still waiting on output nobody is going to send,
+    /// and waits — bounded, like everything else here — for them to hand their
+    /// threads and descriptors back before the caller is told the run failed.
+    ///
+    /// Cancellation is cooperative because the obvious alternative is worse:
+    /// closing a descriptor out from under a blocked reader does not wake it on
+    /// Linux, and the reader then trips the `try!` inside Foundation the next
+    /// time it touches that descriptor — a leaked pipe traded for a crashed menu
+    /// bar. A `PipeReader` closes its own handle instead, so no descriptor is
+    /// ever pulled out from under the only thread that reads it.
+    private static func stopReading(_ readers: PipeReader..., in group: DispatchGroup) {
+        for reader in readers { reader.cancel() }
+        _ = group.wait(timeout: .now() + 1)
     }
 
     /// Process groups of children that are running right now.
@@ -215,11 +230,73 @@ public enum CommandRunner {
     }
 }
 
-private final class LockedData: @unchecked Sendable {
+/// Collects everything a child writes to one of its output pipes, on a thread of
+/// its own, and can be told to stop and let the pipe go.
+///
+/// `readDataToEndOfFile()` cannot be told that. It returns only once every write
+/// end is closed, which a grandchild that escaped the process group can prevent
+/// for as long as the app runs, and there is no safe way to take the descriptor
+/// away from it: closing the handle leaves the reader blocked on Linux and then
+/// traps the whole process on Foundation's `try!` when it reads again. So the
+/// descriptor is read directly, in short waits, and the reader — the only thing
+/// that ever closes this handle — closes it on the way out.
+private final class PipeReader: @unchecked Sendable {
+    /// How long a reader waits for output before looking at `stopped` again.
+    /// Short enough not to hold up a deadline that is already overdue, long
+    /// enough to cost nothing on a run that behaves.
+    private static let waitMilliseconds: Int32 = 100
+    private static let bufferSize = 32 * 1_024
+
+    private let handle: FileHandle
     private let lock = NSLock()
     private var storage = Data()
+    private var stopped = false
+
+    /// Starts reading straight away and leaves `group` when the pipe is done
+    /// with, whether that is end of file or a cancellation.
+    init(_ pipe: Pipe, in group: DispatchGroup) {
+        handle = pipe.fileHandleForReading
+        group.enter()
+        DispatchQueue.global(qos: .utility).async { [self] in
+            drain()
+            group.leave()
+        }
+    }
+
+    /// Everything read so far.
     var value: Data { lock.withLock { storage } }
-    func set(_ data: Data) { lock.withLock { storage = data } }
+
+    /// Asks the reader to give up. It closes the pipe on its way out, within one
+    /// wait interval of this call.
+    func cancel() { lock.withLock { stopped = true } }
+
+    private func drain() {
+        #if os(Windows)
+        // `poll` is POSIX-only; the cancellable equivalent is an overlapped read,
+        // and it belongs with a Windows front-end.
+        let data = handle.readDataToEndOfFile()
+        lock.withLock { storage = data }
+        try? handle.close()
+        #else
+        let descriptor = handle.fileDescriptor
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: Self.bufferSize, alignment: 1)
+        defer {
+            buffer.deallocate()
+            try? handle.close()
+        }
+        guard descriptor >= 0 else { return }
+        while !lock.withLock({ stopped }) {
+            var watched = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&watched, 1, Self.waitMilliseconds)
+            if ready < 0 && errno != EINTR { return }
+            guard ready > 0 else { continue }
+            let count = read(descriptor, buffer, Self.bufferSize)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { return }
+            lock.withLock { storage.append(buffer.assumingMemoryBound(to: UInt8.self), count: count) }
+        }
+        #endif
+    }
 }
 
 public enum ProbeError: LocalizedError {
