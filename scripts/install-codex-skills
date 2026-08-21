@@ -31,4 +31,18 @@ for source in "$repo_root"/.codex/skills/*/; do
     printf '%s\n' "installed $name -> $target"
 done
 
+# A skill renamed or dropped in the repository leaves its old directory behind,
+# and Codex would go on offering both — one role under two names. Prune only
+# what this script installed; anything without the marker is somebody else's.
+for target in "$dest"/*/; do
+    [ -d "$target" ] || continue
+    name=$(basename "$target")
+    [ -f "$target/$marker" ] || continue
+    if [ -d "$repo_root/.codex/skills/$name" ]; then
+        continue
+    fi
+    rm -rf "$target"
+    printf '%s\n' "removed $name (no longer in the repository)"
+done
+
 printf '%s\n' "Codex skills installed. They point at docs/agent-guides/ in the repo."

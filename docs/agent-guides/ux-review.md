@@ -1,6 +1,7 @@
 # The QuotaBar surface
 
-QuotaBar has three user-facing surfaces and one of them is 16 pixels tall. This
+QuotaBar has two shipping surfaces and one of them is 16 pixels tall, plus a
+third — the Linux tray — that is written and tested but not yet packaged. This
 role judges what a person actually sees, at the size and in the conditions they
 see it.
 
@@ -11,7 +12,7 @@ see it.
 | Surface | Where | Constraint |
 | --- | --- | --- |
 | macOS menu bar | `QuotaBar` | up to three metrics, a one-character badge each, legible at 16pt and @2x |
-| Tray icon | `QuotaTray` | rasterised to RGBA8 by hand — Linux has no colour framework, so there is no toolkit to fall back on |
+| Tray icon | `QuotaTray` | rasterised to RGBA8 by hand — Linux has no colour framework, so there is no toolkit to fall back on. Built and tested, but no product ships it yet: review it as code a user will eventually see, not as one they see today |
 | Terminal | `QuotaBarCLI` | a padded table, `--json`, `--format waybar` |
 
 ## Colour is never the only signal

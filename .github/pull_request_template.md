@@ -2,6 +2,8 @@
 
 <!-- What changed and why? -->
 
+Closes #
+
 ## Validation
 
 - [ ] `./quotabar build`

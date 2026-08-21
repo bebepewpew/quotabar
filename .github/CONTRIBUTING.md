@@ -17,6 +17,29 @@ The local hooks provide fast feedback, but GitHub branch protection and CI are
 authoritative. See [AGENTS.md](../AGENTS.md) for architecture, safety, and
 testing rules that apply to both human and AI contributors.
 
+## Filing an issue
+
+Blank issues are turned off, so every entry arrives with the fields the next
+reader needs. Pick the template that matches what you have:
+
+| Template | Use it for |
+| --- | --- |
+| **Bug report** | QuotaBar reads a quota wrong, shows the wrong thing, or fails where it should not |
+| **Feature request** | Something QuotaBar should show or do that it does not today |
+| **Backlog item** | Work already scoped — problem, surfaces, assertable acceptance criteria, out of scope, the category label |
+
+Two things before you post. **Search closed issues too**: the answer is often
+that this was decided already. And **redact** — no tokens, account identifiers,
+home-directory paths, or terminal captures containing personal data, the same
+rule that keeps them out of commits.
+
+A vulnerability never goes in a public issue. Report it privately through a
+GitHub security advisory; [`SECURITY.md`](SECURITY.md) has the process.
+
+AI agents file and answer issues through
+[`docs/agent-guides/backlog.md`](../docs/agent-guides/backlog.md), which covers
+the non-interactive `gh issue create` invocation and what a reply may not claim.
+
 ## Pull-request labels
 
 A release's notes are generated from the merged pull requests, and
@@ -41,6 +64,18 @@ list readable, not requirements.
 | `docs` | `#0075ca` | Documentation |
 | `dependencies` | `#0366d6` | Dependencies |
 | `skip changelog` | `#cfd3d7` | none — the pull request is left out entirely |
+
+An issue carries the same category label the pull request that closes it will
+carry, so the backlog sorts the way the release notes do. Triage adds two labels
+that never reach a pull request:
+
+| Label | Colour | Means |
+| --- | --- | --- |
+| `needs-info` | `#d4c5f9` | One fact is missing and has been asked for. Closed if it never arrives |
+| `provider-limited` | `#c2e0c6` | Not buildable until a provider CLI prints the data. Nothing on our side unblocks it |
+
+Like the category labels, a maintainer creates these once under **Issues →
+Labels**.
 
 `documentation` and `dependencies` already exist in most repositories:
 GitHub creates the first with a new repository and Dependabot applies the second

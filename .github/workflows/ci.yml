@@ -43,8 +43,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Exactly the labels .github/release.yml categorises, and exactly the
-          # table in README.md. Changing one means changing all three.
+          # Exactly the labels .github/release.yml categorises. The same set is
+          # written out in README.md, .github/CONTRIBUTING.md,
+          # docs/agent-guides/product-shaping.md, docs/agent-guides/backlog.md
+          # and the dropdown in .github/ISSUE_TEMPLATE/task.yml. Changing one
+          # means changing all of them; this array is the one that fails a
+          # pull request, so it is the one that decides.
           allowed=(
             feature
             fix
@@ -112,6 +116,17 @@ jobs:
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
+          # Blank issues are disabled, so a form that is gone or truncated takes
+          # the web chooser down with it and a person has no way in. This proves
+          # the files are there and still have their top-level keys; it does not
+          # parse them, so a form broken below that level reaches production.
+          for form in bug_report feature_request task; do
+              test -s ".github/ISSUE_TEMPLATE/$form.yml"
+              grep -q '^name:' ".github/ISSUE_TEMPLATE/$form.yml"
+              grep -q '^body:' ".github/ISSUE_TEMPLATE/$form.yml"
+          done
+          test -s .github/ISSUE_TEMPLATE/config.yml
+          grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
       - name: Build
         run: swift build
       - name: Test

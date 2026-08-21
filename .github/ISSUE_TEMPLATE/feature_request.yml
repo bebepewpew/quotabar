@@ -1,0 +1,72 @@
+name: Feature request
+description: Something QuotaBar should show or do that it does not today.
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        QuotaBar has no API behind it. It shows what the Codex, Claude Code and Gemini CLIs already
+        print on your own machine, and nothing else — cost in dollars, per-request history, or a
+        vendor QuotaBar does not read cannot be built here.
+
+        If what you are describing is a security weakness, send it to a
+        [private security advisory](https://github.com/bebepewpew/quotabar/security/advisories/new)
+        rather than a public issue.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the issues, closed ones too, and this is not a duplicate.
+          required: true
+        - label: I read the note above — QuotaBar can only show what a provider CLI already prints on my machine.
+          required: true
+        - label: I will remove credentials, tokens, account identifiers and personal paths from anything I paste below.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: One sentence, from your side. What are you unable to see or do today?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surfaces
+    attributes:
+      label: Where you would want to see it
+      description: Tick everything that fits.
+      multiple: true
+      options:
+        - macOS menu bar
+        - "`quotabar` in a terminal"
+        - "`--json` / `--format waybar`, so a status bar can read it"
+        - No preference
+    validations:
+      required: true
+
+  - type: textarea
+    id: criteria
+    attributes:
+      label: How would you know it was working?
+      description: Plain language is fine — "the menu bar shows a countdown beside the percentage". We turn that into something testable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: source
+    attributes:
+      label: Where the data comes from, if you know
+      description: |
+        Optional. Which provider CLI prints this today — paste the line, redacted. Leave it blank if you
+        do not know. If nothing prints it, saying so is still useful: it means this is blocked on the
+        provider rather than on us.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: Optional. The workaround, if you have one — it tells us how much this is worth.

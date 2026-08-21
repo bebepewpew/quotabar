@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Backlog"
+  short_description: "File and answer QuotaBar issues"
+  default_prompt: "Use $quotabar-pm to work this against docs/agent-guides/backlog.md: search for duplicates, pick the template, and either file the issue with one category label or answer it with one of the five outcomes."
+policy:
+  allow_implicit_invocation: false

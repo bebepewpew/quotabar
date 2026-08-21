@@ -1,0 +1,22 @@
+# Issue templates for QuotaBar.
+#
+# Blank issues are off deliberately: every entry in the backlog — filed by a
+# person or by an agent — arrives with the fields the next reader needs, so
+# triage is a decision rather than an interrogation. Agents build the body
+# themselves and file it with `gh issue create --body-file`; the `--template`
+# flag opens an editor and is no use to them. See docs/agent-guides/backlog.md.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/bebepewpew/quotabar/security/advisories/new
+    about: Privately, through a GitHub security advisory — never a public issue. The repository's security policy has the scope and the process.
+  - name: A provider shows no quota, or something looks wrong
+    url: https://github.com/bebepewpew/quotabar#troubleshooting
+    about: Usually a missing `expect`, a CLI that is signed out, or Gemini waiting on a folder-trust prompt. The table names each message and its cause. Still stuck — file a bug report.
+  - name: How a change gets merged
+    url: https://github.com/bebepewpew/quotabar/blob/main/.github/CONTRIBUTING.md
+    about: How to branch, test, and open a pull request.
+  - name: The rules humans and AI agents both follow
+    url: https://github.com/bebepewpew/quotabar/blob/main/AGENTS.md
+    about: Architecture, safety and testing rules that humans and AI agents both follow.

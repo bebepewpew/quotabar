@@ -1,0 +1,114 @@
+name: Bug report
+description: QuotaBar reads a quota wrong, shows the wrong thing, or fails where it should not.
+title: "[Bug]: "
+labels: ["fix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        QuotaBar never reads your credentials, and neither should this issue. Strip tokens, account
+        identifiers, organisation or pool names, and home-directory paths out of every block below
+        before you post. The Claude usage panel also prints your timezone, if you would rather not
+        share it.
+
+        A vulnerability goes to a [private security advisory](https://github.com/bebepewpew/quotabar/security/advisories/new)
+        instead of a public issue.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the issues, closed ones too, and this is not a duplicate.
+          required: true
+        - label: I will remove credentials, tokens, account identifiers and personal paths from anything I paste below.
+          required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happens
+      description: The menu-bar app and the `quotabar` command are separate programs — a bug can be in one and not the other.
+      options:
+        - macOS menu-bar app
+        - "`quotabar` command"
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Which provider
+      options:
+        - Codex
+        - Claude Code
+        - Gemini CLI
+        - More than one
+        - Not about one provider — install, launch, settings or history
+    validations:
+      required: true
+
+  - type: input
+    id: quotabar-version
+    attributes:
+      label: Version, and how you installed it
+      description: "Run `quotabar --version`. If you built the menu-bar app from a checkout, give the commit instead: `git rev-parse --short HEAD`."
+      placeholder: "quotabar 0.1.0, Homebrew — or: menu-bar app built from source, ffdfe7f"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system
+      placeholder: "macOS 14.6 (Apple silicon), or Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: input
+    id: cli-version
+    attributes:
+      label: Provider CLI version
+      description: Optional. The version of the CLI QuotaBar is reading — its output is what QuotaBar parses, so a format change there shows up here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected instead
+      description: |
+        Quote the exact message QuotaBar showed — "it said an error" cannot be searched for in the source.
+        If a percentage or a reset time is wrong, say what the provider CLI itself reports; that is the
+        reference. You can drag a screenshot in here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: If it happens every time you open QuotaBar, say that — it is a complete answer.
+      placeholder: |
+        1.
+        2.
+        3.
+
+  - type: textarea
+    id: json
+    attributes:
+      label: "`quotabar --json` output (redacted)"
+      description: Optional, and the single most useful thing you can attach.
+      render: json
+
+  - type: textarea
+    id: provider-output
+    attributes:
+      label: What the provider CLI prints (redacted)
+      description: |
+        Optional, and it usually becomes the fixture that closes a parsing bug. Redact it first.
+        Claude Code: `claude -p /usage`.
+        Gemini: run `gemini`, type `/stats`, copy the panel.
+        Codex: skip this one — QuotaBar reads Codex over a JSON protocol rather than printed text, so
+        there is nothing you can run by hand that matches. The `--json` box above is what helps.
+      render: text

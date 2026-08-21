@@ -15,16 +15,30 @@ without knowing which is how a gate quietly stops gating.
 ## The Labels gate
 
 Release notes are generated from merged pull requests and grouped by label
-(`.github/release.yml`), so the `labels` job fails a pull request that carries
-anything other than **exactly one** of:
+(`.github/release.yml`), so the `labels` job requires **exactly one** of:
 
     feature | fix | security | performance | tooling | ci | documentation | docs
     dependencies | skip changelog
 
+It counts only labels in that set: a label it does not recognise is ignored
+rather than failing the pull request, which is what lets the triage labels
+`needs-info` and `provider-limited` exist without colliding with the gate.
+
 `documentation` and `docs` are both allowed on purpose — GitHub creates the first
-with a new repository — and both map to the same section. The allowed set appears
-in three places that must change together: this job, `.github/release.yml` and the
-table in `.github/CONTRIBUTING.md`.
+with a new repository — and both map to the same section. The allowed set is
+written out in six places that must change together: this job (the copy that
+actually fails a pull request), `.github/release.yml`, the tables in
+`.github/CONTRIBUTING.md` and `README.md`, the list in
+`docs/agent-guides/product-shaping.md`, and — since issues carry the same label
+the closing pull request will — `docs/agent-guides/backlog.md` and the dropdown
+in `.github/ISSUE_TEMPLATE/task.yml`.
+
+The issue forms have a gate of their own, in the policy step: the three forms and
+`config.yml` must exist, be non-empty and keep their top-level keys. Nothing
+parses them, so **no job would catch a form that is valid YAML in the wrong
+shape, or one whose `id`s collide** — GitHub reports that in its own UI when
+somebody tries to file. `blank_issues_enabled` flipping to `true` is likewise
+uncaught beyond the key still being present.
 
 Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
