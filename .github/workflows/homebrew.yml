@@ -1,0 +1,141 @@
+# Verifies the Homebrew formula in `Formula/`.
+#
+# READ THIS BEFORE DELETING IT AS "REDUNDANT WITH ci.yml".
+#
+# This is NOT a build check for the code in a pull request. The formula's `url`
+# points at the LAST RELEASED TAG, so `brew install --build-from-source` here
+# downloads and compiles that already-published tarball — never the branch under
+# review. What this proves is that `brew install quotabar` actually works for
+# someone following the release notes: that `sha256` really is the checksum of
+# the tarball at `url`, that the Ruby is valid and installable, and that the
+# installed binary passes the formula's own `test do` block. `ci.yml` is what
+# proves a pull request's own sources build and test; the two do not overlap,
+# and neither one covers the other's failure.
+#
+# The checksum case is the one that matters. Homebrew hard-fails a download on a
+# sha256 mismatch, which is the only thing that would have caught the
+# placeholder `0000…0` that reached the v0.1.0 release notes and made
+# `brew install quotabar` fail for everyone who followed them.
+#
+# Path-filtered on purpose: this compiles Swift from source on a macOS runner,
+# so it must not run on every unrelated pull request. It runs when the formula
+# (or this file) changes, weekly so that a tag which stops resolving is noticed
+# without waiting for the next formula edit, and on demand.
+name: Homebrew
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Formula/**'
+      - '.github/workflows/homebrew.yml'
+  pull_request:
+    paths:
+      - 'Formula/**'
+      - '.github/workflows/homebrew.yml'
+  schedule:
+    # Weekly. Off the hour and away from midnight: GitHub's scheduler is
+    # congested at both, and a delayed cron run is a silently skipped run.
+    - cron: '41 5 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Fast and quiet: no implicit `brew update` before every command, no metrics,
+  # and no post-install cleanup pass over the runner's preinstalled kegs.
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_ANALYTICS: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+  # `github.repository` is exactly the tap name README.md tells users to type
+  # (`brew tap bebepewpew/quotabar …`), so CI runs the documented command and a
+  # fork verifies itself under its own name. Held in env rather than expanded
+  # into the scripts below, so no event-context value is ever pasted into a
+  # shell command line.
+  TAP: ${{ github.repository }}
+  FORMULA: ${{ github.repository }}/quotabar
+
+jobs:
+  formula:
+    name: Formula
+    # Same runner as ci.yml: Homebrew and a full Xcode are preinstalled, and the
+    # formula is `depends_on :macos` with `depends_on xcode: ["16.0", :build]`,
+    # so no other runner can install it at all.
+    runs-on: macos-15
+    # A source build of a Swift package, bounded. Without this a hung `swift
+    # build` would sit on a macOS runner for the six-hour default.
+    timeout-minutes: 60
+    defaults:
+      run:
+        # Declared for the same reason ci.yml declares it: every step below
+        # opens with `set -euo pipefail`, and `pipefail` is a bashism that the
+        # `sh -e` a job can otherwise default to does not have.
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Put this checkout's formula in a local tap
+        run: |
+          set -euo pipefail
+          # `brew audit`, `brew install` and `brew test` all resolve a formula
+          # through a tap, and a tap is just a directory of `Formula/*.rb` under
+          # `$(brew --repository <tap>)`. This repository is already in that
+          # layout, so the obvious move is to tap the checkout itself with
+          # `brew tap "$TAP" "$GITHUB_WORKSPACE"` — but that git-clones it, and
+          # on a `pull_request` run actions/checkout leaves HEAD detached at
+          # `refs/remotes/pull/N/merge` with no matching `refs/heads/*`, so the
+          # clone lands with an empty working tree and the tap silently holds no
+          # formula at all. Creating the directory and copying in the one file
+          # that matters depends on none of the checkout's ref layout and
+          # behaves identically on push, pull_request, schedule and dispatch.
+          tap_path="$(brew --repository "$TAP")"
+          mkdir -p "$tap_path/Formula"
+          cp Formula/quotabar.rb "$tap_path/Formula/quotabar.rb"
+          test -f "$tap_path/Formula/quotabar.rb"
+
+      - name: Audit the formula
+        run: |
+          set -euo pipefail
+          # Nothing is narrowed here. The homebrew-core house rules that do not
+          # apply to a third-party tap — a required `livecheck`/`no_autobump!`
+          # block, bottle blocks, the core dependency and licence allowlists —
+          # are already skipped by the auditor for a formula whose tap is not
+          # core, so `--strict` stays meaningful rather than noisy.
+          #
+          # If a core-only cop ever does start firing on this formula, narrow it
+          # with `--except-cops=<Cop>` and record here which cop and why. Do not
+          # drop `--strict`, and do not delete the step.
+          brew audit --strict --formula "$FORMULA"
+
+      - name: Check the formula's style
+        run: |
+          set -euo pipefail
+          # `brew audit` already runs the RuboCop pass when it is handed a
+          # formula by name (`--skip-style` is the default only when no formula
+          # is named), so this is deliberately belt and braces: it is the
+          # command a contributor runs locally, and it names the cops.
+          brew style "$FORMULA"
+
+      - name: Install the formula from source
+        run: |
+          set -euo pipefail
+          # The step that would have caught the placeholder checksum: Homebrew
+          # verifies `sha256` against the downloaded tarball and hard-fails on a
+          # mismatch before a single line is compiled. `--build-from-source`
+          # because this formula exists to compile on the installing machine —
+          # see the Gatekeeper note in Formula/quotabar.rb — and has no bottle.
+          brew install --build-from-source "$FORMULA"
+
+      - name: Run the formula's test block
+        run: |
+          set -euo pipefail
+          # Proves the installed binary runs rather than merely that it linked:
+          # `test do` shells out to `quotabar --version` and `quotabar --help`.
+          brew test "$FORMULA"
