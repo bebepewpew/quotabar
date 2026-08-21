@@ -276,6 +276,18 @@ public final class UsageRecorder: @unchecked Sendable {
         return written
     }
 
+    /// Drops the cached heads so the next `record` reads them from the store
+    /// again.
+    ///
+    /// Call it whenever the history underneath changed behind the recorder's
+    /// back — a clear being the only way that happens today. The cached head
+    /// would otherwise describe a sample that no longer exists, and the deadband
+    /// would compare the first reading of the fresh history against it and drop
+    /// it.
+    public func forgetHeads() {
+        lock.withLock { heads = nil }
+    }
+
     /// One timestamp for the whole batch. A refresh probes every provider
     /// concurrently and finishes within seconds, so aligning the series on one
     /// instant is both more accurate than per-snapshot times and what lets

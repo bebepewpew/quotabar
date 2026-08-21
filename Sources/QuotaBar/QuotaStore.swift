@@ -29,23 +29,24 @@ final class QuotaStore: ObservableObject {
     @Published private(set) var recommendations: [Recommendation] = []
     @Published private(set) var recentUsage: [HistorySeriesID: [Double?]] = [:]
     /// The span the sparklines cover, so the caption can say what it is.
-    static let sparklineSpan: TimeInterval = 7 * 86_400
+    static let sparklineSpan: TimeInterval = UsageHistoryCoordinator.sparklineSpan
 
     private var schedulerTask: Task<Void, Never>?
     private var hasStarted = false
     private let store: StateStore
     private let cache: SnapshotCache
-    private let history: FileHistoryStore
-    private let recorder: UsageRecorder
+    /// Recording, reading back and clearing all go through here, because they
+    /// have to be ordered against each other.
+    private let usage: UsageHistoryCoordinator
     private static let intervalKey = "QuotaBar.refreshIntervalMinutes"
     private static let menuBarKey = "QuotaBar.menuBarSelections.v1"
     static let refreshIntervals = QuotaEngine.refreshIntervals
 
-    init(store: StateStore = StateStoreFactory.makeDefault()) {
+    init(store: StateStore = StateStoreFactory.makeDefault(),
+         usage: UsageHistoryCoordinator? = nil) {
         self.store = store
         cache = SnapshotCache(store: store)
-        history = FileHistoryStore(store: store)
-        recorder = UsageRecorder(store: history)
+        self.usage = usage ?? UsageHistoryCoordinator(history: FileHistoryStore(store: store))
         installedProviders = []
         snapshots = []
         let savedInterval = store.integer(forKey: Self.intervalKey)
@@ -77,35 +78,32 @@ final class QuotaStore: ObservableObject {
     /// Records the refresh and recomputes what the UI shows from it. The file
     /// work happens off the main actor; only the results land back on it.
     private func reloadHistory(recording successful: [QuotaSnapshot]) async {
-        let recorder = self.recorder
-        let history = self.history
-        let span = Self.sparklineSpan
+        let usage = self.usage
         let current = snapshots
-        let computed = await Task.detached(priority: .utility) { () -> ([Recommendation], [HistorySeriesID: [Double?]]) in
-            recorder.record(successful)
-            let now = Date()
-            let all = history.read().samples
-            let advice = Advisor.recommendations(
-                for: Advisor.inputs(history: all, snapshots: current, now: now), now: now)
-            let from = now.addingTimeInterval(-span)
-            let strips = Dictionary(grouping: all.filter { $0.at >= from }, by: \.series)
-                .mapValues { samples in
-                    QuotaFormatting.buckets(samples.sorted { $0.at < $1.at }
-                        .map { (at: $0.at, usedPercent: $0.usedPercent) },
-                                            from: from, to: now, count: 32)
-                }
-            return (advice, strips)
+        let started = usage.generation
+        let computed = await Task.detached(priority: .utility) {
+            usage.reload(recording: successful, snapshots: current, since: started)
         }.value
-        recommendations = computed.0
-        recentUsage = computed.1
+        // Checked again here, not only inside the coordinator: `clearHistory`
+        // runs on this actor too, so a clear that landed while the file work was
+        // in flight has already emptied both properties and must not be
+        // overwritten by a result computed before it.
+        guard let computed, usage.generation == started else { return }
+        recommendations = computed.recommendations
+        recentUsage = computed.strips
     }
 
     /// Deletes every recorded sample. Surfaced in Settings so the privacy promise
     /// in the README has a button behind it.
+    ///
+    /// The observable half is synchronous — press the button and the panel is
+    /// empty in the same turn, whether or not a refresh is running. The removal
+    /// takes an exclusive file lock, so it goes off this actor.
     func clearHistory() {
-        history.removeAll()
+        let remove = usage.clear()
         recommendations = []
         recentUsage = [:]
+        Task.detached(priority: .utility) { remove() }
     }
 
     func startScheduler() {
