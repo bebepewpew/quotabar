@@ -186,6 +186,47 @@ final class UsageReportTests: XCTestCase {
         XCTAssertEqual(UsageReport.csv(samples: []), "provider,window_key,at,used_percent,reset_at")
     }
 
+    /// A CSV export covers the `--since` window, not the whole retained log:
+    /// `quotabar history` reads the file, keeps `from...to`, and hands only that
+    /// to `csv`. README.md and `--help` promise exactly this, so the count the
+    /// renderer receives is pinned on both sides of the boundary — the default
+    /// window is 7 days against 120 days of retention, and an export that
+    /// silently dropped the difference would be a backup with a hole in it.
+    func testCSVReceivesOnlyTheSinceWindowIncludingItsBoundarySamples() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quotabar-csv-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = FileHistoryStore(url: directory.appendingPathComponent("history.bin"),
+                                     catalog: HistorySeriesCatalog(store: MemoryStateStore()))
+
+        let now = start
+        let from = now.addingTimeInterval(-7 * 86_400)
+        // Oldest first: the header epoch is the day the first sample landed in,
+        // and a record before it cannot be encoded.
+        XCTAssertEqual(store.append([
+            sample(at: now.addingTimeInterval(-100 * 86_400), percent: 10),
+            sample(at: from.addingTimeInterval(-60), percent: 20),
+            sample(at: from, percent: 30),
+            sample(at: now.addingTimeInterval(-3_600), percent: 40),
+            sample(at: now, percent: 50),
+            sample(at: now.addingTimeInterval(60), percent: 60)
+        ]), 6)
+        XCTAssertEqual(store.read().samples.count, 6)
+
+        let windowed = store.read(from: from, to: now).samples
+        XCTAssertEqual(windowed.count, 3)
+        let rows = UsageReport.csv(samples: windowed).split(separator: "\n").dropFirst()
+        XCTAssertEqual(rows.count, 3)
+        // Both boundary samples are kept; the three outside the window are gone,
+        // not merely reordered.
+        XCTAssertEqual(rows.map { String($0.split(separator: ",")[3]) },
+                       ["30.00", "40.00", "50.00"])
+        for dropped in ["10.00", "20.00", "60.00"] {
+            XCTAssertFalse(rows.contains { $0.hasSuffix(",\(dropped),") }, dropped)
+        }
+    }
+
     // MARK: - JSON payloads
 
     func testHistoryPayloadGroupsPointsBySeries() throws {
@@ -247,9 +288,28 @@ final class UsageReportTests: XCTestCase {
         }
     }
 
+    private func sample(at: Date, percent: Double) -> UsageSample {
+        UsageSample(series: session, at: at, usedPercent: percent, resetAt: nil)
+    }
+
     private func cycle(peak: Double, coverage: Double, isComplete: Bool = true) -> CycleSummary {
         CycleSummary(series: session, startedAt: start, endedAt: start.addingTimeInterval(86_400),
                      peakPercent: peak, observedFraction: coverage, sampleCount: 96,
                      isComplete: isComplete)
     }
+}
+
+// MARK: - Stubs
+
+/// In-memory `StateStore` so the series catalogue the history file needs lives
+/// beside the temporary log rather than in the invoking user's state.
+private final class MemoryStateStore: StateStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var blobs: [String: Data] = [:]
+    private var numbers: [String: Int] = [:]
+
+    func data(forKey key: String) -> Data? { lock.withLock { blobs[key] } }
+    func setData(_ value: Data?, forKey key: String) { lock.withLock { blobs[key] = value } }
+    func integer(forKey key: String) -> Int? { lock.withLock { numbers[key] } }
+    func setInteger(_ value: Int?, forKey key: String) { lock.withLock { numbers[key] = value } }
 }

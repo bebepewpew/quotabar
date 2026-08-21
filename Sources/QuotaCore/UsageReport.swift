@@ -96,8 +96,9 @@ public enum UsageReport {
 
     // MARK: - CSV
 
-    /// One row per stored sample. Fields are numbers, keys and timestamps only —
-    /// nothing here needs quoting, and the header names what each column is.
+    /// One row per sample it is handed — `quotabar history` hands it the `--since`
+    /// window rather than the whole log. Fields are numbers, keys and timestamps
+    /// only: nothing here needs quoting, and the header names what each column is.
     public static func csv(samples: [UsageSample]) -> String {
         let rows = samples.sorted { $0.at < $1.at }.map { sample in
             [sample.series.provider.slug,

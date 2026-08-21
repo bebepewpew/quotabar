@@ -134,6 +134,9 @@ struct QuotaBarCLI {
         // is outside the window by definition.
         let cycles = UsageAnalysis.cycles(for: selected)
             .filter { $0.endedAt >= from }
+        // Every format renders this window, `--format csv` included: an export
+        // covers `--since` — 7 days by default — not the whole retained log,
+        // which is what README.md and `--help` promise.
         let windowed = selected.filter { $0.at >= from && $0.at <= now }
 
         let labels = self.labels(SnapshotCache(store: store).all())
