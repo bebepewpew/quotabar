@@ -3,8 +3,8 @@ import XCTest
 import QuotaCore
 
 /// The rules `QuotaStore` owns on its own: the three-selection cap, the badge
-/// renumbering that keeps two same-provider windows apart, the key-or-label
-/// migration of saved selections, and the guard on the stored refresh interval.
+/// renumbering that keeps two same-provider windows apart, the key-only
+/// resolution of saved selections, and the guard on the stored refresh interval.
 ///
 /// Each case runs against a real `JSONFileStateStore` on a temporary file — the
 /// seam `TrayPreferencesTests` already uses on the Linux side — so the assertions
@@ -186,35 +186,59 @@ final class QuotaStoreTests: XCTestCase {
         XCTAssertEqual(store.menuBarIndicators.map(\.badge), ["W", "2", "3"])
     }
 
-    /// The reading is matched on the window key, and on the label only as a
-    /// fallback for a selection saved before that key existed.
-    @MainActor func testIndicatorReadingsMatchOnKeyThenLabelAndAreNilWhenAbsent() {
+    /// The reading is matched on the window key alone. The label is display text
+    /// two windows of one provider can share, so a fallback to it would bind a
+    /// saved selection to a reading the user never chose.
+    @MainActor func testIndicatorReadingsMatchOnTheWindowKeyAlone() {
         let store = makeQuotaStore()
         store.snapshots = [QuotaSnapshot(provider: .gemini,
                                          windows: [window("Pro", key: "gemini-pro", used: 41),
                                                    window("Flash", key: "gemini-flash", used: 8)])]
         let byKey = selection(.gemini, "A label nobody reports", key: "gemini-pro")
-        let byLabel = selection(.gemini, "Flash", key: "a-stale-key")
+        let staleKey = selection(.gemini, "Flash", key: "a-stale-key")
         let absent = selection(.claude, "Session")
-        for pick in [byKey, byLabel, absent] { store.setMenuBarSelection(pick, enabled: true) }
+        for pick in [byKey, staleKey, absent] { store.setMenuBarSelection(pick, enabled: true) }
 
-        XCTAssertEqual(store.menuBarIndicators.map(\.usedPercent), [41, 8, nil] as [Double?])
+        XCTAssertEqual(store.menuBarIndicators.map(\.usedPercent), [41, nil, nil] as [Double?],
+                       "a key nobody reports shows no reading, even when its label matches one")
+    }
+
+    /// The compatibility case a label fallback used to stand in for: a payload
+    /// written before selections carried a key resolves because the decoder
+    /// derives the key from the label on the way in, not because matching falls
+    /// back to it.
+    @MainActor func testASelectionSavedBeforeKeysExistedStillReadsItsWindow() {
+        makeStateStore().setData(Data("""
+        [{"provider":"Claude Code","windowLabel":"Weekly"}]
+        """.utf8), forKey: Self.menuBarKey)
+
+        let store = makeQuotaStore()
+        store.snapshots = [QuotaSnapshot(provider: .claude,
+                                         windows: [window("Session", used: 10),
+                                                   window("Weekly", used: 62)])]
+
+        XCTAssertEqual(store.menuBarSelections.map(\.windowKey), ["weekly"])
+        XCTAssertEqual(store.menuBarIndicators.map(\.usedPercent), [62] as [Double?])
     }
 
     // MARK: Selection migration
 
-    /// A refresh re-keys a selection saved under an old key but the same label,
-    /// so a key change in the provider's output does not blank an indicator.
-    @MainActor func testMigrationRekeysASelectionMatchedByItsLabel() {
+    /// A selection whose key the provider has stopped reporting keeps that key,
+    /// even when another window carries the label it was saved under. The
+    /// migration is persisted by `menuBarSelections.didSet`, so re-pointing it at
+    /// a window the user never chose would outlive the render that did it.
+    @MainActor func testMigrationDoesNotRekeyASelectionOnAMatchingLabel() {
         let store = makeQuotaStore()
-        store.setMenuBarSelection(selection(.gemini, "Pro", key: "gemini-2-5-pro"), enabled: true)
+        let saved = selection(.gemini, "Pro", key: "gemini-2-5-pro")
+        store.setMenuBarSelection(saved, enabled: true)
         store.snapshots = [QuotaSnapshot(provider: .gemini, windows: [window("Pro", key: "pro", used: 5)])]
 
         store.migrateMenuBarSelections()
 
-        XCTAssertEqual(store.menuBarSelections.map(\.windowKey), ["pro"])
-        XCTAssertEqual(store.menuBarSelections.map(\.windowLabel), ["Pro"])
-        XCTAssertEqual(makeQuotaStore().menuBarSelections.map(\.windowKey), ["pro"])
+        XCTAssertEqual(store.menuBarSelections, [saved])
+        XCTAssertEqual(makeQuotaStore().menuBarSelections.map(\.windowKey), ["gemini-2-5-pro"])
+        XCTAssertNil(store.menuBarIndicators[0].usedPercent,
+                     "an absent window shows no reading, not the one that shares its label")
     }
 
     @MainActor func testMigrationAdoptsANewLabelForTheSameKey() {
