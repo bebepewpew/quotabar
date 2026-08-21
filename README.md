@@ -35,8 +35,8 @@ and write its caption at the same time, and delete the placeholder it replaces.
 | `Resources/` | `Info.plist` and the icons the macOS app bundle is built from |
 | `packaging/` | What the release workflow builds distributables from: the nfpm configuration for the `.deb` and `.rpm`, the container `Dockerfile`, and `homebrew/quotabar.rb` |
 | `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` |
-| `docs/agent-guides/` | The long-form guidance the agent tooling points at |
-| `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `CONTRIBUTING.md`, `SECURITY.md` |
+| `docs/` | [`development.md`](docs/development.md) for building and testing from a checkout, [`container.md`](docs/container.md) for the published image, and `agent-guides/` for the long-form guidance the agent tooling points at |
+| `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `ISSUE_TEMPLATE/`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md` |
 | `.claude/`, `.codex/`, `.githooks/` | Per-tool wrappers and the repository hooks |
 | `quotabar` | The wrapper that picks a toolchain: `./quotabar build`, `test`, `coverage`, `run`, `cli` |
 
@@ -104,7 +104,7 @@ still surfaces both from there, and the root stays short enough to read.
 
 Released binaries and packages are published on the
 [releases page](https://github.com/bebepewpew/quotabar/releases). To
-build from a checkout instead, skip to [Build and run](#build-and-run).
+build from a checkout instead, see [From source](#from-source).
 
 Every artifact is signed and checksummed. The commands below install without
 checking that — see [Verifying a release](#verifying-a-release) for the one extra
@@ -195,34 +195,18 @@ identity and carries a GitHub build provenance attestation, and `SHA256SUMS`
 covers the whole set. Each release's notes carry the exact `cosign verify-blob`
 and `gh attestation verify` commands for that version.
 
-## Build and run
-
-### macOS
+### From source
 
 ```sh
 git clone https://github.com/bebepewpew/quotabar.git
 cd quotabar
-./quotabar run
+./quotabar run          # macOS: builds and launches the menu-bar app
+./quotabar cli --json   # Linux and macOS: builds and runs the command
 ```
 
-The wrapper builds an ad-hoc signed `.build/QuotaBar.app` agent bundle and runs
-it as a menu-bar app. Build without launching it with `./quotabar build`. The
-wrapper also selects a compatible installed macOS SDK when Command Line Tools
-contains a compiler/SDK version mismatch.
-
-### Linux
-
-```sh
-git clone https://github.com/bebepewpew/quotabar.git
-cd quotabar
-./quotabar cli --json
-```
-
-With a Swift toolchain installed, this is `swift run quotabar`. Without one — as
-on Arch, which has no official Swift package — the wrapper builds a statically
-linked binary inside the upstream `swift:6.3-noble` container and then runs it on
-the host, where the provider CLIs and your session bus actually live. Override
-the image with `QUOTABAR_SWIFT_IMAGE`.
+The wrapper picks the toolchain for you, and on Linux without Swift installed it
+builds in a container. [`docs/development.md`](docs/development.md) has the
+detail, along with how to run the tests.
 
 ## Usage
 
@@ -279,33 +263,6 @@ causes:
 A failed provider never clears the values QuotaBar already had; the last
 successful reading stays visible with the error beside it.
 
-## Porting to another platform
-
-`QuotaCore` carries no UI framework, and the platform seams are `StateStore`,
-`QuotaNotificationSink` and `QuotaProbe`. A new platform means a new front-end
-target plus implementations of those, declared in `Package.swift` the way the
-macOS app already is.
-
-What Windows would still need, none of which is in the way today:
-
-- process termination via a Job Object, where POSIX uses `setpgid` and a
-  process-group `kill`;
-- `LockFileEx` in `JSONFileStateStore` in place of `flock`;
-- `ENABLE_VIRTUAL_TERMINAL_PROCESSING` before ANSI colour means anything;
-- a toast notification sink instead of `notify-send`;
-- a native pseudo-terminal (ConPTY) for the Gemini probe, which is the only
-  part that genuinely needs one. Codex and Claude Code already run over pipes.
-
-## Tests
-
-```sh
-./quotabar test
-```
-
-On macOS this requires the full Xcode toolchain; the wrapper reports a clear
-error when the standalone Command Line Tools installation does not include
-XCTest. On Linux it runs natively or in the container, matching `./quotabar build`.
-
 ## Privacy and behavior
 
 All probes execute installed CLIs locally. Gemini runs inside a fixed-size
@@ -333,6 +290,8 @@ All changes go through pull requests with required CI. Read
 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) and the shared human/AI
 rules in [AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone
 (and `scripts/install-codex-skills` if you use Codex).
+[`docs/development.md`](docs/development.md) covers building, testing, and what a
+new platform front-end would take.
 
 ## Pull requests
 
