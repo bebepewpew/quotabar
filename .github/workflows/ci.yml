@@ -316,6 +316,20 @@ jobs:
           # `review-swarm` once lost a whole angle and reported five as six.
           test -s .claude/agents/quotabar-harness-reviewer.md
           test -s docs/agent-guides/harness-review.md
+          # `github/codeql-action` is pinned by hand in two workflows, and the
+          # pair that analyses Swift sits behind the required Gate: when a major
+          # it still names is retired, `Analyse Swift` fails and every merge
+          # blocks, not just the security scan. The two drifted apart once
+          # already, so require one major across all of them.
+          codeql_majors="$(grep -rho 'github/codeql-action/[a-z-]*@v[0-9][0-9]*' \
+              .github/workflows | sed 's/.*@//' | sort -u)"
+          # `grep -c .` rather than `wc -l`, which counts an empty result as one
+          # line and would pass a set of references that had gone missing.
+          if [ "$(printf '%s' "$codeql_majors" | grep -c . || true)" -ne 1 ]; then
+              printf 'github/codeql-action must name one major across .github/workflows; found:%s\n' \
+                  "$(printf '%s' "$codeql_majors" | sed 's/^/ /' | tr -d '\n')" >&2
+              exit 1
+          fi
 
       # The Linux job is the expensive one, and both of these are about the one
       # step that now carries it. They need no toolchain, so they belong here
