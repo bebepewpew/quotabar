@@ -49,7 +49,11 @@ public struct TrayColor: Equatable, Sendable {
     /// visible icon, never a transparent or black one.
     public init(hex: String) {
         let digits = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
-        guard digits.count == 6, let value = UInt32(digits, radix: 16) else {
+        // `UInt32(_:radix:)` accepts a leading sign, so "+12345" would otherwise
+        // parse as 0x012345 — a wrong colour rather than the documented grey.
+        // Six ASCII hex digits is the only form this reads.
+        guard digits.count == 6, digits.allSatisfy({ $0.isASCII && $0.isHexDigit }),
+              let value = UInt32(digits, radix: 16) else {
             self.init(red: 0x8E, green: 0x8E, blue: 0x93)
             return
         }
