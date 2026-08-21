@@ -84,9 +84,10 @@ still surfaces both from there, and the root stays short enough to read.
 ### `quotabar` command (macOS, Linux)
 
 - One-shot table, `--json`, or a `--format waybar` payload.
-- `--watch` polls on an interval; `--notify` raises the same 80%/95% alerts
-  through `notify-send`, so any `org.freedesktop.Notifications` daemon (KDE
-  Plasma, GNOME, dunst, mako) shows them.
+- `--watch` polls on an interval of 5 minutes or more; `--notify` raises the
+  same 80%/95% alerts through `notify-send`, so any
+  `org.freedesktop.Notifications` daemon (KDE Plasma, GNOME, dunst, mako) shows
+  them.
 - `quotabar history` charts recorded consumption; `quotabar advise` says whether
   your subscriptions match how you actually use them.
 - Same dedup rules and same cached-value retention as the macOS app.
@@ -96,7 +97,12 @@ still surfaces both from there, and the root stays short enough to read.
 Every refresh records one sample per quota window — a percentage, a timestamp
 and the reset time — to a local file. Readings that have not moved are skipped,
 so three months costs well under a megabyte, and anything older than 120 days is
-dropped.
+dropped. Refreshing more often writes proportionally more: about 830 KB for
+three months at the default fifteen minutes, and about 2.5 MB at the five-minute
+floor `--interval` accepts. Two backstops sit behind that horizon: the file is
+trimmed oldest-first if it ever reaches 32 MB, and at most 256 distinct windows
+are tracked, so a provider that names a new one per model cannot grow the record
+without limit.
 
 From that QuotaBar reconstructs *cycles*: the span between one reset and the
 next. Providers report a level, not a cycle, so a reset is inferred from usage
@@ -114,6 +120,12 @@ leaves your machine:
 | looks oversized | even the busiest of the last cycles peaked at 40% or less |
 | has gone unused | four or more cycles at 1% or less |
 | has headroom | one provider is full while another is half empty |
+
+Only the last ten weeks of the record are read to advise: the eight most recent
+cycles the rules can use, the cycle currently running, and the boundary that
+opens the oldest kept one. Anything older is retained and exported, but it is
+not evidence — a plan resized last month should not be judged on the quarter
+before it.
 
 Advice is withheld unless there are at least four complete cycles, each watched
 for at least 60% of its length. A laptop that was shut for four days understates
@@ -257,7 +269,7 @@ quotabar --json               machine readable snapshots
 quotabar --format waybar      {"text","tooltip","class","percentage"}
 quotabar --provider claude    limit to one provider; repeatable
 quotabar --watch              keep running and re-probe on an interval
-quotabar --watch --interval 15 --notify
+quotabar --watch --interval 15 --notify   minutes between probes, 5 at the least
 quotabar --no-color           disable ANSI colour ($NO_COLOR is honoured too)
 
 quotabar history              usage graph for the last 7 days

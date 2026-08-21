@@ -300,14 +300,134 @@ final class HistoryStoreTests: XCTestCase {
     }
 
     /// Age is not the only bound: a pathological refresh interval could fill the
-    /// disk well inside the horizon, so size triggers a rewrite on its own.
-    func testSizeAloneCanTriggerCompaction() throws {
+    /// disk well inside the horizon, so size triggers a rewrite on its own — and
+    /// the rewrite has to actually shrink the file. Asking for compaction that
+    /// removes nothing leaves the backstop firing forever.
+    func testSizeAloneCompactsEvenWhenNothingHasExpired() throws {
+        // Forty records against a limit of thirty-two, all of them minutes old,
+        // so age expires none of them and only size can drive the trim.
+        let limit = HistoryFormat.headerLength + 32 * HistoryFormat.recordStride
+        let store = makeStore(maximumFileBytes: limit)
+        let now = start.addingTimeInterval(3_600)
+        store.append((0..<40).map {
+            sample(session, at: start.addingTimeInterval(Double($0) * 60), percent: Double($0))
+        })
+        XCTAssertGreaterThanOrEqual(try fileSize(), limit)
+
+        XCTAssertTrue(store.needsCompaction(now: now))
+        let dropped = store.compact(now: now)
+        XCTAssertGreaterThan(dropped, 0)
+
+        XCTAssertLessThan(try fileSize(), limit)
+        XCTAssertFalse(store.needsCompaction(now: now))
+        // Oldest first: what survives is the newest run of records, intact.
+        let kept = store.read().samples
+        XCTAssertEqual(kept.count, 40 - dropped)
+        XCTAssertEqual(kept.map { Int($0.usedPercent.rounded()) }, Array(dropped..<40))
+    }
+
+    /// The trim leaves headroom rather than stopping a byte under the limit, or
+    /// the very next append would put the file back over it and rewrite the whole
+    /// thing on every refresh from then on.
+    func testTheSizeTrimLeavesRoomToGrowAgain() throws {
+        let limit = HistoryFormat.headerLength + 40 * HistoryFormat.recordStride
+        let store = makeStore(maximumFileBytes: limit)
+        let now = start.addingTimeInterval(3_600)
+        store.append((0..<40).map {
+            sample(session, at: start.addingTimeInterval(Double($0) * 60), percent: Double($0))
+        })
+        XCTAssertGreaterThan(store.compact(now: now), 0)
+
+        // Three quarters of the limit or less, so a quarter of the file has to be
+        // appended before the backstop fires again.
+        XCTAssertLessThanOrEqual(try fileSize(), limit - limit / 4)
+    }
+
+    /// Exact boundary: the backstop fires at the limit and not one byte below it.
+    func testTheSizeBackstopFiresAtTheLimitAndNotOneByteBelowIt() throws {
+        let store = makeStore()
+        store.append((0..<24).map {
+            sample(session, at: start.addingTimeInterval(Double($0) * 60), percent: Double($0))
+        })
+        let size = try fileSize()
+        XCTAssertEqual(size, HistoryFormat.headerLength + 24 * HistoryFormat.recordStride)
+
+        let under = makeStore(maximumFileBytes: size + 1)
+        XCTAssertFalse(under.needsCompaction(now: start, horizon: .greatestFiniteMagnitude))
+        XCTAssertEqual(under.compact(now: start, horizon: .greatestFiniteMagnitude), 0)
+        XCTAssertEqual(try fileSize(), size)
+
+        let exactly = makeStore(maximumFileBytes: size)
+        XCTAssertTrue(exactly.needsCompaction(now: start, horizon: .greatestFiniteMagnitude))
+        XCTAssertGreaterThan(exactly.compact(now: start, horizon: .greatestFiniteMagnitude), 0)
+        XCTAssertLessThan(try fileSize(), size)
+        XCTAssertFalse(exactly.needsCompaction(now: start, horizon: .greatestFiniteMagnitude))
+    }
+
+    /// The shipped constant, not just an injected one: a 32 MB file is brought
+    /// back under 32 MB by the store a user actually gets.
+    func testTheDefaultSizeBackstopShrinksTheFile() throws {
         let store = makeStore()
         store.append([sample(session, at: start, percent: 10)])
         let padded = try Data(contentsOf: historyURL())
             + Data(repeating: 0, count: FileHistoryStore.maximumFileBytes)
         try padded.write(to: historyURL())
+
         XCTAssertTrue(store.needsCompaction(now: start, horizon: .greatestFiniteMagnitude))
+        XCTAssertGreaterThan(store.compact(now: start, horizon: .greatestFiniteMagnitude), 0)
+        XCTAssertLessThan(try fileSize(), FileHistoryStore.maximumFileBytes)
+        XCTAssertFalse(store.needsCompaction(now: start, horizon: .greatestFiniteMagnitude))
+    }
+
+    // MARK: - Series bounds
+
+    /// A refusal from the catalogue's ceiling must not take the rest of the batch
+    /// with it. History is best effort: a full catalogue is not a failed refresh.
+    func testAppendSkipsARefusedSeriesAndKeepsTheRest() {
+        let catalog = HistorySeriesCatalog(store: backing)
+        // Fill the catalogue to one slot short of its ceiling.
+        _ = catalog.hashes(for: (0..<(HistorySeriesCatalog.maximumSeries - 1)).map {
+            HistorySeriesID(provider: .gemini, windowKey: "gemini-model-\($0)")
+        })
+        let store = FileHistoryStore(url: historyURL(), catalog: catalog)
+
+        // `session` takes the last slot; `weekly` is refused and dropped.
+        XCTAssertEqual(store.append([sample(session, at: start, percent: 10),
+                                     sample(weekly, at: start, percent: 20)]), 1)
+        let result = store.read()
+        XCTAssertEqual(result.samples.map(\.series), [session])
+        XCTAssertEqual(result.damagedRecords, 0)
+    }
+
+    /// Every sample refused means nothing to write, and nothing to write must not
+    /// leave a file behind either.
+    func testAnAppendOfOnlyRefusedSeriesWritesNothing() {
+        let catalog = HistorySeriesCatalog(store: backing)
+        _ = catalog.hashes(for: (0..<HistorySeriesCatalog.maximumSeries).map {
+            HistorySeriesID(provider: .gemini, windowKey: "gemini-model-\($0)")
+        })
+        let store = FileHistoryStore(url: historyURL(), catalog: catalog)
+
+        XCTAssertEqual(store.append([sample(session, at: start, percent: 10)]), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: historyURL().path))
+    }
+
+    /// A provider reporting a row per model introduces several series in one
+    /// refresh. `StateStore` rewrites its whole file per write, so that has to
+    /// cost one write however many series arrive — and nothing at all once they
+    /// are known.
+    func testOneAppendRegistersEverySeriesInOneStateWrite() {
+        let store = makeStore()
+        let series = (0..<12).map { HistorySeriesID(provider: .gemini, windowKey: "gemini-model-\($0)") }
+
+        backing.resetSetDataCalls()
+        XCTAssertEqual(store.append(series.map { sample($0, at: start, percent: 5) }), series.count)
+        XCTAssertEqual(backing.setDataCalls, 1)
+
+        backing.resetSetDataCalls()
+        XCTAssertEqual(store.append(series.map { sample($0, at: start.addingTimeInterval(60), percent: 6) }),
+                       series.count)
+        XCTAssertEqual(backing.setDataCalls, 0)
     }
 
     func testRemoveAllDeletesTheFileAndForgetsTheSeries() {
@@ -362,9 +482,27 @@ final class HistoryStoreTests: XCTestCase {
     /// a megabyte. A format change that inflates storage should fail here rather
     /// than on a user's disk.
     func testThreeMonthsOfSamplesStaysUnderOneMegabyte() throws {
+        XCTAssertLessThan(try threeMonths(everyMinutes: 15), 1_024 * 1_024)
+    }
+
+    /// The same three months at the shortest interval `--watch` now accepts. The
+    /// floor is what keeps this a number worth printing: `--interval` used to take
+    /// any positive value, and at one minute a refresh the file grows fifteen
+    /// times as fast as the default towards the 32 MB backstop.
+    func testThreeMonthsAtTheShortestAcceptedIntervalStaysUnderThreeMegabytes() throws {
+        let size = try threeMonths(everyMinutes: QuotaEngine.minimumRefreshMinutes)
+        XCTAssertLessThan(size, 3 * 1_024 * 1_024)
+        XCTAssertLessThan(size, UInt64(FileHistoryStore.maximumFileBytes) / 10)
+    }
+
+    /// Three months of eight quota windows sampled every `everyMinutes`, nothing
+    /// suppressed, returning the size of the file it produced. Eight windows is
+    /// what the three CLIs report between them, and the deadband can only ever
+    /// make a real file smaller than this one.
+    private func threeMonths(everyMinutes minutes: Int) throws -> UInt64 {
         let store = makeStore()
         let series = (0..<8).map { HistorySeriesID(provider: .gemini, windowKey: "series-\($0)") }
-        let perDay = 24 * 60 / 15
+        let perDay = 24 * 60 / minutes
         let days = 92
 
         // Appended in day-sized batches so the test exercises the real append path
@@ -372,7 +510,8 @@ final class HistoryStoreTests: XCTestCase {
         for day in 0..<days {
             var batch: [UsageSample] = []
             for slot in 0..<perDay {
-                let at = start.addingTimeInterval(Double(day) * 86_400 + Double(slot) * 15 * 60)
+                let at = start.addingTimeInterval(Double(day) * 86_400
+                    + Double(slot) * Double(minutes) * 60)
                 for one in series {
                     batch.append(sample(one, at: at, percent: Double(slot % 101)))
                 }
@@ -386,15 +525,24 @@ final class HistoryStoreTests: XCTestCase {
 
         let expected = HistoryFormat.headerLength + series.count * perDay * days * HistoryFormat.recordStride
         XCTAssertEqual(Int(size), expected)
-        XCTAssertLessThan(size, 1_024 * 1_024)
+        return size
     }
 
     // MARK: - Fixtures
 
     private func historyURL() -> URL { directory.appendingPathComponent("history.bin") }
 
-    private func makeStore() -> FileHistoryStore {
-        FileHistoryStore(url: historyURL(), catalog: HistorySeriesCatalog(store: backing))
+    private func fileSize() throws -> Int {
+        let handle = try FileHandle(forReadingFrom: historyURL())
+        defer { try? handle.close() }
+        return Int(try handle.seekToEnd())
+    }
+
+    /// The size backstop is injectable so a test can prove it with a few hundred
+    /// bytes; one test still drives the shipped 32 MB constant.
+    private func makeStore(maximumFileBytes: Int = FileHistoryStore.maximumFileBytes) -> FileHistoryStore {
+        FileHistoryStore(url: historyURL(), catalog: HistorySeriesCatalog(store: backing),
+                         store: backing, maximumFileBytes: maximumFileBytes)
     }
 
     private func sample(_ series: HistorySeriesID, at: Date, percent: Double,
@@ -411,9 +559,17 @@ private final class MemoryStateStore: StateStore, @unchecked Sendable {
     private let lock = NSLock()
     private var blobs: [String: Data] = [:]
     private var numbers: [String: Int] = [:]
+    private var writes = 0
+
+    /// How many times anything has been written. `StateStore` rewrites its whole
+    /// file per write, so the count is the cost a batch registration has to keep
+    /// down.
+    var setDataCalls: Int { lock.withLock { writes } }
+
+    func resetSetDataCalls() { lock.withLock { writes = 0 } }
 
     func data(forKey key: String) -> Data? { lock.withLock { blobs[key] } }
-    func setData(_ value: Data?, forKey key: String) { lock.withLock { blobs[key] = value } }
+    func setData(_ value: Data?, forKey key: String) { lock.withLock { blobs[key] = value; writes += 1 } }
     func integer(forKey key: String) -> Int? { lock.withLock { numbers[key] } }
     func setInteger(_ value: Int?, forKey key: String) { lock.withLock { numbers[key] = value } }
 }

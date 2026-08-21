@@ -4,6 +4,14 @@ import Foundation
 /// menu bar and the Linux CLI both need, with no UI framework attached.
 public enum QuotaEngine {
     public static let refreshIntervals = [0, 5, 15, 30, 60]
+    /// The shortest refresh any front-end accepts — the menu bar's shortest
+    /// choice, and the floor `quotabar --watch --interval` enforces.
+    ///
+    /// Every refresh spawns a provider CLI and appends to `history.bin`, so a
+    /// one-minute loop costs fifteen times the processes and grows the file
+    /// fifteen times as fast as the default, for readings no provider updates
+    /// that often.
+    public static let minimumRefreshMinutes = 5
 
     /// Produces one provider's snapshot, or throws the reason it could not.
     /// `QuotaEngine.probe` is the real implementation; tests substitute a stub so

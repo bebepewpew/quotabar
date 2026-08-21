@@ -56,6 +56,26 @@ final class UsageRecorderTests: XCTestCase {
                                        now: start.addingTimeInterval(60)), 0)
     }
 
+    /// After the history underneath is deleted the cached head describes a
+    /// sample that no longer exists. Comparing the first reading of the fresh
+    /// history against it would drop it, so a cleared history would stay empty
+    /// until the quota moved half a point or an hour went by.
+    func testForgettingHeadsLetsTheFirstReadingAfterAClearThrough() {
+        let store = ScriptedHistoryStore()
+        let recorder = UsageRecorder(store: store)
+
+        XCTAssertEqual(recorder.record([snapshot(.codex, [("Session", 40)])], now: start), 1)
+        store.removeAll()
+        XCTAssertEqual(recorder.record([snapshot(.codex, [("Session", 40)])],
+                                       now: start.addingTimeInterval(60)), 0)
+
+        recorder.forgetHeads()
+
+        XCTAssertEqual(recorder.record([snapshot(.codex, [("Session", 40)])],
+                                       now: start.addingTimeInterval(120)), 1)
+        XCTAssertEqual(store.appended.count, 1)
+    }
+
     func testASnapshotCarryingAnErrorIsNotRecorded() {
         let store = ScriptedHistoryStore()
         let recorder = UsageRecorder(store: store)
