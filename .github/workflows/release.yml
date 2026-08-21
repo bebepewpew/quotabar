@@ -9,6 +9,13 @@ name: Release
 # repository. The version stamped into the sources for the build is left
 # uncommitted in each build job's checkout, so the tag still points at the
 # untouched commit the run started from.
+#
+# The job order is a guarantee, and `needs:` is what holds it: `tag` pushes the
+# annotated tag, `tap` proves the Homebrew formula against that tag, and only
+# then does `release` publish. Any failure before that last step leaves a spent
+# tag and nothing else — never a live release whose install instructions point
+# at a formula the tap does not have. scripts/check-release-order asserts this
+# shape on every pull request.
 
 on:
   workflow_dispatch:
@@ -23,11 +30,19 @@ on:
           - minor
           - major
 
+# The safe default, so a job added later starts with no rights it did not ask
+# for. Every job below escalates for itself: `tag` to push the annotated tag,
+# `release` to sign and publish, `container` to push to ghcr. Tag-push and the
+# OIDC identity keyless signing derives from are the two that matter most, and
+# neither is inherited.
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
+# Releases run one at a time and a superseded run is never cancelled, so a job
+# that hangs holds the group for however long it is allowed to. GitHub's default
+# is 360 minutes -- most of a working day in which no release can be cut. Every
+# job below therefore sets its own `timeout-minutes`, above what that job takes
+# with room to spare, and none of them is left at the default.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -36,6 +51,8 @@ jobs:
   version:
     name: Compute the next version
     runs-on: ubuntu-latest
+    # A checkout and some tag arithmetic; minutes are already generous.
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -61,6 +78,8 @@ jobs:
         id: next
         env:
           BUMP: ${{ inputs.bump }}
+          # Read only: the guard below asks whether `previous` was published.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -88,6 +107,31 @@ jobs:
               echo "::error::latest tag '$previous' is not a plain vMAJOR.MINOR.PATCH tag"
               exit 1
             fi
+
+            # An unfinished release is what this catches. The `tag` job pushes
+            # the tag, and `tap` and `release` run after it, so a run that failed
+            # anywhere past that point leaves `previous` tagged with no
+            # published release behind it. Bumping from that tag is never the
+            # recovery: it cuts a new version on top of a half-released one and
+            # hands it an empty changelog, because
+            # --notes-start-tag "$previous" would then span no merged pull
+            # requests. `|| true` keeps a failed lookup out of `set -e`; its
+            # message lands in $state and is reported instead.
+            state="$(gh release view "$previous" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft --jq '.isDraft' 2>&1 || true)"
+            echo "gh release view $previous -> ${state:-no output}"
+            if [ "$state" != "false" ]; then
+              {
+                echo "::error::${previous} is tagged but has no published GitHub release,"
+                echo "::error::so the run that created that tag did not finish. Do not"
+                echo "::error::dispatch another release: that cuts a new version on top of"
+                echo "::error::a half-released one and gives it an empty changelog. Open the"
+                echo "::error::failed run and choose \"Re-run failed jobs\" instead, which"
+                echo "::error::resumes it against the tag that already exists."
+              } >&2
+              exit 1
+            fi
+
             major="${core%%.*}"
             rest="${core#*.}"
             minor="${rest%%.*}"
@@ -117,6 +161,9 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     container: swift:6.3-noble
+    # A static release build plus an `apt-get update` and a network fetch of the
+    # nfpm .deb, so this bound covers a slow mirror as well as a slow compile.
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -242,6 +289,8 @@ jobs:
     name: Build macOS universal
     needs: version
     runs-on: macos-15
+    # A release build of two architectures on a macOS runner.
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -304,97 +353,27 @@ jobs:
           if-no-files-found: error
           path: dist/*.tar.gz
 
-  release:
-    name: Sign, tag and publish
+  tag:
+    name: Tag the release commit
     needs: [version, build-linux, build-macos]
     runs-on: ubuntu-latest
+    # A job of its own so the tag exists before `tap` runs. The formula is
+    # rendered from, and installed out of, the tag's source archive, so the tag
+    # has to be pushed before the formula can be proven -- and the proof has to
+    # finish before `release` publishes anything. A run that dies after this
+    # job spends a version number and leaves an orphan tag; it does not leave a
+    # published release pointing at a formula nobody has.
+    #
+    # A checkout, one `git ls-remote` and a tag push; minutes are generous.
+    timeout-minutes: 10
     permissions:
       contents: write
-      id-token: write
-      attestations: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
       TAG: ${{ needs.version.outputs.tag }}
-      PREVIOUS: ${{ needs.version.outputs.previous }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
-
-      - name: Download the built artifacts
-        uses: actions/download-artifact@v8
-        with:
-          # Outside the checkout on purpose: the tag step refuses to run against
-          # a dirty working tree, and release files are not repository content.
-          path: ${{ runner.temp }}/dist
-          merge-multiple: true
-
-      - name: Check the artifact set and write SHA256SUMS
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/dist"
-          for artifact in \
-            "quotabar-${VERSION}-linux-x86_64.tar.gz" \
-            "quotabar-${VERSION}-macos-universal.tar.gz" \
-            "quotabar_${VERSION}_amd64.deb" \
-            "quotabar-${VERSION}.x86_64.rpm"
-          do
-            if [ ! -f "$artifact" ]; then
-              echo "::error::missing release artifact $artifact"
-              ls -l
-              exit 1
-            fi
-          done
-          # Sorted for a stable file, and relative so `sha256sum --check` works
-          # from whatever directory a user downloaded into.
-          find . -maxdepth 1 -type f -printf '%P\n' | LC_ALL=C sort > "$RUNNER_TEMP/names"
-          xargs -a "$RUNNER_TEMP/names" sha256sum > SHA256SUMS
-          cat SHA256SUMS
-          # SHA256SUMS is signed alongside the artifacts it covers.
-          cp "$RUNNER_TEMP/names" "$RUNNER_TEMP/to-sign"
-          echo SHA256SUMS >> "$RUNNER_TEMP/to-sign"
-
-      - name: Install cosign
-        # No moving `v4` tag exists on this action, so the patch version is
-        # pinned. It installs cosign v3 by default.
-        uses: sigstore/cosign-installer@v4.1.2
-        with:
-          # Pinned: the signing flags below are deprecated in newer cosign, so a
-          # floating default would change release behaviour without a commit.
-          cosign-release: 'v3.0.6'
-
-      - name: Sign every artifact keylessly
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/dist"
-          # cosign v3 defaults to the new bundle format and to a TUF-served
-          # signing config, and in that mode it ignores --output-signature and
-          # --output-certificate. Turn both off to get the detached .sig/.pem
-          # pair this release publishes. Identity comes from the GitHub OIDC
-          # token, so there is no key to hold.
-          while IFS= read -r artifact; do
-            echo "::group::sign ${artifact}"
-            cosign sign-blob \
-              --yes \
-              --use-signing-config=false \
-              --new-bundle-format=false \
-              --output-signature "${artifact}.sig" \
-              --output-certificate "${artifact}.pem" \
-              "$artifact"
-            test -s "${artifact}.sig"
-            test -s "${artifact}.pem"
-            echo "::endgroup::"
-          done < "$RUNNER_TEMP/to-sign"
-          ls -l
-
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: |
-            ${{ runner.temp }}/dist/*.tar.gz
-            ${{ runner.temp }}/dist/*.deb
-            ${{ runner.temp }}/dist/*.rpm
-            ${{ runner.temp }}/dist/SHA256SUMS
 
       - name: Create the annotated tag
         run: |
@@ -407,131 +386,42 @@ jobs:
             printf '%s\n' "$dirty"
             exit 1
           fi
+
+          # Re-running this job is how a release that failed at or after the tag
+          # push is resumed, so a tag already on the released commit is a proven
+          # no-op rather than a failure -- the same treatment the tap job gives
+          # its own re-run. One pointing anywhere else is not ours to move:
+          # signatures and provenance are bound to what it names.
+          existing="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}" "refs/tags/${TAG}^{}" | cut -f1)"
+          if [ -n "$existing" ]; then
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::${TAG} already resolves to ${existing}, not the released ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "${TAG} already points at ${GITHUB_SHA}; leaving it alone."
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "QuotaBar ${VERSION}" "$GITHUB_SHA"
           git push origin "refs/tags/${TAG}"
 
-      - name: Write the release notes
-        # The hand-written half only. The categorised "What's changed" list and
-        # the full-changelog link come from `--generate-notes` in the next step,
-        # which is why nothing here builds a compare URL any more.
-        run: |
-          set -euo pipefail
-          notes="$RUNNER_TEMP/notes.md"
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
-          {
-            echo "## Install"
-            echo
-            echo '```sh'
-            echo "# macOS — built from source, so Gatekeeper never sees an unnotarized binary"
-            echo "brew tap bebepewpew/tap"
-            echo "brew install quotabar"
-            echo
-            echo "# Debian/Ubuntu"
-            echo "sudo apt install ./quotabar_${VERSION}_amd64.deb"
-            echo
-            echo "# Fedora/RHEL"
-            echo "sudo rpm -i quotabar-${VERSION}.x86_64.rpm"
-            echo '```'
-            echo
-            echo "## Verify"
-            echo
-            echo "Every artifact is signed keylessly with sigstore cosign through this"
-            echo "repository's GitHub OIDC identity, and carries a build provenance"
-            echo "attestation. \`SHA256SUMS\` covers all of them."
-            echo
-            echo '```sh'
-            echo "sha256sum --check --ignore-missing SHA256SUMS"
-            echo
-            echo "cosign verify-blob \\"
-            echo "  --certificate quotabar-${VERSION}-linux-x86_64.tar.gz.pem \\"
-            echo "  --signature quotabar-${VERSION}-linux-x86_64.tar.gz.sig \\"
-            echo "  --certificate-identity '${identity}' \\"
-            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
-            echo "  quotabar-${VERSION}-linux-x86_64.tar.gz"
-            echo
-            echo "gh attestation verify quotabar-${VERSION}-linux-x86_64.tar.gz \\"
-            echo "  --repo ${GITHUB_REPOSITORY}"
-            echo '```'
-          } > "$notes"
-          cat "$notes"
-
-      - name: Publish the GitHub release
-        run: |
-          set -euo pipefail
-          # Two halves make up the published notes: the install and verify
-          # section written above, and the categorised what's-changed list plus
-          # full-changelog link that --generate-notes builds from the pull
-          # requests merged since the previous tag, grouped by the label
-          # categories in .github/release.yml.
-          notes_window=()
-          if [ -n "$PREVIOUS" ]; then
-            # The version job already resolved the previous tag, so pin the
-            # window to it instead of letting GitHub guess the prior release.
-            notes_window=(--notes-start-tag "$PREVIOUS")
-          fi
-          gh release create "$TAG" \
-            --title "QuotaBar ${VERSION}" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            --generate-notes \
-            "${notes_window[@]}" \
-            --verify-tag \
-            "$RUNNER_TEMP"/dist/*
-
-  container:
-    name: Publish the container image
-    needs: [version, release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Fetch the released Linux binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.version.outputs.tag }}
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          # The build context is dist/ only; .dockerignore excludes the repo
-          # root, where an executable zsh dev wrapper shares the name quotabar.
-          mkdir -p dist
-          gh release download "$TAG" --pattern "quotabar-${VERSION}-linux-x86_64.tar.gz" --dir "$RUNNER_TEMP"
-          tar -xzf "$RUNNER_TEMP/quotabar-${VERSION}-linux-x86_64.tar.gz" -C "$RUNNER_TEMP"
-          install -m 0755 "$RUNNER_TEMP/quotabar-${VERSION}-linux-x86_64/quotabar" dist/quotabar
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: packaging/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}
-            ghcr.io/${{ github.repository }}:latest
-
   tap:
     name: Publish the Homebrew tap
-    needs: [version, release]
+    # `tag`, not `release`: everything below reads the tag's source archive,
+    # which exists as soon as the ref is pushed and owes nothing to a GitHub
+    # release. Running here rather than after publication is the point -- a
+    # formula that fails `brew audit`, `brew install` or `brew test` stops the
+    # run while there is still no release advertising it.
+    needs: [version, tag]
     # macOS because this job installs the formula before it publishes it. A
     # Linux runner could push the commit but could not prove it works, which is
     # how a placeholder checksum once reached users.
     runs-on: macos-15
-    # `concurrency: release` has cancel-in-progress: false, so a hung
-    # `brew install --build-from-source` would hold the group for the default
-    # 360 minutes and block every later release. This is the first job here
-    # running a third-party build of unbounded duration.
+    # The longest bound here: `brew install --build-from-source` is a
+    # third-party build of unbounded duration, and `brew audit --online` then
+    # waits on the GitHub API.
     timeout-minutes: 45
     # `secrets.*` ignores `permissions:` and is readable by a workflow_dispatch
     # run on ANY branch, and the "release from main only" guard is in this same
@@ -550,9 +440,9 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
       # `brew audit --online` calls the GitHub API. Unauthenticated, it shares
-      # the runner's IP rate limit, and it runs after `gh release create` has
-      # already published — a limit here means a live release whose notes point
-      # at a formula the tap does not have yet.
+      # the runner's IP rate limit with everything else on that machine, and a
+      # limit here now fails the run before anything is published: the tag is
+      # spent, but no release ever points at a formula the tap does not have.
       HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
     steps:
       - name: Require the tap token
@@ -580,9 +470,10 @@ jobs:
         run: |
           set -euo pipefail
           # The tag is created from GITHUB_SHA, and that commit is what was
-          # built, signed and attested. Re-check it here: `concurrency` stops a
-          # second run, not a force-moved tag between the release job and this
-          # one, and everything below would happily certify substituted source.
+          # built and is about to be signed, attested and published. Re-check it
+          # here: `concurrency` stops a second run, not a force-moved tag between
+          # the tag job and this one, and everything below would happily certify
+          # substituted source.
           resolved="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}" "refs/tags/${TAG}^{}" | cut -f1)"
           if [ "$resolved" != "$GITHUB_SHA" ]; then
             echo "::error::${TAG} resolves to ${resolved:-nothing}, not the released ${GITHUB_SHA}" >&2
@@ -691,8 +582,9 @@ jobs:
         run: |
           set -euo pipefail
           # The order here is the whole point of this job: audit, install and
-          # test run against the rendered formula, and the push below only
-          # happens if they pass. A broken formula therefore fails the release
+          # test run against the rendered formula, the push below only happens
+          # if they pass, and `release` only runs if this whole job passed. A
+          # broken formula therefore fails the run with nothing published,
           # instead of reaching users, which is what went wrong with v0.1.0.
           #
           # `--strict` is deliberately not here. The tap runs it on every push,
@@ -715,10 +607,10 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/tap"
           if git diff --quiet -- Formula/quotabar.rb; then
-            # Re-running a release that already published. The verification above
-            # still ran, so this is a proven no-op rather than a silent skip.
-            # The tap already serves this version, and everything above still
-            # verified it, so this is a proven no-op rather than a failure.
+            # A re-run of this same tag, after an earlier attempt already pushed
+            # the formula. The tap already serves this version, and everything
+            # above verified it again, so this is a proven no-op rather than a
+            # silent skip or a failure.
             echo "Formula already points at ${TAG}; nothing to push."
             echo "PUBLISHED=true" >> "$GITHUB_ENV"
             exit 0
@@ -780,3 +672,214 @@ jobs:
             echo "- url: ${SOURCE_URL:-not resolved}"
             echo "- sha256: \`${SOURCE_SHA256:-not resolved}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Sign and publish
+    # `tap` is in here on purpose: it audits, builds and installs the formula
+    # against the tagged source, and until it has, nothing may be published.
+    # The artifacts come from the two build jobs, which `tag` already waited on.
+    needs: [version, build-linux, build-macos, tag, tap]
+    runs-on: ubuntu-latest
+    # No compilation, but it waits on Sigstore and on the attestation and
+    # release APIs, any of which can be slow without being hung.
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      PREVIOUS: ${{ needs.version.outputs.previous }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download the built artifacts
+        uses: actions/download-artifact@v8
+        with:
+          # Outside the checkout on purpose: release files are not repository
+          # content. Tagging is a job of its own now, so nothing downloaded here
+          # can dirty the tree that job refuses to tag from — and keeping the two
+          # apart is what makes that true rather than lucky.
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+
+      - name: Check the artifact set and write SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dist"
+          for artifact in \
+            "quotabar-${VERSION}-linux-x86_64.tar.gz" \
+            "quotabar-${VERSION}-macos-universal.tar.gz" \
+            "quotabar_${VERSION}_amd64.deb" \
+            "quotabar-${VERSION}.x86_64.rpm"
+          do
+            if [ ! -f "$artifact" ]; then
+              echo "::error::missing release artifact $artifact"
+              ls -l
+              exit 1
+            fi
+          done
+          # Sorted for a stable file, and relative so `sha256sum --check` works
+          # from whatever directory a user downloaded into.
+          find . -maxdepth 1 -type f -printf '%P\n' | LC_ALL=C sort > "$RUNNER_TEMP/names"
+          xargs -a "$RUNNER_TEMP/names" sha256sum > SHA256SUMS
+          cat SHA256SUMS
+          # SHA256SUMS is signed alongside the artifacts it covers.
+          cp "$RUNNER_TEMP/names" "$RUNNER_TEMP/to-sign"
+          echo SHA256SUMS >> "$RUNNER_TEMP/to-sign"
+
+      - name: Install cosign
+        # No moving `v4` tag exists on this action, so the patch version is
+        # pinned. It installs cosign v3 by default.
+        uses: sigstore/cosign-installer@v4.1.2
+        with:
+          # Pinned: the signing flags below are deprecated in newer cosign, so a
+          # floating default would change release behaviour without a commit.
+          cosign-release: 'v3.0.6'
+
+      - name: Sign every artifact keylessly
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dist"
+          # cosign v3 defaults to the new bundle format and to a TUF-served
+          # signing config, and in that mode it ignores --output-signature and
+          # --output-certificate. Turn both off to get the detached .sig/.pem
+          # pair this release publishes. Identity comes from the GitHub OIDC
+          # token, so there is no key to hold.
+          while IFS= read -r artifact; do
+            echo "::group::sign ${artifact}"
+            cosign sign-blob \
+              --yes \
+              --use-signing-config=false \
+              --new-bundle-format=false \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              "$artifact"
+            test -s "${artifact}.sig"
+            test -s "${artifact}.pem"
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/to-sign"
+          ls -l
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/dist/*.tar.gz
+            ${{ runner.temp }}/dist/*.deb
+            ${{ runner.temp }}/dist/*.rpm
+            ${{ runner.temp }}/dist/SHA256SUMS
+
+      - name: Write the release notes
+        # The hand-written half only. The categorised "What's changed" list and
+        # the full-changelog link come from `--generate-notes` in the next step,
+        # which is why nothing here builds a compare URL any more.
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "# macOS — built from source, so Gatekeeper never sees an unnotarized binary"
+            echo "brew tap bebepewpew/tap"
+            echo "brew install quotabar"
+            echo
+            echo "# Debian/Ubuntu"
+            echo "sudo apt install ./quotabar_${VERSION}_amd64.deb"
+            echo
+            echo "# Fedora/RHEL"
+            echo "sudo rpm -i quotabar-${VERSION}.x86_64.rpm"
+            echo '```'
+            echo
+            echo "## Verify"
+            echo
+            echo "Every artifact is signed keylessly with sigstore cosign through this"
+            echo "repository's GitHub OIDC identity, and carries a build provenance"
+            echo "attestation. \`SHA256SUMS\` covers all of them."
+            echo
+            echo '```sh'
+            echo "sha256sum --check --ignore-missing SHA256SUMS"
+            echo
+            echo "cosign verify-blob \\"
+            echo "  --certificate quotabar-${VERSION}-linux-x86_64.tar.gz.pem \\"
+            echo "  --signature quotabar-${VERSION}-linux-x86_64.tar.gz.sig \\"
+            echo "  --certificate-identity '${identity}' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  quotabar-${VERSION}-linux-x86_64.tar.gz"
+            echo
+            echo "gh attestation verify quotabar-${VERSION}-linux-x86_64.tar.gz \\"
+            echo "  --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+          } > "$notes"
+          cat "$notes"
+
+      - name: Publish the GitHub release
+        run: |
+          set -euo pipefail
+          # Two halves make up the published notes: the install and verify
+          # section written above, and the categorised what's-changed list plus
+          # full-changelog link that --generate-notes builds from the pull
+          # requests merged since the previous tag, grouped by the label
+          # categories in .github/release.yml.
+          notes_window=()
+          if [ -n "$PREVIOUS" ]; then
+            # The version job already resolved the previous tag, so pin the
+            # window to it instead of letting GitHub guess the prior release.
+            notes_window=(--notes-start-tag "$PREVIOUS")
+          fi
+          gh release create "$TAG" \
+            --title "QuotaBar ${VERSION}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes \
+            "${notes_window[@]}" \
+            --verify-tag \
+            "$RUNNER_TEMP"/dist/*
+
+  container:
+    name: Publish the container image
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    # Downloads a release asset, then builds and pushes an image to ghcr.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Fetch the released Linux binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The build context is dist/ only; .dockerignore excludes the repo
+          # root, where an executable zsh dev wrapper shares the name quotabar.
+          mkdir -p dist
+          gh release download "$TAG" --pattern "quotabar-${VERSION}-linux-x86_64.tar.gz" --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/quotabar-${VERSION}-linux-x86_64.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/quotabar-${VERSION}-linux-x86_64/quotabar" dist/quotabar
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest

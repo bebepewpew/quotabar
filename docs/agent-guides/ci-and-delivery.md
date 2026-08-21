@@ -7,10 +7,10 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, the 90% region coverage gate, and the packaging inputs `release.yml` would otherwise be the first thing to execute |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
-| `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
+| `release.yml` | `workflow_dispatch` only | building, tagging, proving the Homebrew formula, then signing and publishing a release — in that order |
 
 ## The Labels gate
 
@@ -40,6 +40,22 @@ shape, or one whose `id`s collide** — GitHub reports that in its own UI when
 somebody tries to file. `blank_issues_enabled` flipping to `true` is likewise
 uncaught beyond the key still being present.
 
+The release ordering has a check of its own in the same job:
+`scripts/check-release-order` reads `release.yml`'s job graph and fails unless
+`tap` needs `tag`, `release` needs `tap`, only `tag` pushes the tag and only
+`release` publishes. It exists because `release.yml` is `workflow_dispatch` only
+— no pull request ever executes it, so a reordering that went back to publishing
+before the formula is proven would next be noticed by whoever cut the release.
+It uses no YAML library on purpose, so it runs the same on a macOS checkout as in
+the job, and it fails closed: a `needs:` it cannot read is an error, not a pass.
+
+The same job also asserts that **every job in `release.yml` declares a
+`timeout-minutes`** and that none of them is GitHub's 360-minute default. That
+workflow's `concurrency` group does not cancel a superseded run, so one unbounded
+job that hangs blocks every later release; the check reads job keys by
+indentation, which means a bound written on a step rather than on the job does
+not satisfy it.
+
 Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
 would stay red until its next push, long after someone applied the label. And the
@@ -49,7 +65,9 @@ macOS and Linux build running beside the one replacing it.
 
 ## The Gate, and why the required check is not a build
 
-`ci.yml` has six jobs, and only one of them is a required status check.
+`ci.yml` has several jobs, and only one of them is a required status check. The
+count is deliberately not written here: it went stale twice, and `gate`'s `needs`
+below is the list that actually decides.
 
 `changes` diffs the pull request against its base and decides whether anything
 compiled was touched. If not — documentation, `.claude/`, `.codex/`, the issue
@@ -64,10 +82,17 @@ point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, th
 `quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
 pipeline change is only ever proven by running it. **Skips:** `docs/`,
 `.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
-`.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
-that configure GitHub rather than the build. **Unclassified:** anything else — it
-builds, *and the job prints it by name*, which is the signal that the case
-statement needs a line rather than a silent guess in either direction.
+`.gitignore`, `.gitattributes`, the two Codex scripts,
+`scripts/check-release-order`, `scripts/check-workflow-permissions`, and the
+`.github` files that configure GitHub rather than the build. **Unclassified:** anything else — it builds, *and the job
+prints it by name*, which is the signal that the case statement needs a line
+rather than a silent guess in either direction.
+
+The same pass answers a second, independent question in the `packaging` output:
+`packaging/`, `.dockerignore` and `scripts/check-packaging` compile nothing and so
+must not hold a macOS runner, but they are the only thing the `packaging` job can
+prove anything about. `.github/workflows/` sets both, because `release.yml` is
+what consumes `packaging/` and this file is what decides whether the job runs.
 
 Both lists are explicit on purpose. An include-only list fails towards skipping,
 which is how a real change stops being tested; an exclude-only list fails towards
@@ -97,6 +122,43 @@ the two build jobs and not `CodeQL`. Renaming a job in this file without renamin
 a merge blocks on a check that no longer exists; adding a job means adding it to
 `gate`'s `needs`, or it cannot fail a merge.
 
+## Validating what users install
+
+`packaging/` decides what a `.deb`, an `.rpm`, a container image and a Homebrew
+install contain, and it is read by `release.yml` alone — which is
+`workflow_dispatch` only. Left to itself, a packaging change earns a full macOS
+and Linux Swift build that proves nothing about it and breaks during a release.
+Two places close that:
+
+- **`policy` runs `scripts/check-packaging` for every change**, including one that
+  touches no packaging file. It is static and costs about a second, and it checks
+  the three couplings between `packaging/` and `release.yml`: `nfpm.yaml`'s `src:`
+  paths against the release job's `pkgroot`, `Dockerfile`'s `ARG BINARY=` default
+  against where the container job installs the binary and against `.dockerignore`,
+  and the formula's `url` and `sha256` — by running the release job's own
+  line-anchored `perl -pi -e` on a throwaway copy and requiring that it changed
+  **exactly one line each**. Deleting `LICENSE` or renaming `README.md` breaks the
+  `.deb` from paths this workflow otherwise files under prose, which is why this
+  one is not behind the filter.
+- **`scripts/check-packaging --self-test`**, in the same job, breaks each coupling
+  in a copy of the tree and requires the check to reject it. A check nobody has
+  watched fail is not a check.
+- **The `packaging` job actually packages**, behind `changes.outputs.packaging`. It
+  stages shell-script stubs — nothing here compiles Swift — builds
+  `packaging/Dockerfile` from `dist/quotabar` and runs the image, then runs
+  `nfpm package` for both packagers from `dist/linux-x86_64/` and asserts the
+  `.deb` carries both binaries and both documents. That last assertion exists
+  because `type: doc` makes nfpm's deb packager drop an entry entirely.
+
+Two things it deliberately does not do: publish anything, and prove the formula
+installs. `brew install --build-from-source` compiles Swift on a macOS runner and
+belongs where it already is, in the release job that gates the tap push on it.
+
+The nfpm version and its checksum are pinned in **two** places now — this job and
+`release.yml`'s `build-linux`. That is the point: the pull request proves the
+config against the version the release will use, so bumping one without the other
+is the thing to catch in review.
+
 ## Traps this repository has already paid for
 
 - **A container job defaults to `sh -e`, which has no `pipefail`.** Both container
@@ -115,7 +177,14 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
   that in the PR rather than letting a reviewer read the absence as a failure.
 - **`scripts/` and `.githooks/` entries are asserted executable** by the policy
   job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
-  line in that job.
+  line in that job — and, because the policy job runs
+  `scripts/check-release-order`, `scripts/check-workflow-permissions` and
+  `scripts/check-packaging` directly, a missing bit on one of those takes its
+  check down with it.
+- **`packaging/` is executed by no triggered workflow.** `release.yml` is
+  `workflow_dispatch` only, so anything reached only from there is proven by the
+  `packaging` job and `scripts/check-packaging` or by nothing at all. A formula
+  whose `url` is not line-anchored is red only *after* publication.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
 - **`always()` on the gate reports a red check for a cancelled run.** The
@@ -143,8 +212,21 @@ A floating `@main` is a remote-code-execution path into CI. It is never acceptab
 
 `permissions: contents: read` at the top of each workflow, escalated **per job**
 and only where needed — `security-events: write` for SARIF upload,
-`contents: write`/`id-token: write`/`attestations: write` for the release job,
-`packages: write` for the container push.
+`contents: write` for the tag job that pushes the ref and the release job that
+publishes, `id-token: write`/`attestations: write` for the signing and
+attestation in that release job, `packages: write` for the container push. The
+`tap` job keeps `contents: read`: it writes to another repository, with a token
+from an environment rather than from `permissions:`.
+
+This is enforced rather than remembered. `scripts/check-workflow-permissions`,
+run by the `policy` job for every change, fails a workflow whose top-level block
+is anything but `contents: read` — because a write scope up there is handed to
+every job somebody adds later, whose author never has to read the top of the
+file. The same script holds the other end: the escalations that used to arrive by
+inheritance are listed in it by job, so a job that drops its block fails there
+instead of half way through a release. Run it locally; it needs nothing but
+`awk`. It cannot tell whether a job asks for more than it uses — that stays a
+review question.
 
 The only credentials in play are `GITHUB_TOKEN` and the OIDC identity that keyless
 signing derives from. There is no long-lived secret, and adding one is a

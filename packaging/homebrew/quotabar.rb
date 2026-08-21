@@ -15,6 +15,10 @@
 # with a line-anchored substitution, so keep each on a line of its own. They
 # track the last published release; a stale pair here is harmless because the
 # workflow replaces them before anything installs from them.
+# `scripts/check-packaging` runs that same substitution on a copy of this file
+# on every pull request and fails unless it changes exactly one line each, so a
+# second `url` or one that is no longer line-anchored is caught here rather than
+# after the tap is published.
 #
 # It builds from source deliberately. A downloaded Mach-O that Apple has not
 # notarized gets the com.apple.quarantine attribute and Gatekeeper blocks it on
