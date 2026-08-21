@@ -96,8 +96,10 @@ git diff --check
 ```
 
 The local hooks give fast feedback, but GitHub branch protection and CI are
-authoritative. On macOS `./quotabar test` needs full Xcode; if you cannot run the
-suite locally, say so in the pull request rather than implying it passed.
+authoritative. On macOS `./quotabar test` uses full Xcode when it is installed
+and otherwise runs the suite in the Swift container, which covers everything
+except the menu-bar app; with neither it refuses. Say in the pull request which
+one ran, rather than implying the whole suite passed.
 
 ## Pull-request process
 
@@ -118,8 +120,11 @@ suite locally, say so in the pull request rather than implying it passed.
    status check, so a pull request carrying none of them, or more than one,
    cannot be merged until the labels are corrected. The check re-runs as soon as
    a label changes; you do not need to push again.
-7. Once the required checks pass and every conversation is resolved, merge with
-   **Squash and merge**. Merge commits and rebase merges are disabled.
+7. Once the two required checks — `Labels` and `Gate` — pass and every
+   conversation is resolved, merge with **Squash and merge**. Merge commits and
+   rebase merges are disabled. `Gate` reports for the whole build: the other CI
+   jobs answer to it rather than to branch protection, so a build job that skips
+   for a documentation change never leaves a pull request pending.
 
 Do not weaken CI, hooks or branch protection to make a change pass.
 

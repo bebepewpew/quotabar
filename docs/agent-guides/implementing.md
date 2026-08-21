@@ -31,12 +31,23 @@ never pushed.
 Always go through `./quotabar`; it picks the toolchain and keeps `.build` owned by
 you. `docs/agent-guides/quotabar-dev.md` has the build and coverage detail.
 
+`quotabar-dev` and `quotabar-developer` are two names a keystroke apart. The first
+is the build-and-test guidance — the commands, the toolchain, the coverage report.
+This guide is the second: the change itself, from branch to pushed branch, and it
+uses those commands at step 4. Which of the pair is packaged as a skill and which
+as an agent depends on the toolchain, so tell them apart by what they cover rather
+than by their kind.
+
 ## Never claim a suite you did not run
 
-On macOS `./quotabar test` needs full Xcode; with only Command Line Tools it
-refuses. On Linux it runs natively or in `swift:6.3-noble` via docker. If a suite
-could not execute, say so plainly and report the change as unvalidated. A branch
-honestly marked "tests did not run here" is worth more than one that claims green.
+On macOS full Xcode runs everything; with only Command Line Tools the wrapper
+runs the suite in `swift:6.3-noble` via docker, and refuses with exit 2 when
+there is no docker either. On Linux it runs natively or in the same container.
+The container has no macOS app target, so say which path ran — "the container
+suite passed; the app was not tested" is a different claim from "the suite
+passed". If a suite could not execute, say so plainly and report the change as
+unvalidated. A branch honestly marked "tests did not run here" is worth more than
+one that claims green.
 
 ## The rules that bite while you are typing
 

@@ -42,6 +42,7 @@ usable on their own; the workflow is just the order they run in.
 | `quotabar-performance` | `performance-review.md` | process spawns, blocking, deadlines, growth |
 | `quotabar-devops` | `ci-and-delivery.md` | the workflows, the gates, which job catches what |
 | `quotabar-writer` | `docs-writing.md` | documentation that is still true |
+| `quotabar-harness-reviewer` | `harness-review.md` | the guides, wrappers and templates an agent reads before it acts |
 | `quotabar-ciso` | `risk-signoff.md` | ship, ship with conditions, or hold |
 | `quotabar-release` | `release.md` | cutting and verifying a release |
 
@@ -63,11 +64,15 @@ in its own worktree. It is deliberately not split across stages: a later agent g
 a different worktree and would not see work that was never pushed. If the gate does
 not pass, the run stops at `gateFailed` with the branch, if one was pushed.
 
-**Assure** — eight narrow angles read the pushed branch at once. Narrow on purpose:
+**Assure** — nine narrow angles read the pushed branch at once. Narrow on purpose:
 a generalist waves through a test that cannot fail, because that is not a
 correctness bug, and waves through an unreadable icon, because that is not a bug at
 all. Two of the angles — tests and attack — get their own worktree so they can
-check the branch out and actually run what they write; the other six read the diff.
+check the branch out and actually run what they write; the other seven read the
+diff. The harness angle is unconditional rather than gated on the paths a diff
+touches, because a change to the guides, the wrappers, the workflows or the
+templates is the one whose defects nothing else turns red; on a code-only change it
+reports nothing and shows up in `anglesWithNothing`.
 
 **Verify** — every finding goes to a second agent whose job is to **refute** it,
 defaulting to refuted when uncertain. A wrong finding costs more than a silent
@@ -115,6 +120,15 @@ sign-off treats it as a reason to hold.
 `anglesWithNothing` lists angles that **ran** and found nothing. Worth reading: an
 angle that always finds nothing is either pointed at the wrong thing or being
 ignored.
+
+The sign-off is told both lists by name, under `ANGLES COVERED` and `ANGLES THAT
+DID NOT RUN`. Both lines lied for a while. The flag was recorded when an angle's
+agent errored and then dropped by the verification stage, which returned only
+verdicts — and a failed angle leaves the same empty list of those as a silent
+one — so a failed angle arrived at sign-off listed as covered, and `complete` was
+`true`. `scripts/test-workflows` now runs this workflow with one angle's agent
+forced to reject and asserts the prompt and the result, so that failure is a red
+repository-policy job rather than a quiet pass.
 
 `refuted` is kept so a claim that was already knocked down is not raised again by
 the next run, and `unverified` holds findings whose refutation step itself failed —

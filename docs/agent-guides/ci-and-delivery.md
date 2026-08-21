@@ -7,9 +7,9 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, the agent-harness drift check, the agent-workflow tests, the leaked-secret scan, build and test on macOS and Linux, the release-configuration builds a release depends on, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
-| `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
+| `security-scan.yml` | push, pull request, Mondays 06:17 UTC | publishing findings from the working tree, the toolchain image and the published image to code scanning, and re-scanning a `main` nobody has pushed to. Its secret scan fails as well, but the copy that blocks a **merge** is the one in `ci.yml` |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
 
 ## The Labels gate
@@ -33,6 +33,12 @@ actually fails a pull request), `.github/release.yml`, the tables in
 the closing pull request will — `docs/agent-guides/backlog.md` and the dropdown
 in `.github/ISSUE_TEMPLATE/task.yml`.
 
+The policy job also runs `scripts/wrapper-tests`, which checks which toolchain
+`./quotabar` selects per platform against a stubbed `uname` and `docker`. It
+compiles nothing and starts no container, so it belongs beside the structural
+checks rather than in the build jobs — and it is the only check that covers the
+wrapper at all, since the wrapper is what starts the suite the other jobs run.
+
 The issue forms have a check of their own, in the policy job: the three forms and
 `config.yml` must exist, be non-empty and keep their top-level keys. Nothing
 parses them, so **no job would catch a form that is valid YAML in the wrong
@@ -40,41 +46,98 @@ shape, or one whose `id`s collide** — GitHub reports that in its own UI when
 somebody tries to file. `blank_issues_enabled` flipping to `true` is likewise
 uncaught beyond the key still being present.
 
-Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
+The policy job also greps every `gh pr create` line in `.claude/workflows/*.js`
+for `--head`. Those literals are commands an agent runs verbatim, from a step that
+is *not* in the worktree holding the branch, so one without `--head` opens a pull
+request for whatever is checked out — an error against `main`, and the wrong work
+against anything else. It is a grep, so it proves the flag is on the line and
+nothing about the branch it names.
+
+The agent harness has a check of its own in the same job, `scripts/check-harness`
+— a guide a wrapper points at that is gone, a role present on one side only, a
+Codex skill without `agents/openai.yaml`, a skill missing from the `AGENTS.md`
+roster. It runs on every pull request for the same reason the rest of `policy`
+does: `changes` classifies `docs/`, `.claude/` and `.codex/` as skip, so a
+harness-only change would otherwise reach no job at all, and every defect it
+looks for fails silently rather than red.
+`docs/agent-guides/harness-review.md` has the detail.
+
+Two details in `ci.yml` exist only for the Labels job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
 would stay red until its next push, long after someone applied the label. And the
 `concurrency` group cancels superseded pull-request runs, because a label usually
 lands moments after `opened` and each correction would otherwise leave a full
 macOS and Linux build running beside the one replacing it.
 
-## The Gate, and why the required check is not a build
+## The agent-workflow tests
 
-`ci.yml` has six jobs, and only one of them is a required status check.
+The policy job also runs `scripts/test-workflows`, the one piece of the agent
+harness that can be executed rather than only read. It loads
+`.claude/workflows/review-swarm.js` and `.claude/workflows/e2e-task.js` against a
+stub engine, in Node, with no dependencies and no toolchain, and pins the
+behaviour whose failure is invisible: an angle whose agent errored is reported as
+one that **did not run**, never as one that looked and found nothing. Both
+workflows recorded that flag and then dropped it between two pipeline stages, so
+the mechanism added after a review reported five angles as six would not have
+caught the next one. `parallel-tasks.js` reports per task rather than per angle
+and is not covered here.
+
+It is deliberately not a coverage exercise. It stubs one agent call per angle and
+asserts on the workflow's own result and on the sign-off prompt, so the lens
+lists, the briefs and the prompts stay free to change; only the plumbing that
+carries the flag is fixed. Nothing it asserts needs the network or a provider
+CLI, which is why it sits in the policy job rather than behind the `changes`
+filter — a workflow edit compiles nothing and would otherwise be checked by no
+job at all.
+
+## The Gate, and why neither required check is a build
+
+`ci.yml` has nine jobs — `labels`, `changes`, `policy`, `secret-scan`,
+`build-and-test`, `codeql`, `build-and-test-linux`, `tray` and `gate` — and
+branch protection on `main` requires exactly two of them as status checks:
+**`Labels`** and **`Gate`**. Every other job reaches a merge only through
+`gate`.
 
 `changes` diffs the pull request against its base and decides whether anything
 compiled was touched. If not — documentation, `.claude/`, `.codex/`, the issue
-forms, a root `*.md` — then `build-and-test` and `build-and-test-linux` are
-skipped, and a documentation change stops holding a macOS runner. `policy` has no
-such guard and runs for everything, which matters precisely *because* it is the
-documentation-shaped change that can break an issue form or unset an executable
-bit. A push to `main` always runs the full suite.
+forms, a root `*.md` — then `build-and-test`, `build-and-test-linux` and `tray`
+are skipped, and a documentation change stops holding a macOS runner. `policy`
+has no such guard and runs for everything, which matters precisely *because* it
+is the documentation-shaped change that can break an issue form or unset an
+executable bit. A push to `main` always runs the full suite.
 
 `changes` sorts every changed path into three buckets, and the third is the
 point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, the
-`quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
-pipeline change is only ever proven by running it. **Skips:** `docs/`,
+`quotabar` wrapper, `scripts/coverage`, `scripts/check-harness` — whose exit
+status and messages the suite asserts — `Resources/` — the icon set and the
+`Info.plist` `release.yml` stamps a version into — and `.github/workflows/`,
+because a pipeline change is only ever proven by running it. **Skips:** `docs/`,
 `.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
-`.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
-that configure GitHub rather than the build. **Unclassified:** anything else — it
-builds, *and the job prints it by name*, which is the signal that the case
-statement needs a line rather than a silent guess in either direction.
+`.gitignore`, `.gitattributes`, every `scripts/` entry that is not `coverage` or
+`check-harness` — the two Codex scripts, `install-hooks`, `check-ci-gate`,
+`test-workflows`, `wrapper-tests` and `test-codex-parallel` — the `.github` files
+that configure GitHub rather than the build, and the release inputs `packaging/`
+and `.dockerignore`, which only `release.yml` reads. **Unclassified:** anything
+else — it builds, *and the job prints it by name*, which is the signal that the
+case statement needs a line rather than a silent guess in either direction.
 
 Both lists are explicit on purpose. An include-only list fails towards skipping,
 which is how a real change stops being tested; an exclude-only list fails towards
 building, which is how the whole mechanism quietly stops saving anything. Naming
 both leaves a bucket that can complain.
 
-`gate` is the required check. Two GitHub behaviours force that shape:
+That bucket only means something while it is empty on `main`: every tracked path
+matches one of the two lists today, so a printed name is a genuinely new kind of
+file rather than a backlog nobody reads. `Tests/QuotaCoreTests/ChangedPathsTests.swift`
+keeps it that way — it extracts the step's script straight out of `ci.yml` and
+runs it over a table of paths with a stub `git`, so a new family that is left
+unclassified fails the suite rather than printing into a log.
+
+`labels` can be required by name because it always runs, whatever the change
+touched. The build jobs and `CodeQL` cannot: they skip for a documentation
+change, and a skipped required check satisfies nothing. `gate` is the second
+required check for exactly that reason — it stands in for every job that is
+allowed to skip. Two GitHub behaviours force that shape:
 
 - a workflow stopped by `paths-ignore` never reports at all, so a check required
   by branch protection stays **pending** and the pull request is unmergeable
@@ -92,10 +155,86 @@ alternative, a `paths-ignore` in `codeql.yml`, works only while nothing requires
 that check and becomes a permanent block the moment somebody does. Its weekly
 cron still fires standalone: a scheduled run has no base to diff against.
 
-Branch protection on `main` therefore requires **`Gate`** and **`Labels`**, not
-the two build jobs and not `CodeQL`. Renaming a job in this file without renaming it there is how
+So the required set is **`Labels`** and **`Gate`**, and nothing else: not the
+build jobs, not `Tray (StatusNotifierItem)`, not `Repository policy`, not
+`CodeQL`. That is what protection on `main` is configured with, read from the
+live settings on 2026-08-21; configure a fork the same way, or the checks that
+decide are advisory. Renaming a job in this file without renaming it there is how
 a merge blocks on a check that no longer exists; adding a job means adding it to
-`gate`'s `needs`, or it cannot fail a merge.
+`gate`'s `needs`, or it cannot fail a merge — and the `policy` job fails a pull
+request that adds or removes a job without updating the list above, because that
+list has already fallen behind `ci.yml` twice.
+
+`secret-scan` sits in that list with no `changes` guard, because a credential can
+arrive in any file, including one that compiles nothing. It is a job here rather
+than a required context on `security-scan.yml` for the same reason CodeQL is called
+from this workflow: `gate` can only `needs:` jobs in its own. The copy in
+`security-scan.yml` still runs, still publishes SARIF and still covers the weekly
+cron; the copy here is the one a merge waits on. It uploads nothing, so it needs no
+token and a fork's pull request runs the same failing scan.
+
+These invariants are checked rather than remembered. `scripts/check-ci-gate` reads
+this workflow and fails when a job is missing from `gate`'s `needs`, when the job
+named `Gate` or the job named `Labels` has been renamed out from under the required
+context, or when no gated job runs a secret scan with `exit-code: '1'`. The policy
+job runs it for every change, and it takes a path argument, so you can point it at a
+modified copy and watch it fail before trusting it.
+
+## What the security scan actually covers
+
+Three jobs, three different artefacts, three SARIF categories — a shared category
+would have each upload overwrite the last.
+
+| Job | Artefact | Category |
+| --- | --- | --- |
+| `repository` | the working tree | `trivy-working-tree` |
+| `toolchain-image` | `swift:6.3-noble`, what CI and `./quotabar` build inside | `trivy-toolchain-image` |
+| `shipped-image` | `ghcr.io/<repo>:latest`, what users pull and run | `trivy-shipped-image` |
+
+The third exists because the first two miss the artefact with the longest life.
+`packaging/Dockerfile` is `FROM debian:stable-slim`, a **moving** tag: the image
+`release.yml` pushes freezes whatever base existed on release day, and nothing
+rebuilds it until the next release. Scanning the registry tag is the only thing
+that sees a CVE land against what is already out there — along with `expect`,
+`ca-certificates` and `tini`, which no other job looks at.
+
+Two details in that job. It resolves the image as `ghcr.io/${{ github.repository }}`,
+matching how `release.yml` pushes it, so a fork scans its own package and the two
+spellings cannot drift. And it runs `docker manifest inspect` first, skipping the
+scan when that fails: before the first release there is no such image, and the
+Monday cron must not be red for a package nobody has published. Job-level
+`permissions:` replaces the workflow-level block outright, so that job repeats
+`contents: read` and `security-events: write` alongside its `packages: read`.
+
+`.github/dependabot.yml` covers the other half, with a `docker` ecosystem on
+`/packaging`. Being honest about its limits: a moving tag mostly moves *under* the
+pin, so Dependabot only speaks up when the pin itself should change — a new Debian
+stable codename, say. The weekly scan is what catches everything in between.
+
+## The release-configuration builds
+
+Debug is not what a release ships, so both build jobs also build the
+configuration that does, and assert the property that makes it a release binary:
+
+- **Linux** runs `swift build -c release --static-swift-stdlib --product quotabar`
+  and fails if `ldd` still reports a `libswift` dependency. `--static-swift-stdlib`
+  claims only the Swift runtime — glibc stays dynamic — so that assertion is the
+  only thing proving the Swift half was linked in. It also links in release only;
+  a debug static link dies on missing ICU symbols.
+- **macOS** runs `swift build -c release --product quotabar --arch arm64 --arch
+  x86_64` and fails if `lipo -archs` does not list both slices.
+
+Both builds and both assertions used to live only in `release.yml`, which is
+`workflow_dispatch` only — so a regression in either was invisible until somebody
+cut a release, and the release run was where it was found. They are steps of the
+existing build jobs rather than jobs of their own, which puts them behind the
+`changes` filter and inside the Gate without another line in `gate`'s `needs`.
+They roughly double the build on the `code=true` path: that is the argument for
+keeping the filter, not for dropping the check.
+
+Still built only by `release.yml`, and still first proven by a release run: the
+version stamping, the statically linked `quotabar-tray` with its `libdbus`
+assertion, the packaging, the signing and the artifacts.
 
 ## Traps this repository has already paid for
 
@@ -113,11 +252,31 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
 - **A newly added workflow's first execution is the pull request that adds it.**
   A `pull_request`-triggered workflow cannot have run before its PR existed. Say
   that in the PR rather than letting a reviewer read the absence as a failure.
-- **`scripts/` and `.githooks/` entries are asserted executable** by the policy
-  job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
-  line in that job.
+- **The root `quotabar` wrapper and every `scripts/` and `.githooks/` entry are
+  asserted executable** by the policy job, along with `test ! -e REVIEW.md`, the
+  `.claude/settings.json` allowlist check and the scan targets above. A new
+  script needs `chmod +x` *and* a line in that job. The wrapper is in that list
+  because CI never runs it: no job would otherwise notice its bit going away,
+  and `.githooks/pre-push` plus every documented `./quotabar build` would break
+  the moment it did.
+- **A `${{ }}` expression inside `run:` is expanded before the shell sees it.**
+  The policy job greps `security-scan.yml` for its image reference, so it has to
+  match on `ghcr.io/.*:latest` — a grep written with the literal expression would
+  search for the *expanded* repository name and never match the file.
+- **This guide is asserted against `ci.yml` by the policy job.** It reads the job
+  names out of the workflow and fails if the list above does not name every one
+  of them or miscounts them, or if either this file or `.github/CONTRIBUTING.md`
+  stops naming `Labels` and `Gate` as the required checks. A new job therefore
+  needs a word in that list as well as a line in `gate`'s `needs`.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
-  nothing: the only required check never learns it failed.
+  nothing: `Gate` is the only required check that speaks for it, and it never
+  learns the job failed. `scripts/check-ci-gate` in the policy job fails on
+  exactly that, and on a `Gate` or `Labels` renamed away from the context branch
+  protection requires.
+- **`swift test` beside `scripts/coverage` runs the Linux suite twice.** The
+  script's body is `swift test --enable-code-coverage`, and instrumentation is a
+  different compile, so the second step was a second build of the test bundle and
+  a second execution of every test. The `policy` job now counts them.
 - **`always()` on the gate reports a red check for a cancelled run.** The
   `concurrency` group cancels a superseded run every time a label lands just
   after `opened`, and `always()` runs even then — so the gate failed on a run
@@ -139,6 +298,14 @@ Two deliberate exceptions:
 
 A floating `@main` is a remote-code-execution path into CI. It is never acceptable.
 
+`github/codeql-action` is pinned in two workflows at once — `init` and `analyze`
+in `codeql.yml`, `upload-sarif` twice in `security-scan.yml` — and the policy job
+fails a change that leaves them naming different majors. They drifted to `v3` and
+`v4` once, and the stale half was the Swift analysis: a retired major there is not
+a security-scan inconvenience, it fails `Analyse Swift`, which `gate` needs, which
+blocks every merge. Bumping one file and not the other is now red rather than
+quiet, including on a Dependabot pull request.
+
 ## Permissions and secrets
 
 `permissions: contents: read` at the top of each workflow, escalated **per job**
@@ -150,12 +317,24 @@ The only credentials in play are `GITHUB_TOKEN` and the OIDC identity that keyle
 signing derives from. There is no long-lived secret, and adding one is a
 supply-chain decision that belongs in the pull request, not in repository settings.
 
-## The coverage gate
+## The coverage gate, and the Linux job's single test run
 
 The Linux job runs `scripts/coverage --lcov coverage.lcov`, appends the report to
 the step summary, reads the `TOTAL` row's fourth column with `awk`, and fails below
 `MINIMUM_REGION: '90'`. It measures `QuotaCore` and `QuotaTray` only — the
 libraries the test binary links.
+
+That step, `Test and coverage`, is also **the job's only run of the suite**. The
+script's body is `swift test --enable-code-coverage`, and instrumentation changes
+the compile flags, so the plain `swift test` step that used to sit beside it built
+the test bundle a second time and ran every test a second time. A red test still
+fails the job by name: the script runs under `set -eu`, propagates the exit status,
+and sends everything but the report to stderr, so the suite output is in the log.
+Two checks in the `policy` job hold that shape — one counts the suite invocations
+inside the Linux job and requires exactly one, the other puts a stub `swift` on
+`PATH` that fails only `swift test` and requires `scripts/coverage` to exit with
+that suite's own status and to leave the test names on stderr. Neither needs a
+toolchain, so they also run for a change that skips the build jobs.
 
 The threshold was switched on only once the suite cleared it: 95.18% region and
 98.27% line at the time. Raise it when the code genuinely supports a higher number.
@@ -167,9 +346,14 @@ Do not exclude files to reach one, and do not lower it to land a change.
 pushes to `main`. Both are speed bumps for fast feedback. **Branch protection and
 CI are the enforcement**, and neither may be weakened to make a change pass.
 
-`.claude/settings.json` allows `./quotabar ...` rather than raw `docker run ...`
-deliberately: the wrapper picks the toolchain and keeps `.build` owned by the
-invoking user.
+`.claude/settings.json` allows `./quotabar build|test|cli`, `scripts/install-hooks`
+and `swift run quotabar ...`, plus read-only `git` and `gh` verbs — and no raw
+`swift build`, `swift test` or `docker run ...`. The wrapper picks the toolchain
+and keeps `.build` owned by the invoking user, and on macOS it refuses a suite that
+only Command Line Tools could run; a bare `swift test` skips that refusal and
+reports green for a run the wrapper declined. The policy job asserts those two
+entries are gone, because an allowlist entry applies to every agent forever and
+nothing else would notice one coming back.
 
 ## What to report
 

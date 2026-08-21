@@ -14,8 +14,8 @@ nothing itself; if it is discovering defects, the reviewers did not run.
 | Attacks attempted | the red team's landed *and* refuted lists |
 | Correctness and tests | `quotabar-reviewer`, QA |
 | Static analysis | CodeQL (`macos-15`, Swift, manual build) |
-| Scanners | Trivy: working tree, and the `swift:6.3-noble` toolchain image |
-| Dependency posture | no third-party Swift packages; Actions pinned by major; `dependabot.yml` groups them weekly |
+| Scanners | Trivy: working tree, the `swift:6.3-noble` toolchain image, and the published `ghcr.io/<repo>:latest` image users run |
+| Dependency posture | no third-party Swift packages; Actions pinned by major and grouped weekly by `dependabot.yml`, which also tracks the container base in `/packaging` |
 | Release surface | keyless cosign signatures, build provenance, `SHA256SUMS` |
 
 ## "Nothing found" and "nobody looked" are different answers

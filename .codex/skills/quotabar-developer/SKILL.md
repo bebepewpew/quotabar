@@ -21,12 +21,10 @@ git diff --check
 ```
 
 Never claim a suite passed unless it actually ran — on macOS `./quotabar test`
-needs full Xcode, and an honest "tests did not run here" beats a false green.
+needs full Xcode or docker, and the container path does not cover the app. An
+honest "tests did not run here" beats a false green.
 
 **The full guide — the loop, the rules that bite while typing, and the traps this
 repository has already paid for — is `docs/agent-guides/implementing.md`.**
 Build and coverage detail is `docs/agent-guides/quotabar-dev.md`; fixtures are
 `docs/agent-guides/probe-fixture.md`.
-
-Not to be confused with the `quotabar-dev` **skill**, which is how to build and
-test. This skill is who implements a change, and it uses that one's commands.

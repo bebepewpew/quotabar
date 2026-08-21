@@ -165,13 +165,35 @@ jobs:
               .github/workflows/*)
                 build=true; because="$because $file" ;;
 
+              # Not compiled either, but Tests/HarnessTests asserts its exit
+              # status and its messages, so a change to it is only proven by
+              # running the suite.
+              scripts/check-harness)
+                build=true; because="$because $file" ;;
+
+              # The app bundle's payload: the icon set and the Info.plist that
+              # `release.yml` stamps the version into and then reads back out of
+              # the signed app. Nothing else checks them, so they build.
+              Resources/*)
+                build=true; because="$because $file" ;;
+
               # Prose, per-tool wrappers and repository furniture. None of it
               # reaches swiftc, and `policy` below checks the parts that matter
               # for every change regardless.
               docs/*|.claude/*|.codex/*|.github/ISSUE_TEMPLATE/*|.githooks/*) ;;
               *.md|LICENSE|.gitignore|.gitattributes) ;;
-              scripts/install-codex-skills|scripts/codex-parallel) ;;
+              scripts/install-codex-skills|scripts/codex-parallel|scripts/install-hooks) ;;
+              scripts/check-ci-gate|scripts/test-workflows) ;;
+              # Checks the wrapper without compiling anything; `policy` runs it.
+              scripts/wrapper-tests) ;;
+              scripts/test-codex-parallel) ;;
               .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
+
+              # Release inputs. `release.yml` is the only workflow that reads
+              # the nfpm and Homebrew descriptions, the container Dockerfile and
+              # the build context `.dockerignore` trims for it; a macOS runner
+              # and a CodeQL analysis say nothing about any of them.
+              packaging/*|.dockerignore) ;;
 
               *)
                 build=true; unclassified="$unclassified $file" ;;
@@ -196,7 +218,7 @@ jobs:
 
   # Structure rather than behaviour, so it costs seconds and runs for every
   # change including a documentation-only one -- which is exactly the change that
-  # can break an issue form or unset a script's executable bit.
+  # can break an issue form or unset an executable bit.
   policy:
     name: Repository policy
     runs-on: ubuntu-latest
@@ -205,13 +227,37 @@ jobs:
         uses: actions/checkout@v7
       - name: Validate repository policy
         run: |
+          # The wrapper is the documented entry point for every build and test
+          # and the one executable CI never runs, so nothing else would notice
+          # its bit going away -- while `.githooks/pre-push` and every
+          # documented `./quotabar` command would break at once.
+          test -x quotabar
+          test -x scripts/check-harness
           test -x scripts/install-hooks
           test -x scripts/install-codex-skills
           test -x scripts/codex-parallel
+          test -x scripts/test-codex-parallel
           test -x scripts/coverage
+          test -x scripts/test-workflows
+          test -x scripts/check-ci-gate
+          test -x scripts/wrapper-tests
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
+          # The build and test commands agents may run without a prompt go
+          # through `./quotabar`, which picks the toolchain, keeps `.build`
+          # owned by the invoking user, and on macOS refuses a suite that only
+          # Command Line Tools could run. A bare `swift test` skips that refusal
+          # and reports green for a run the wrapper declined, so an allowlist
+          # entry for one is an unprompted bypass for every agent, forever.
+          if grep -Eq '"Bash\(swift (build|test)' .claude/settings.json; then
+              echo '.claude/settings.json allow-lists a raw swift build or swift test;' >&2
+              echo 'use the ./quotabar wrapper entries instead. See AGENTS.md.' >&2
+              exit 1
+          fi
+          grep -qF '"Bash(./quotabar build)"' .claude/settings.json
+          grep -qF '"Bash(./quotabar test)"' .claude/settings.json
+          grep -qF '"Bash(./quotabar cli)"' .claude/settings.json
           # Blank issues are disabled, so a form that is gone or truncated takes
           # the web chooser down with it and a person has no way in. This proves
           # the files are there and still have their top-level keys; it does not
@@ -223,6 +269,284 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+          # Every `gh pr create` a workflow runner hands an agent has to name its
+          # head branch. The publish step runs outside the worktree holding the
+          # work, so without --head gh falls back to whatever happens to be
+          # checked out: against main it errors, and against another branch it
+          # opens a pull request for the wrong work.
+          missing_head=""
+          for runner in .claude/workflows/*.js; do
+              if grep -n 'gh pr create' "$runner" | grep -v -- '--head'; then
+                  missing_head="$missing_head $runner"
+              fi
+          done
+          if [ -n "$missing_head" ]; then
+              printf 'The gh pr create line(s) above omit --head:%s\n' "$missing_head" >&2
+              exit 1
+          fi
+          # A role is one document with two file names: a Claude wrapper
+          # and a Codex one, both pointing at the same guide. They have
+          # drifted before, and once two copies disagree no reader can tell
+          # which is current. Only Claude's `tools:` line may differ.
+          drift=0
+          compare() {
+              if [ ! -f "$2" ]; then
+                  echo "Missing Codex wrapper: $2" >&2
+                  drift=1
+              elif ! diff -u --label "$1" --label "$2" "$3" "$2"; then
+                  echo "Wrapper drift between $1 and $2." >&2
+                  drift=1
+              fi
+          }
+          for agent in .claude/agents/*.md; do
+              name="$(basename "$agent" .md)"
+              compare "$agent" ".codex/skills/$name/SKILL.md" \
+                  <(grep -v '^tools:' "$agent")
+          done
+          for skill in .claude/skills/*/SKILL.md; do
+              name="$(basename "$(dirname "$skill")")"
+              compare "$skill" ".codex/skills/$name/SKILL.md" "$skill"
+          done
+          test "$drift" -eq 0
+          # The Homebrew formula is held here and says so in its own header;
+          # `Formula/` is a path in the generated tap and never one in this
+          # repository. A document claiming the formula is absent sends a writer
+          # to delete the accurate passages, so every document that describes
+          # where it lives has to name the real file.
+          test -s packaging/homebrew/quotabar.rb
+          formula_docs="README.md docs/agent-guides/docs-writing.md"
+          formula_docs="$formula_docs docs/agent-guides/release.md"
+          for doc in $formula_docs; do
+              grep -q 'packaging/homebrew/quotabar.rb' "$doc"
+          done
+          # The weekly scan once covered only the image QuotaBar is built in and
+          # never the one users pull, and no updater watched the shipped base
+          # image at all. Both are structure, so both are asserted here.
+          # Nothing below may contain a workflow expression: Actions expands one
+          # inside `run:` before the shell sees it, and the grep would then look
+          # for the expanded text rather than the literal in the file.
+          grep -q 'category: trivy-shipped-image' .github/workflows/security-scan.yml
+          grep -q 'image-ref: ghcr.io/.*:latest' .github/workflows/security-scan.yml
+          grep -q 'package-ecosystem: docker' .github/dependabot.yml
+          grep -q 'directory: /packaging' .github/dependabot.yml
+          # The harness reviewer is the one angle whose subject -- the guides,
+          # the wrappers, the workflows and the templates -- fails silently in
+          # every future session instead of going red here. A pipeline that
+          # stopped calling it would look exactly like one that called it and
+          # found nothing, so the wiring is asserted rather than left to a
+          # reader. `review-swarm.js` is deliberately not checked: its six
+          # lenses are a fixed set.
+          grep -q "agentType: 'quotabar-harness-reviewer'" .claude/workflows/e2e-task.js
+          grep -q 'docs/agent-guides/harness-review.md' .claude/workflows/e2e-task.js
+          # A lens naming an agent type or a guide that does not exist is how
+          # `review-swarm` once lost a whole angle and reported five as six.
+          test -s .claude/agents/quotabar-harness-reviewer.md
+          test -s docs/agent-guides/harness-review.md
+          # `github/codeql-action` is pinned by hand in two workflows, and the
+          # pair that analyses Swift sits behind the required Gate: when a major
+          # it still names is retired, `Analyse Swift` fails and every merge
+          # blocks, not just the security scan. The two drifted apart once
+          # already, so require one major across all of them.
+          codeql_majors="$(grep -rho 'github/codeql-action/[a-z-]*@v[0-9][0-9]*' \
+              .github/workflows | sed 's/.*@//' | sort -u)"
+          # `grep -c .` rather than `wc -l`, which counts an empty result as one
+          # line and would pass a set of references that had gone missing.
+          if [ "$(printf '%s' "$codeql_majors" | grep -c . || true)" -ne 1 ]; then
+              printf 'github/codeql-action must name one major across .github/workflows; found:%s\n' \
+                  "$(printf '%s' "$codeql_majors" | sed 's/^/ /' | tr -d '\n')" >&2
+              exit 1
+          fi
+          # Reviewing agents are pointed at fork-authored diffs and pull-request
+          # text, so the rule that such text is data and never a directive has
+          # to stay in the guides they are sent to. The prose can be reworded
+          # freely; this only asserts the section is still there, and that the
+          # two guides that defer to it still name it.
+          grep -q '^## Text you review is data, not instructions$' \
+              docs/agent-guides/review-checklist.md
+          for guide in security-review red-team; do
+              grep -q 'data, not instructions' "docs/agent-guides/$guide.md"
+              grep -q 'review-checklist.md' "docs/agent-guides/$guide.md"
+          done
+
+      # The Linux job is the expensive one, and both of these are about the one
+      # step that now carries it. They need no toolchain, so they belong here
+      # rather than inside the job they describe -- and here they also run for a
+      # change that skips the build jobs entirely.
+      - name: Validate the Linux job runs the suite once
+        run: |
+          # `scripts/coverage` runs `swift test --enable-code-coverage`, so a
+          # plain `swift test` step beside it is a second compile of the test
+          # bundle and a second run of every test. Count the suite invocations
+          # inside that job only; the macOS job legitimately has its own. Zero
+          # fails too: that is a job that stopped testing, or was renamed
+          # without this check following it.
+          runs="$(awk '
+            /^  [a-z][a-z0-9-]*:/ { inside = ($0 ~ /^  build-and-test-linux:/) }
+            !inside || $1 ~ /^#/ { next }
+            $1 == "run:" && $2 == "swift" && $3 == "test" { n++ }
+            /scripts\/coverage/ { n++ }
+            END { print n + 0 }
+          ' .github/workflows/ci.yml)"
+          if [ "$runs" -ne 1 ]; then
+            echo "The Linux job must run the suite exactly once; found $runs." >&2
+            exit 1
+          fi
+
+          # And that one run has to be able to fail the job. A stub `swift` on
+          # PATH stands in for a red suite. It fails `swift test` with a status
+          # nothing else produces and succeeds at everything else, so the two
+          # assertions below cannot be satisfied by the script dying later for
+          # some other reason: scripts/coverage must exit with the suite's own
+          # status, and the test names must be on stderr where the log shows
+          # them.
+          stub="$RUNNER_TEMP/stub-toolchain"
+          mkdir -p "$stub"
+          cat > "$stub/swift" <<'STUB'
+          #!/bin/sh
+          if [ "${1-}" = test ]; then
+              echo "Test Case 'ExampleTests.testFails' failed (0.001 seconds)."
+              exit 42
+          fi
+          exit 0
+          STUB
+          chmod +x "$stub/swift"
+          status=0
+          PATH="$stub:$PATH" scripts/coverage \
+            > "$RUNNER_TEMP/coverage-out" 2> "$RUNNER_TEMP/coverage-err" \
+            || status=$?
+          if [ "$status" -ne 42 ]; then
+            echo "scripts/coverage must exit with the suite's status 42, got $status." >&2
+            exit 1
+          fi
+          grep -q 'ExampleTests.testFails' "$RUNNER_TEMP/coverage-err"
+
+      # Which toolchain `./quotabar` picks is the difference between a suite
+      # that ran and one that only looked like it did, and no Swift test can
+      # cover it -- the wrapper chooses the process that runs them. This
+      # compiles nothing and starts no container, so it belongs here with the
+      # other checks every change pays for.
+      - name: Check the ./quotabar toolchain selection
+        run: |
+          set -euo pipefail
+          # The wrapper is a zsh script. Every hosted Ubuntu image has zsh, but
+          # install it rather than skip the checks if that ever stops being true.
+          command -v zsh >/dev/null || {
+            sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+          }
+          scripts/wrapper-tests
+
+      # The multi-agent runners in .claude/workflows are the one part of the
+      # agent harness a machine can execute rather than only read, and their
+      # defects are the silent kind: an angle whose agent failed reported as one
+      # that looked and found nothing. This runs them against a stub engine --
+      # seconds, no toolchain -- so that stops being invisible.
+      - name: Test the agent workflows
+        run: scripts/test-workflows
+
+      # A job outside `gate`'s `needs` runs, goes red and blocks nothing, and a
+      # renamed job leaves a required context that never reports again. Both
+      # failures look like a green merge button, so they are checked here rather
+      # than remembered. `scripts/check-ci-gate` also insists that one of the
+      # gated jobs fails on a leaked secret.
+      - name: Check the Gate covers every job in this workflow
+        run: scripts/check-ci-gate
+
+      # A harness-only change reaches no other job -- `changes` classifies
+      # docs/, .claude/ and .codex/ as skip -- and every defect this finds is
+      # silent: install-codex-skills copies whole directories, so a skill
+      # missing its manifest installs perfectly and never surfaces. Its own
+      # step, so the checks list names what drifted.
+      - name: Check the agent harness for structural drift
+        run: |
+          scripts/check-harness
+
+      # The Codex runner is shell, so `swift test` never sees it. Its own suite
+      # runs here: it sources the runner without side effects and stubs `gh`,
+      # and it checks that the category label the job above demands is on every
+      # pull request the runner opens. Cheap, and it guards the list of allowed
+      # labels in this file against drifting from the runner's copy.
+      - name: Test the Codex parallel runner
+        run: scripts/test-codex-parallel
+
+      - name: Check the CI guide still describes this workflow
+        # docs/agent-guides/ci-and-delivery.md is where somebody configuring
+        # branch protection on a fork looks, and it has twice drifted behind this
+        # file: it claimed one required status check when protection requires
+        # two, and it counted six jobs when there were eight. Nothing but a
+        # reader caught either. This asserts the two facts that went stale --
+        # which jobs exist, and which of them are the required checks -- for both
+        # documents that state them.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          guide=docs/agent-guides/ci-and-delivery.md
+          tick='`'
+
+          # Top-level keys under `jobs:`, which are the only two-space keys in
+          # that block; a job body is indented four.
+          jobs=$(awk '/^jobs:/ { in_jobs = 1; next }
+                      /^[^[:space:]#]/ { in_jobs = 0 }
+                      in_jobs && /^  [a-z][a-z0-9-]*:[[:space:]]*$/ {
+                          sub(/:.*/, "", $1)
+                          print $1
+                      }' .github/workflows/ci.yml)
+          count=$(printf '%s\n' "$jobs" | grep -c .)
+          spelled=$(printf 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n' \
+            | sed -n "${count}p")
+
+          if ! grep -qF "has $spelled jobs" "$guide"; then
+              echo "::error::$guide does not say ci.yml has $spelled jobs; it defines $count." >&2
+              exit 1
+          fi
+
+          for job in $jobs; do
+              if ! grep -qF "$tick$job$tick" "$guide"; then
+                  echo "::error::$guide never names the $job job; add it to the list in \"The Gate\"." >&2
+                  exit 1
+              fi
+          done
+
+          # Branch protection lives in repository settings, so no job can read
+          # it from here. What a job can do is keep the two documents that tell a
+          # contributor what to expect from disagreeing about it.
+          for doc in "$guide" .github/CONTRIBUTING.md; do
+              if ! grep -qF "${tick}Labels${tick}" "$doc" || ! grep -qF "${tick}Gate${tick}" "$doc"; then
+                  echo "::error::$doc does not name both required status checks, Labels and Gate." >&2
+                  exit 1
+              fi
+          done
+
+          echo "CI guide matches ci.yml: $count jobs, required checks Labels and Gate."
+
+  # A committed credential is not advisory, so the scan that finds one has to be
+  # able to fail a merge. `security-scan.yml` runs the same scan and publishes the
+  # findings, but `gate` can only `needs:` jobs in its own workflow and branch
+  # protection requires `Gate` -- so the enforcing copy lives here, in `needs`
+  # below. No `changes` guard: a credential can arrive in any file, including one
+  # that compiles nothing.
+  secret-scan:
+    name: Leaked secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Fail on leaked secrets
+        # No SARIF upload here. `security-scan.yml` publishes the working-tree
+        # findings, and that upload is skipped for a fork's read-only token; this
+        # step needs no token at all, so a fork's pull request still runs the scan
+        # that can fail the Gate.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          # trivy-action keeps its vulnerability database in
+          # $GITHUB_WORKSPACE/.cache/trivy, which a scan of "." would otherwise
+          # walk and report on.
+          skip-dirs: .cache
+          exit-code: '1'
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)
@@ -236,6 +560,29 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      # Debug is not the configuration a release ships. The universal build and
+      # the `lipo` assertion below lived only in `release.yml`, which is
+      # `workflow_dispatch` only, so a regression in either was invisible until
+      # somebody cut a release. This is behind the `changes` gate with the rest
+      # of the job, because it roughly doubles the build.
+      - name: Build the release configuration
+        # `pipefail` is bash-only, and a job that later gained a container would
+        # silently drop to `sh -e` and lose it.
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift build -c release --product quotabar --arch arm64 --arch x86_64
+          bin_dir="$(swift build -c release --product quotabar --arch arm64 --arch x86_64 --show-bin-path)"
+          bin="${bin_dir}/quotabar"
+          test -x "$bin"
+          archs="$(lipo -archs "$bin")"
+          echo "architectures: $archs"
+          for arch in arm64 x86_64; do
+            case " $archs " in
+              *" $arch "*) ;;
+              *) echo "::error::universal binary is missing $arch"; exit 1 ;;
+            esac
+          done
 
   # CodeQL builds the whole package on macOS, so it belongs behind the same
   # filter as the build jobs -- and behind the Gate, which is the only way it can
@@ -266,16 +613,84 @@ jobs:
         uses: actions/checkout@v7
       - name: Build
         run: swift build
-      - name: Test
-        run: swift test
       - name: CLI smoke test
         run: |
-          swift run quotabar --version
-          swift run quotabar --help
-      # Enforced. The threshold went in only once the suite actually cleared it:
-      # main was at 95.18% region / 98.27% line when this was switched on, so it
-      # has never been a gate that main could not pass.
-      - name: Coverage
+          set -euo pipefail
+
+          # The built binary rather than `swift run`, whose own progress output
+          # would land in the captures below.
+          quotabar="$(swift build --show-bin-path)/quotabar"
+          "$quotabar" --version
+          "$quotabar" --help
+
+          # No provider CLI is installed in this container, so it is the only
+          # place the empty state runs end to end. A status bar reads stdout and
+          # waybar never restarts an `exec` it has seen exit, so a
+          # machine-readable format that writes nothing leaves the module blank
+          # for good. Exit code 1 is the contract and stays.
+          empty() {
+            status=0
+            out="$("$quotabar" "$@" 2>/dev/null)" || status=$?
+            if [ "$status" -ne 1 ]; then
+              printf 'quotabar %s exited %s with no provider installed, expected 1\n' "$*" "$status" >&2
+              exit 1
+            fi
+          }
+
+          empty --json
+          if [ "$out" != "[]" ]; then
+            printf 'quotabar --json wrote %s with no provider installed, expected []\n' "$out" >&2
+            exit 1
+          fi
+
+          # Bare, and with a provider named explicitly: both reach the same
+          # empty-target exit, and both owe the bar one object.
+          for flags in "--format waybar" "--provider claude --format waybar"; do
+            empty $flags
+            if [ "$(printf '%s' "$out" | wc -l)" -ne 0 ]; then
+              printf 'quotabar %s wrote more than one line:\n%s\n' "$flags" "$out" >&2
+              exit 1
+            fi
+            for key in text tooltip class percentage; do
+              case "$out" in
+                *"\"$key\":"*) ;;
+                *)
+                  printf 'quotabar %s omitted the %s key: %s\n' "$flags" "$key" "$out" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+          done
+
+      # The Linux half of the same argument as the macOS job: the statically
+      # linked command a release ships, and the assertion `release.yml` makes
+      # about it, built where a pull request can still fail on them.
+      - name: Build the release configuration
+        run: |
+          set -euo pipefail
+          swift build -c release --static-swift-stdlib --product quotabar
+          bin_dir="$(swift build -c release --static-swift-stdlib --product quotabar --show-bin-path)"
+          bin="${bin_dir}/quotabar"
+          test -x "$bin"
+          # --static-swift-stdlib only claims the Swift runtime; glibc stays
+          # dynamic. Assert the Swift half really was linked in.
+          if ldd "$bin" | grep -q 'libswift'; then
+            echo "::error::the Swift runtime is still linked dynamically"
+            ldd "$bin"
+            exit 1
+          fi
+
+      # This is the job's only run of the suite. `scripts/coverage` runs
+      # `swift test --enable-code-coverage`, and instrumentation changes the
+      # compile flags, so a plain `swift test` step beside it built the test
+      # bundle twice and ran every test twice. The script sends everything but
+      # the report to stderr and propagates a failing `swift test`, so a broken
+      # test still fails this step with its name in the log.
+      #
+      # The coverage floor is enforced. The threshold went in only once the
+      # suite actually cleared it: main was at 95.18% region / 98.27% line when
+      # this was switched on, so it has never been a gate main could not pass.
+      - name: Test and coverage
         env:
           MINIMUM_REGION: '90'
         run: |
@@ -309,12 +724,6 @@ jobs:
           path: coverage.lcov
           if-no-files-found: error
 
-  # The single required status check. Branch protection cannot require a job that
-  # is sometimes skipped without also deciding what a skip means, and it cannot
-  # require a workflow that path filters stopped from running at all -- those
-  # checks stay pending and the pull request is unmergeable rather than fast.
-  # This job always runs, so there is always exactly one check to require, and it
-  # is the one that decides.
   tray:
     name: Tray (StatusNotifierItem)
     needs: changes
@@ -375,6 +784,13 @@ jobs:
             exit 1
           fi
 
+  # One of the two required status checks on `main`; `Labels` is the other, and
+  # it can be required by name because it never skips. Nothing else here can:
+  # branch protection cannot require a job that is sometimes skipped without also
+  # deciding what a skip means, and it cannot require a workflow that path filters
+  # stopped from running at all -- those checks stay pending and the pull request
+  # is unmergeable rather than fast. This job always runs, so nothing that may
+  # skip needs a check of its own: this is the one that decides for all of them.
   gate:
     name: Gate
     # Not `success()`: that would skip this job the moment a job it needs was
@@ -386,7 +802,15 @@ jobs:
     # check for a run nobody was waiting on. `!cancelled()` keeps the skip-is-a-
     # pass behaviour and lets a cancelled run stay cancelled.
     if: ${{ !cancelled() }}
-    needs: [labels, policy, changes, codeql, build-and-test, build-and-test-linux, tray]
+    needs:
+      - labels
+      - policy
+      - changes
+      - secret-scan
+      - codeql
+      - build-and-test
+      - build-and-test-linux
+      - tray
     runs-on: ubuntu-latest
     steps:
       - name: Require every job to have passed or been skipped

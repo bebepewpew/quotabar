@@ -13,7 +13,10 @@ var targets: [Target] = [
     .target(name: "QuotaTray", dependencies: ["QuotaCore"]),
     .executableTarget(name: "QuotaBarCLI", dependencies: ["QuotaCore"]),
     .testTarget(name: "QuotaCoreTests", dependencies: ["QuotaCore"]),
-    .testTarget(name: "QuotaTrayTests", dependencies: ["QuotaTray", "QuotaCore"])
+    .testTarget(name: "QuotaTrayTests", dependencies: ["QuotaTray", "QuotaCore"]),
+    // Repository structure rather than product code, so it links no target of
+    // ours: it runs `scripts/check-harness` the way CI does.
+    .testTarget(name: "HarnessTests")
 ]
 
 // The tray speaks StatusNotifierItem, a freedesktop protocol served over the

@@ -1,0 +1,86 @@
+#!/bin/sh
+set -eu
+
+# Fail on agent-harness structural drift.
+#
+#   scripts/check-harness        # check this repository
+#   scripts/check-harness DIR    # check the tree rooted at DIR
+#
+# This is the mechanical check docs/agent-guides/harness-review.md tells a
+# reviewer to run before reading a word of a harness change, and the `policy`
+# job in .github/workflows/ci.yml runs it on every pull request. Everything it
+# looks for fails silently otherwise: scripts/install-codex-skills copies whole
+# directories, so a skill missing its manifest installs perfectly and simply
+# never surfaces, and a wrapper pointing at a guide that was renamed away just
+# leaves the agent to invent the content.
+#
+# Nothing here reads a guide or a role: this is structure only. Every problem is
+# reported rather than just the first. Exit status is 0 when the harness is
+# consistent, 1 when it drifted, and 2 when the check could not be run at all.
+
+if [ "$#" -gt 0 ]; then
+    cd "$1" || exit 2
+else
+    cd "$(dirname "$0")/.." || exit 2
+fi
+
+# A tree missing these is not a harness with drift, it is the wrong directory,
+# and reporting every role as absent would bury that. Exit 2 says so instead.
+for required in AGENTS.md docs/agent-guides .claude/agents .codex/skills; do
+    if [ ! -e "$required" ]; then
+        printf 'check-harness: no %s under %s -- is this a QuotaBar checkout?\n' \
+            "$required" "$(pwd)" >&2
+        exit 2
+    fi
+done
+
+problems=0
+
+report() {
+    printf 'check-harness: %s\n' "$*" >&2
+    problems=$((problems + 1))
+}
+
+# Every guide a wrapper points at exists. Only full-path references are matched,
+# so the AGENTS.md roster naming guides by filename alone is deliberately not
+# checked here -- a bare `release.md` is prose, not a path an agent follows.
+#
+# `.claude/worktrees` holds throwaway checkouts the parallel runners create. It
+# is not part of the harness, and an old branch parked there must not fail the
+# tree it was cut from.
+guides=$(grep -rho --exclude-dir=worktrees 'docs/agent-guides/[a-z0-9-]*\.md' \
+    .claude .codex AGENTS.md | sort -u || true)
+for guide in $guides; do
+    [ -f "$guide" ] || report "missing guide: $guide"
+done
+
+# Every role exists on both sides, with its Codex manifest and a line in the
+# AGENTS.md roster. `quotabar-dev` and `quotabar-fixtures` are skills rather
+# than agents, so they have no `.claude/agents/` twin on purpose and there is
+# deliberately no loop in the other direction.
+for agent in .claude/agents/*.md; do
+    [ -f "$agent" ] || continue
+    name=$(basename "$agent" .md)
+    [ -f ".codex/skills/$name/SKILL.md" ] ||
+        report "no Codex skill: $name (expected .codex/skills/$name/SKILL.md)"
+done
+
+for skill in .codex/skills/*/; do
+    [ -d "$skill" ] || continue
+    skill=${skill%/}
+    name=$(basename "$skill")
+    [ -f "$skill/agents/openai.yaml" ] ||
+        report "no manifest: $name (expected $skill/agents/openai.yaml)"
+    # -F: a directory name is a fixed string here, not a pattern that could
+    # match a neighbouring role by accident.
+    grep -qF "\`$name\`" AGENTS.md ||
+        report "not in the AGENTS.md roster: $name"
+done
+
+if [ "$problems" -ne 0 ]; then
+    printf 'check-harness: %s structural problem(s); see docs/agent-guides/harness-review.md.\n' \
+        "$problems" >&2
+    exit 1
+fi
+
+printf 'check-harness: the agent harness is structurally consistent.\n'

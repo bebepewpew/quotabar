@@ -34,7 +34,7 @@ and write its caption at the same time, and delete the placeholder it replaces.
 | `Package.swift`, `Sources/`, `Tests/` | The SwiftPM package: every target and its tests |
 | `Resources/` | `Info.plist` and the icons the macOS app bundle is built from |
 | `packaging/` | What the release workflow builds distributables from: the nfpm configuration for the `.deb` and `.rpm`, the container `Dockerfile`, and `homebrew/quotabar.rb` |
-| `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` |
+| `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` and its own suite `test-codex-parallel`, and the structural checks CI runs: `check-ci-gate`, `check-harness`, `test-workflows`, `wrapper-tests` |
 | `docs/` | [`development.md`](docs/development.md) for building and testing from a checkout, [`container.md`](docs/container.md) for the published image, and `agent-guides/` for the long-form guidance the agent tooling points at |
 | `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `ISSUE_TEMPLATE/`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md` |
 | `.claude/`, `.codex/`, `.githooks/` | Per-tool wrappers and the repository hooks |
@@ -271,6 +271,11 @@ quotabar advise --json        the same findings, machine readable
 
 Exit codes: `0` every probe succeeded, `1` at least one provider failed to
 report, `2` invalid usage.
+
+With no provider CLI installed there is still exactly one document to read:
+`--json` writes `[]` and `--format waybar` writes an `n/a` object, so a status
+bar shows a state rather than staying blank. The reason goes to stderr and the
+exit code is `1`, as it is whenever a provider fails to report.
 
 ### Status bar integration
 

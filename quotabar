@@ -41,11 +41,33 @@ docker_run() {
 
 docker_swift() { docker_run swift "$@" }
 
-require_xcode() {
-  if [[ ! -x /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild ]]; then
-    print -u2 "QuotaBar tests require the full Xcode toolchain (this Command Line Tools installation includes neither XCTest nor Swift Testing)."
-    exit 2
+# Where a suite run has to happen on macOS. True when full Xcode is installed
+# and the host toolchain can run it; false when it cannot but docker can, so the
+# caller falls through to the container; exit 2 when neither is available.
+#
+# A Command Line Tools installation ships neither XCTest nor Swift Testing, but
+# the container the Linux branch already uses runs everything that is not the
+# app: Package.swift declares the QuotaBar target behind `#if os(macOS)`, so the
+# Linux image cannot build it at all. Say that before running, or a green run
+# reads as a full one.
+#
+# $QUOTABAR_XCODEBUILD repoints the probe, so scripts/wrapper-tests can pin both
+# answers on any machine. Without it those checks would take the host branch on
+# the primary development configuration -- macOS with full Xcode -- and run a
+# real `swift test` against their stub PATH, failing a wrapper that is correct.
+use_host_toolchain_for_suite() {
+  local xcodebuild="${QUOTABAR_XCODEBUILD:-/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild}"
+  if [[ -x "$xcodebuild" ]]; then
+    return 0
   fi
+  if have docker; then
+    print -u2 "Full Xcode is unavailable; running the suite in $swift_image through docker."
+    print -u2 "That covers QuotaCore, QuotaTray and the CLI. The QuotaBar macOS app target"
+    print -u2 "is not in that image, so a pass here is not a pass for the app."
+    return 1
+  fi
+  print -u2 "QuotaBar tests require the full Xcode toolchain (this Command Line Tools installation includes neither XCTest nor Swift Testing)."
+  exit 2
 }
 
 build_app() {
@@ -72,8 +94,9 @@ usage() {
   print -u2 "            (--lcov FILE also writes lcov, relative to the repo)"
   print -u2 "  cli       run the quotabar CLI (all platforms)"
   print -u2 ""
-  print -u2 "On Linux without a Swift toolchain, \$QUOTABAR_SWIFT_IMAGE (default"
-  print -u2 "$swift_image) is used through docker."
+  print -u2 "Without a usable local toolchain -- Linux without Swift, or macOS without"
+  print -u2 "full Xcode for test and coverage -- \$QUOTABAR_SWIFT_IMAGE (default"
+  print -u2 "$swift_image) is used through docker. That image has no macOS app target."
   exit 2
 }
 
@@ -97,12 +120,19 @@ case "$platform" in
       build) build_app "$@" ;;
       cli) exec swift run quotabar "$@" ;;
       test)
-        require_xcode
-        exec swift test "$@"
+        if use_host_toolchain_for_suite; then
+          exec swift test "$@"
+        fi
+        exec docker_swift test "$@"
         ;;
       coverage)
-        require_xcode
-        exec "$project_dir/scripts/coverage" "$@"
+        if use_host_toolchain_for_suite; then
+          exec "$project_dir/scripts/coverage" "$@"
+        fi
+        # As on Linux: llvm-cov has to be the toolchain that wrote the profile,
+        # so the whole script runs in the container and the paths it is given,
+        # --lcov included, are container paths under /workspace.
+        exec docker_run ./scripts/coverage "$@"
         ;;
       *) usage ;;
     esac

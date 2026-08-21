@@ -7,7 +7,7 @@ Closes #
 ## Validation
 
 - [ ] `./quotabar build`
-- [ ] `./quotabar test`, or the missing local Xcode limitation is stated below
+- [ ] `./quotabar test`, or the reason it could not run locally is stated below
 - [ ] `git diff --check`
 - [ ] User-facing behavior and documentation are updated where needed
 

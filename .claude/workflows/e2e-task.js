@@ -151,6 +151,12 @@ const PUBLISHED = {
 //
 // `worktree` is set only for the two angles that have to *run* something they
 // wrote. The rest read the diff, which needs no isolation.
+//
+// The harness angle is unconditional rather than gated on the paths the diff
+// touches: this runner has no shell of its own to compute a diff with, and an
+// angle that decides for itself whether to look is the very failure it exists to
+// catch. On a change that touches no guide, wrapper, workflow or template it
+// reads the diff, finds nothing in its scope, and lands in `anglesWithNothing`.
 // ---------------------------------------------------------------------------
 
 const LENSES = [
@@ -170,6 +176,8 @@ const LENSES = [
     'Follow docs/agent-guides/ci-and-delivery.md. Workflow and script changes, job permissions, action pinning, the coverage gate, the repository-policy step and executable bits. Name the CI job that would catch a regression in this change, or say plainly that none would.' },
   { key: 'docs', agentType: 'quotabar-writer', brief:
     'Follow docs/agent-guides/docs-writing.md. Does README.md, AGENTS.md, .github/SECURITY.md and docs/ still describe what the code does? Flag a claim this change made false, a documented command that no longer exists, and a behaviour change with no documentation. Policy duplicated outside AGENTS.md is a finding.' },
+  { key: 'harness', agentType: 'quotabar-harness-reviewer', brief:
+    'Follow docs/agent-guides/harness-review.md. You review the instructions an agent reads before it acts, not the code they describe: docs/agent-guides/, the .claude and .codex wrappers, .claude/workflows/, .claude/settings.json, scripts/codex-parallel, scripts/install-codex-skills, AGENTS.md, CLAUDE.md, GEMINI.md and the issue and pull-request templates. Guidance duplicated instead of pointed at, a role missing on one toolchain or missing its Codex manifest, a description that routes to the wrong role, tools or an allowlist entry beyond least authority, text somebody else wrote treated as instructions, a step with no failure branch so a number gets invented, and a report that turns "did not check" into "nothing found". If this diff touches none of those paths, say so and return an empty list.' },
 ]
 
 const diffCommands = (branch) => `  git fetch origin main ${branch}
@@ -213,12 +221,16 @@ angle, return an empty list.`, {
       })
       .then(r => ({ lens: lens.key, findings: (r && r.findings) || [], ran: true }))
       // An angle that errored must never be indistinguishable from one that
-      // looked and found nothing. Reporting seven angles as eight is how a gap
+      // looked and found nothing. Reporting eight angles as nine is how a gap
       // in coverage gets read as a clean bill of health.
       .catch(e => ({ lens: lens.key, findings: [], ran: false, error: String((e && e.message) || e) })),
 
-    ({ lens, findings }) =>
-      parallel(findings.map(f => () =>
+    // This stage forwards the run, not a bare array of verdicts. An angle that
+    // errored has nothing to attack, so it would arrive here as an empty array —
+    // the same empty array an angle that looked and found nothing produces.
+    // Dropping the flag here is what made the distinction above unobservable.
+    (run) =>
+      parallel(run.findings.map(f => () =>
         agent(`
 Try to REFUTE this review finding about QuotaBar. Default to refuted when you are
 uncertain — the cost of a false finding is a person changing working code.
@@ -231,21 +243,20 @@ uncertain — the cost of a false finding is a person changing working code.
 Read the actual code on branch ${branch} and the surrounding context. Run something
 if it settles it. It survives only if the described failure genuinely occurs.
 Correct the severity if it was overstated or understated. ${noCIYet}`, {
-          label: `verify:${lens}${roundTag}`,
+          label: `verify:${run.lens}${roundTag}`,
           phase: 'Verify',
           schema: VERDICT,
         })
-          .then(v => ({ ...f, lens, verdict: v }))
+          .then(v => ({ ...f, lens: run.lens, verdict: v }))
           // An unverifiable finding is surfaced, not silently dropped.
-          .catch(e => ({ ...f, lens, verdict: null, verifyError: String((e && e.message) || e) }))
-      )).then(rows => rows.filter(Boolean)),
+          .catch(e => ({ ...f, lens: run.lens, verdict: null, verifyError: String((e && e.message) || e) }))
+      )).then(rows => ({ lens: run.lens, ran: run.ran, error: run.error, rows: rows.filter(Boolean) })),
   ).then(perLens => ({
-    rows: perLens.flat().filter(f => f && f.claim),
-    runs: perLens.map((rows, i) => ({
-      key: lenses[i].key,
-      ran: Array.isArray(rows) ? rows.every(r => r && r.ran !== false) : false,
-      error: Array.isArray(rows) ? (rows.find(r => r && r.ran === false) || {}).error : 'the angle produced no result',
-    })),
+    rows: perLens.flatMap(run => (run && run.rows) || []).filter(f => f && f.claim),
+    runs: perLens.map((run, i) => (run && run.ran)
+      ? { key: lenses[i].key, ran: true, error: '' }
+      // A stage that threw leaves nothing behind, so an absent entry is a failure too.
+      : { key: lenses[i].key, ran: false, error: (run && run.error) || 'the angle produced no result' }),
   }))
 }
 
@@ -366,8 +377,9 @@ Follow docs/agent-guides/implementing.md. In order:
      ./quotabar build
      ./quotabar test
      git diff --check
-   On macOS the suite needs full Xcode. If it cannot run, say so in details and
-   set validated false rather than claiming it passed.
+   On macOS the suite needs full Xcode, or docker for the container path that
+   skips the app target. If it cannot run, say so in details and set validated
+   false rather than claiming it passed.
 5. Commit with an imperative subject. Stage files by name, never git add -A.
 6. git push -u origin <branch>. Do NOT open a pull request — a later step does.
 
@@ -562,6 +574,12 @@ phase('Ship')
 const published = await agent(`
 Open a pull request for the branch ${branch}.
 
+This step runs in the repository checkout, NOT in the worktree that holds
+${branch}, so the branch checked out here is someone else's — very likely main. Do
+not rely on the current branch and do not check anything out: the command below
+names the head branch explicitly, which is the only reason it targets the right
+work.
+
 Use the repository template at .github/pull_request_template.md.
 
 Title (already written as a changelog line, because squash-and-merge makes it the
@@ -594,7 +612,7 @@ If the change adds or edits a GitHub Actions workflow, say plainly in Notes that
 this pull request is that workflow's first execution, so a reviewer knows the run
 on this PR is the evidence rather than something that already happened.
 
-Run: gh pr create --base main --title "..." --body "..." --label "${spec.label}"
+Run: gh pr create --base main --head ${branch} --title "..." --body "..." --label "${spec.label}"
 Return the URL. If it fails, return an empty url and the reason. Do not merge.`, {
   label: 'ship', phase: 'Ship', schema: PUBLISHED,
 })

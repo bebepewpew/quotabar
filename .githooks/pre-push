@@ -11,8 +11,15 @@ done
 repo_root=$(git rev-parse --show-toplevel)
 "$repo_root/quotabar" build >/dev/null
 
-if [ -x /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild ]; then
-    "$repo_root/quotabar" test
+# The wrapper already knows what can run here -- the host toolchain, the
+# upstream container, or nothing -- so ask it instead of probing for Xcode a
+# second time. Exit 2 is its "no way to run the suite" answer: it has printed
+# why, CI is then the only authority, and the push goes ahead. Any other
+# non-zero status is a failing suite and blocks the push.
+if "$repo_root/quotabar" test; then
+    :
 else
-    echo "Full Xcode is unavailable; CI must run the XCTest suite." >&2
+    status=$?
+    [ "$status" -eq 2 ] || exit "$status"
+    echo "The suite did not run locally; CI must run it for this push." >&2
 fi

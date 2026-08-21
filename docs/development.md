@@ -44,9 +44,13 @@ the image with `QUOTABAR_SWIFT_IMAGE`.
 ./quotabar test
 ```
 
-On macOS this requires the full Xcode toolchain; the wrapper reports a clear
-error when the standalone Command Line Tools installation does not include
-XCTest. On Linux it runs natively or in the container, matching `./quotabar build`.
+On macOS this uses the full Xcode toolchain when it is installed, which is the
+only way the menu-bar app itself is tested. A standalone Command Line Tools
+installation includes neither XCTest nor Swift Testing, so the wrapper runs the
+suite in the container instead — the same one Linux uses — and says first that
+the app target is not covered there. With no docker either it reports a clear
+error and exits 2. On Linux it runs natively or in the container, matching
+`./quotabar build`.
 
 ## Porting to another platform
 

@@ -68,8 +68,9 @@ Do this, in order:
      ./quotabar build
      ./quotabar test
      git diff --check
-   On macOS the test suite needs full Xcode; if it cannot run, say so in details
-   and set validated to false rather than claiming it passed.
+   On macOS the test suite needs full Xcode, or docker for the container path
+   that skips the app target; if it cannot run, say so in details and set
+   validated to false rather than claiming it passed.
 5. Commit with an imperative subject. Stage files by name, never git add -A.
 6. Push the branch: git push -u origin <branch>. Do NOT open a pull request —
    a later step does that.
@@ -101,6 +102,12 @@ missing fixture for a parser change. Style preferences are not blocking.`
 const publishPrompt = (task, impl, review) => `
 Open a pull request for the branch ${impl.branch}.
 
+This step runs in the repository checkout, NOT in the worktree that holds
+${impl.branch}, so the branch checked out here is someone else's — very likely
+main. Do not rely on the current branch and do not check anything out: the command
+below names the head branch explicitly, which is the only reason it targets the
+right work.
+
 Use the repository template at .github/pull_request_template.md. Squash-and-merge
 is the only merge method here, so the title must be concise and imperative — it
 becomes the commit subject on main AND the line that appears in the release
@@ -130,7 +137,7 @@ Choose by the change, not by convenience: a fix to a security surface is
 security, a new test with no behaviour change is 'skip changelog', and tooling
 is for agent runners, scripts and developer workflow.
 
-Run: gh pr create --base main --title "..." --body "..." --label "<category>"
+Run: gh pr create --base main --head ${impl.branch} --title "..." --body "..." --label "<category>"
 Return the URL. If it fails, return an empty url and the reason.`
 
 const results = await pipeline(
