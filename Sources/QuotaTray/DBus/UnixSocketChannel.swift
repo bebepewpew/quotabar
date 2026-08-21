@@ -112,7 +112,8 @@ public final class UnixSocketChannel: DBusChannel, @unchecked Sendable {
     }
 
     /// Resolves the bus from the environment, the way every D-Bus client does.
-    public convenience init(environment: [String: String] = ProcessInfo.processInfo.environment) throws {
+    public convenience init(environment: [String: String] = ProcessInfo.processInfo.environment,
+                            timeout: TimeInterval = UnixSocketChannel.defaultTimeout) throws {
         guard let value = environment["DBUS_SESSION_BUS_ADDRESS"], !value.isEmpty else {
             throw DBusConnectionError.unsupportedAddress(
                 "DBUS_SESSION_BUS_ADDRESS is not set; there is no session bus to join")
@@ -120,7 +121,7 @@ public final class UnixSocketChannel: DBusChannel, @unchecked Sendable {
         guard let address = DBusAddress.parse(value) else {
             throw DBusConnectionError.unsupportedAddress(value)
         }
-        try self.init(address: address)
+        try self.init(address: address, timeout: timeout)
     }
 
     deinit { close() }

@@ -22,8 +22,25 @@ public struct DBusMenuLayout: Equatable, Sendable {
 }
 
 public extension DBusMenuLayout {
-    /// dbusmenu reserves 0 for the root; children are numbered from 1.
+    /// dbusmenu reserves 0 for the root.
     static let rootID: Int32 = 0
+
+    /// Fixed ids for the rows a click can act on.
+    ///
+    /// Not positional. Rows come and go as providers fail and recover, so a
+    /// position-numbered id means an id shifts under a menu the user already has
+    /// open — and a click still in flight then lands on whatever now occupies
+    /// that slot. One row fewer and a click on Refresh arrives as the id Quit
+    /// used to have, exiting the app instead. Pinning the actions means a stale
+    /// id names the same action or names nothing, never a different one.
+    static let actionIDs: [String: Int32] = [
+        TrayMenu.refreshActionID: 1,
+        TrayMenu.quitActionID: 2,
+    ]
+
+    /// Readout rows are numbered above every reserved action id, so the two
+    /// ranges can never collide however many rows there are.
+    static let firstReadoutID: Int32 = 100
 
     /// Builds the layout a tray will render.
     ///
@@ -33,19 +50,21 @@ public extension DBusMenuLayout {
     static func build(from items: [TrayMenuItem]) -> DBusMenuLayout {
         var actions = [Int32: String]()
         var children = [DBusValue]()
-        // Ids must be stable for as long as a layout revision lives, and unique
-        // within it. Position is enough: a new layout gets a new revision.
-        var nextID = rootID + 1
+        var nextReadoutID = firstReadoutID
 
         for item in items {
-            let id = nextID
-            nextID += 1
-            // Keyed off the same predicate that decides `enabled`, so the menu
-            // cannot advertise a row as dead and still act on it. A tray should
-            // not send `Event` for a disabled item, but nothing here depends on
-            // every tray getting that right.
-            if isEnabled(item), let actionID = item.actionID {
+            // An actionable row keeps its reserved id across every layout; only
+            // the readouts are numbered by position, and a stale click on one of
+            // those does nothing because they are not in the dispatch table.
+            let id: Int32
+            if isEnabled(item), let actionID = item.actionID, let reserved = actionIDs[actionID] {
+                id = reserved
+                // Keyed off the same predicate that decides `enabled`, so the
+                // menu cannot advertise a row as dead and still act on it.
                 actions[id] = actionID
+            } else {
+                id = nextReadoutID
+                nextReadoutID += 1
             }
             children.append(.variant(.struct([
                 .int32(id),

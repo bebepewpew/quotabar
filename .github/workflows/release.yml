@@ -141,11 +141,18 @@ jobs:
             Sources/QuotaBarCLI/Arguments.swift
           perl -pi -e 's{(<key>CFBundleShortVersionString</key><string>)[^<]*(</string>)}{$1$ENV{VERSION}$2}' \
             Resources/Info.plist
+          perl -pi -e 's{^(\s*public static let version = ")[^"]*(")}{$1$ENV{VERSION}$2}' \
+            Sources/QuotaTray/TrayArguments.swift
           grep -Fq "static let version = \"${VERSION}\"" Sources/QuotaBarCLI/Arguments.swift
+          grep -Fq "static let version = \"${VERSION}\"" Sources/QuotaTray/TrayArguments.swift
           grep -Fq "<key>CFBundleShortVersionString</key><string>${VERSION}</string>" Resources/Info.plist
 
-      - name: Build the statically linked binary
-        run: swift build -c release --static-swift-stdlib --product quotabar
+      - name: Build the statically linked binaries
+        run: |
+          set -euo pipefail
+          swift build -c release --static-swift-stdlib --product quotabar
+          # The tray is Linux-only, so it is built here and nowhere else.
+          swift build -c release --static-swift-stdlib --product quotabar-tray
 
       - name: Verify the binary
         run: |
@@ -164,16 +171,31 @@ jobs:
           "$bin" --help > /dev/null
           echo "BIN=$bin" >> "$GITHUB_ENV"
 
+          # Same checks for the tray. It links no libdbus — the D-Bus client is
+          # written out — so it must be as self-contained as the command.
+          tray="${bin_dir}/quotabar-tray"
+          test -x "$tray"
+          if ldd "$tray" | grep -qE 'libswift|libdbus'; then
+            echo "::error::quotabar-tray is not self-contained"
+            ldd "$tray"
+            exit 1
+          fi
+          test "$("$tray" --version)" = "quotabar-tray ${VERSION}"
+          "$tray" --help > /dev/null
+          echo "TRAY_BIN=$tray" >> "$GITHUB_ENV"
+
       - name: Stage the payload
         run: |
           set -euo pipefail
           pkgroot="dist/linux-x86_64"
           mkdir -p "$pkgroot"
           install -m 0755 "$BIN" "${pkgroot}/quotabar"
+          install -m 0755 "$TRAY_BIN" "${pkgroot}/quotabar-tray"
 
           tarroot="dist/quotabar-${VERSION}-linux-x86_64"
           mkdir -p "$tarroot"
           install -m 0755 "$BIN" "${tarroot}/quotabar"
+          install -m 0755 "$TRAY_BIN" "${tarroot}/quotabar-tray"
           install -m 0644 README.md LICENSE "$tarroot/"
           tar -czf "${tarroot}.tar.gz" -C dist "quotabar-${VERSION}-linux-x86_64"
           rm -rf "$tarroot"

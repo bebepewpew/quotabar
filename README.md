@@ -185,7 +185,7 @@ Set `VERSION` to the release you want; the
 current one. The filenames are not stable across versions, which is why there is
 no `releases/latest/download/…` shortcut here.
 
-Both install `/usr/bin/quotabar`. The binary is linked with
+Both install `/usr/bin/quotabar` and, since the tray landed, `/usr/bin/quotabar-tray`. The binary is linked with
 `--static-swift-stdlib`, so it carries the Swift runtime and needs no Swift
 package installed. `expect` and libnotify are recommended rather than required:
 the first is used only by the Gemini probe, the second only by `--notify`.
@@ -207,7 +207,13 @@ sudo install -m 0755 "${NAME}/quotabar" /usr/local/bin/
 ```
 
 Set `NAME` to whichever of the two matches your platform. Each tarball holds the
-`quotabar` binary alongside `README.md` and `LICENSE`. Prefer the Homebrew tap on
+`quotabar` binary alongside `README.md` and `LICENSE`; the Linux one also carries
+`quotabar-tray`, which you can install the same way:
+
+```sh
+sudo install -m 0755 "${NAME}/quotabar-tray" /usr/local/bin/   # Linux only
+```
+ Prefer the Homebrew tap on
 macOS: a browser download picks up `com.apple.quarantine` and Gatekeeper then
 blocks the unnotarized binary on first run.
 
@@ -287,10 +293,41 @@ The `class` field is `normal`, `warning`, or `critical`, so it can be styled:
 polybar and the Plasma command-output widget can run `quotabar --format waybar`
 and read the `text` field, or use plain `quotabar` for the full table.
 
-A native KDE tray icon (StatusNotifierItem) is planned as a separate front-end
-on top of `QuotaCore`. Its rendering lives in the `QuotaTray` target and is
-built and tested on every change, but no product ships it yet — there is nothing
-to install, and `quotabar` is the Linux interface today.
+### Tray icon
+
+```sh
+quotabar-tray                    # runs until you quit it from the menu
+quotabar-tray --interval 300     # seconds between refreshes (default 900)
+```
+
+`quotabar-tray` puts QuotaBar in the system tray as a
+[StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/),
+which is what KDE Plasma reads natively and what libayatana-appindicator exposes
+to most other panels. It colours bars amber at 80% and red at 95%, lists every
+window in the tooltip, and offers Refresh and Quit. A left click refreshes.
+
+The icon shows the three busiest windows. Choosing which ones appear is a macOS
+feature today — the setting is stored per platform and no Linux front-end writes
+it yet — so on Linux the tray picks them by usage on every refresh.
+
+It needs a session bus with a StatusNotifierWatcher on it — Plasma provides one;
+on GNOME it comes from the AppIndicator extension. The `quotabar` command needs
+neither and works anywhere. Linux only: macOS has the menu-bar app instead.
+
+To start it with your desktop session:
+
+```sh
+quotabar-tray --install-autostart
+systemctl --user enable --now quotabar-tray.service
+```
+
+`--install-autostart` writes the unit to
+`${XDG_CONFIG_HOME:-~/.config}/systemd/user/quotabar-tray.service`, pointing at
+the binary you ran it from. `--remove-autostart` deletes it again.
+
+QuotaBar speaks the D-Bus protocol directly rather than linking `libdbus`, so the
+tray is as self-contained as the command — the `.deb`, `.rpm` and tarball all
+carry both binaries and neither adds a package dependency.
 
 ## Troubleshooting
 
