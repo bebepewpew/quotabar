@@ -43,8 +43,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Exactly the labels .github/release.yml categorises, and exactly the
-          # table in README.md. Changing one means changing all three.
+          # Exactly the labels .github/release.yml categorises. The same set is
+          # written out in README.md, .github/CONTRIBUTING.md,
+          # docs/agent-guides/product-shaping.md, docs/agent-guides/backlog.md
+          # and the dropdown in .github/ISSUE_TEMPLATE/task.yml. Changing one
+          # means changing all of them; this array is the one that fails a
+          # pull request, so it is the one that decides.
           allowed=(
             feature
             fix
@@ -97,9 +101,105 @@ jobs:
           } >&2
           exit 1
 
-  build-and-test:
-    name: macOS (menu-bar app, core, CLI)
-    runs-on: macos-15
+  # Which of the two expensive jobs this change actually needs. A documentation
+  # change compiles nothing, so it should not hold a macOS runner -- but the
+  # checks that are *about* documentation and repository structure still run,
+  # because `policy` above has no such guard.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          # The diff needs the base commit, which a depth-1 clone does not carry.
+          fetch-depth: 0
+      - name: Decide whether the build is needed
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          # A push to `main` always runs everything. Releases are cut from it, so
+          # nothing about main is worth trimming.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Not a pull request: running the full suite."
+            exit 0
+          fi
+
+          git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed"
+          files="$(cat "$RUNNER_TEMP/changed")"
+          printf 'Changed files:\n%s\n' "$files"
+
+          # An empty diff has nothing to compile either. Guarded explicitly
+          # because `printf` of an empty string still feeds `grep` a blank line.
+          if [ -z "$files" ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "No files changed against the base."
+            exit 0
+          fi
+
+          # Three buckets, and the third is the point. `build` and `skip` are
+          # both explicit, so a path that matches neither is *unclassified* --
+          # it builds, and it says so by name, which is the signal that this
+          # list needs a line rather than a silent guess either way.
+          build=false
+          because=""
+          unclassified=""
+
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              # Compiled, or decides how the compile runs.
+              Sources/*|Tests/*|Package.swift|Package.resolved|quotabar|scripts/coverage)
+                build=true; because="$because $file" ;;
+
+              # The pipeline itself. A workflow change is only ever proven by
+              # running it, so it earns a full suite even though it compiles
+              # nothing. This is the line to cut if that stops being worth it.
+              .github/workflows/*)
+                build=true; because="$because $file" ;;
+
+              # Prose, per-tool wrappers and repository furniture. None of it
+              # reaches swiftc, and `policy` below checks the parts that matter
+              # for every change regardless.
+              docs/*|.claude/*|.codex/*|.github/ISSUE_TEMPLATE/*|.githooks/*) ;;
+              *.md|LICENSE|.gitignore|.gitattributes) ;;
+              scripts/install-codex-skills|scripts/codex-parallel) ;;
+              .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
+
+              *)
+                build=true; unclassified="$unclassified $file" ;;
+            esac
+          done < "$RUNNER_TEMP/changed"
+
+          if [ -n "$unclassified" ]; then
+            printf 'Not classified, so building. Add these to the case in this job:\n'
+            printf '  %s\n' $unclassified
+          fi
+          if [ -n "$because" ]; then
+            printf 'Needs the build, because of:\n'
+            printf '  %s\n' $because
+          fi
+
+          if [ "$build" = true ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing compiled changed: skipping macOS, Linux and CodeQL."
+          fi
+
+  # Structure rather than behaviour, so it costs seconds and runs for every
+  # change including a documentation-only one -- which is exactly the change that
+  # can break an issue form or unset a script's executable bit.
+  policy:
+    name: Repository policy
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -112,13 +212,49 @@ jobs:
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
+          # Blank issues are disabled, so a form that is gone or truncated takes
+          # the web chooser down with it and a person has no way in. This proves
+          # the files are there and still have their top-level keys; it does not
+          # parse them, so a form broken below that level reaches production.
+          for form in bug_report feature_request task; do
+              test -s ".github/ISSUE_TEMPLATE/$form.yml"
+              grep -q '^name:' ".github/ISSUE_TEMPLATE/$form.yml"
+              grep -q '^body:' ".github/ISSUE_TEMPLATE/$form.yml"
+          done
+          test -s .github/ISSUE_TEMPLATE/config.yml
+          grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+
+  build-and-test:
+    name: macOS (menu-bar app, core, CLI)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
       - name: Build
         run: swift build
       - name: Test
         run: swift test
 
+  # CodeQL builds the whole package on macOS, so it belongs behind the same
+  # filter as the build jobs -- and behind the Gate, which is the only way it can
+  # be a required check and still be skippable. `gate` can only `needs:` jobs in
+  # its own workflow, which is why this is a call rather than a second workflow.
+  codeql:
+    name: CodeQL
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
   build-and-test-linux:
     name: Linux (core, CLI)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     container: swift:6.3-noble
     defaults:
@@ -172,3 +308,44 @@ jobs:
           name: coverage-lcov-linux
           path: coverage.lcov
           if-no-files-found: error
+
+  # The single required status check. Branch protection cannot require a job that
+  # is sometimes skipped without also deciding what a skip means, and it cannot
+  # require a workflow that path filters stopped from running at all -- those
+  # checks stay pending and the pull request is unmergeable rather than fast.
+  # This job always runs, so there is always exactly one check to require, and it
+  # is the one that decides.
+  gate:
+    name: Gate
+    # Not `success()`: that would skip this job the moment a job it needs was
+    # skipped, and a skipped required check satisfies nothing.
+    #
+    # Not `always()` either. `always()` runs this job even when the whole run was
+    # cancelled, and the `concurrency` group above cancels a superseded run every
+    # time a label lands moments after `opened` — so the gate reported a red
+    # check for a run nobody was waiting on. `!cancelled()` keeps the skip-is-a-
+    # pass behaviour and lets a cancelled run stay cancelled.
+    if: ${{ !cancelled() }}
+    needs: [labels, policy, changes, codeql, build-and-test, build-and-test-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every job to have passed or been skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$RESULTS"
+
+          # `skipped` is a pass: it means this change did not need that job.
+          # `failure` and `cancelled` are not, and neither is anything new that
+          # GitHub starts returning.
+          failed="$(printf '%s' "$RESULTS" | jq -r '
+            to_entries[]
+            | select(.value.result != "success" and .value.result != "skipped")
+            | "\(.key): \(.value.result)"')"
+
+          if [ -n "$failed" ]; then
+            printf 'These jobs did not pass:\n%s\n' "$failed" >&2
+            exit 1
+          fi
+          echo "Every job passed or was skipped."

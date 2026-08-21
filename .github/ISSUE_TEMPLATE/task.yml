@@ -1,0 +1,111 @@
+name: Backlog item
+description: A scoped piece of work — the shape an agent or maintainer files, ready to be picked up without a second conversation.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the handover from shaping, recorded as an issue: the fields map onto what
+        [`docs/agent-guides/product-shaping.md`](https://github.com/bebepewpew/quotabar/blob/main/docs/agent-guides/product-shaping.md)
+        produces. Fill every one — a backlog item that needs a follow-up question before work
+        can start is not scoped yet.
+
+        Write the title as the release-notes line the closing pull request will carry —
+        "Bound the Gemini probe deadline", not "gemini fixes". Apply exactly one category label
+        when you open it (`--label` on `gh issue create`); the same label goes on that pull request.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the issues, closed ones too; this is not a duplicate and does not supersede one.
+          required: true
+        - label: Nothing below contains credentials, personal terminal output, account identifiers or personal paths.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: One sentence, from the user's side. Not the solution.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surfaces
+    attributes:
+      label: Surfaces in scope
+      multiple: true
+      options:
+        - QuotaCore (shared logic)
+        - macOS menu bar (QuotaBar)
+        - Linux tray (QuotaTray)
+        - "`quotabar` CLI text output"
+        - "Machine-readable output (`--json`, waybar, csv)"
+        - Persistence (StateStore / HistoryStore)
+        - CI and delivery (`.github/` / `scripts/` / `.githooks/`)
+        - Documentation
+        - Agent tooling (`docs/agent-guides/` / `.claude/` / `.codex/`)
+    validations:
+      required: true
+
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      description: |
+        Each one assertable — exact boundaries, named errors, exact counts. If a criterion cannot
+        become a test, it belongs in Notes instead.
+      placeholder: |
+        -
+        -
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: Listed, so nobody quietly widens it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: label
+    attributes:
+      label: Category label
+      description: |
+        One only. It decides the release-notes section of the pull request that closes this. The label
+        actually applied to the issue is what counts — this field is the record when you cannot apply
+        one yourself. `docs` and `documentation` are both allowed and mean the same section.
+      options:
+        - feature
+        - fix
+        - security
+        - performance
+        - tooling
+        - ci
+        - documentation
+        - docs
+        - dependencies
+        - skip changelog
+    validations:
+      required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and compatibility
+      description: |
+        Anything touching `history.bin`, a `StateStore` key or a `--json`/waybar key is a compatibility
+        decision before it is a feature — say so here. Also: a provider output format that may change,
+        and any platform this cannot be tested on locally. "None" is a valid answer from a completed
+        shaping pass; blank is not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Sequencing against other open items, the guides that apply, preferences that are not criteria.

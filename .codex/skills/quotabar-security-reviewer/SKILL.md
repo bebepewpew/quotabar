@@ -1,5 +1,5 @@
 ---
-name: quotabar-security-review
+name: quotabar-security-reviewer
 description: Review QuotaBar changes for security against the threat model in docs/agent-guides/security-review.md — binary discovery and PATH, Tcl and shell construction, untrusted CLI output, credential handling, child-process lifetime, XDG state and the release supply chain. Use before merging anything that touches process execution, parsing, persistence or CI.
 ---
 

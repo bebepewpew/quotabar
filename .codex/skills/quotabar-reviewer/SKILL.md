@@ -1,5 +1,5 @@
 ---
-name: quotabar-review
+name: quotabar-reviewer
 description: Review QuotaBar changes against the AGENTS.md contributor rules — process cleanup, credential safety, untrusted CLI output, persistence compatibility and fixture coverage. Use before opening or updating a pull request.
 ---
 

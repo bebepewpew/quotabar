@@ -1,20 +1,24 @@
 name: CodeQL
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # Called by ci.yml rather than triggered directly, so this analysis sits behind
+  # the same `changes` filter as the build jobs and behind the same Gate. A
+  # `paths-ignore` here instead would have been unusable the moment anyone
+  # required this check: a workflow a path filter stops from running never
+  # reports, and a required check that never reports blocks the merge for good.
+  workflow_call:
   schedule:
     # Weekly, so newly published CodeQL queries reach the default branch even
-    # when nothing has been merged for a while.
+    # when nothing has been merged for a while. This one runs standalone; the
+    # `changes` filter has nothing to compare a scheduled run against.
     - cron: '17 4 * * 1'
 
 permissions:
   contents: read
 
-concurrency:
-  group: codeql-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# No `concurrency` here. When this is called, ci.yml's group already covers the
+# run, and a reusable workflow carrying its own group can queue behind the caller
+# that is waiting for it.
 
 jobs:
   analyze:

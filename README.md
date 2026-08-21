@@ -288,7 +288,9 @@ polybar and the Plasma command-output widget can run `quotabar --format waybar`
 and read the `text` field, or use plain `quotabar` for the full table.
 
 A native KDE tray icon (StatusNotifierItem) is planned as a separate front-end
-on top of `QuotaCore`.
+on top of `QuotaCore`. Its rendering lives in the `QuotaTray` target and is
+built and tested on every change, but no product ships it yet — there is nothing
+to install, and `quotabar` is the Linux interface today.
 
 ## Troubleshooting
 
@@ -343,6 +345,18 @@ rules in [AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone
 (and `scripts/install-codex-skills` if you use Codex).
 [`docs/development.md`](docs/development.md) covers building, testing, and what a
 new platform front-end would take.
+
+## Issues
+
+Three forms, in [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE): a bug
+report, a feature request, and a scoped backlog item. Blank issues are off, so
+every entry arrives with its fields.
+[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md#filing-an-issue) has the rest
+— which form, and what to redact before pasting. A vulnerability is never a
+public issue; see [Security](#security) above.
+
+If [Troubleshooting](#troubleshooting) already names the message you are seeing,
+start there.
 
 ## Pull requests
 

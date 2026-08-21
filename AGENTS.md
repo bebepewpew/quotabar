@@ -130,6 +130,8 @@ policy.
   this repository has already hit.
 - `qa-plan.md` — what each kind of change owes in tests, and how to prove a test
   can actually fail.
+- `backlog.md` — filing an issue nobody is building yet, and answering one that
+  arrives: the templates, the labels, and the five outcomes triage can reach.
 
 **Checking the work**
 
@@ -144,6 +146,8 @@ policy.
 - `ci-and-delivery.md` — the four workflows, what each is authoritative for, and
   the pinning and permission rules.
 - `docs-writing.md` — where each document lives, and what goes stale.
+- `harness-review.md` — reviewing the harness itself: the guides, the wrappers,
+  the workflows and the allowlist, where a defect fails silently rather than red.
 - `risk-signoff.md` — deciding that what is now known is acceptable to ship, and
   recording what was accepted.
 - `release.md` — cutting and verifying a release.
@@ -160,12 +164,12 @@ The wrappers:
 
 - `.claude/skills/` — `quotabar-dev` and `quotabar-fixtures`. Claude Code reads
   these from the repository.
-- `.claude/agents/` — one per role: `quotabar-product`, `quotabar-architect`,
-  `quotabar-developer`, `quotabar-qa`, `quotabar-reviewer`,
-  `quotabar-security-reviewer`, `quotabar-red-team`, `quotabar-ux`,
-  `quotabar-performance`, `quotabar-devops`, `quotabar-writer`, `quotabar-ciso`
-  and `quotabar-release`. Each is usable on its own; the workflows only decide
-  the order they run in.
+- `.claude/agents/` — one per role: `quotabar-pm`, `quotabar-product`,
+  `quotabar-architect`, `quotabar-developer`, `quotabar-qa`, `quotabar-reviewer`,
+  `quotabar-security-reviewer`, `quotabar-harness-reviewer`, `quotabar-red-team`,
+  `quotabar-ux`, `quotabar-performance`, `quotabar-devops`, `quotabar-writer`,
+  `quotabar-ciso` and `quotabar-release`. Each is usable on its own; the
+  workflows only decide the order they run in.
 - `.claude/workflows/review-swarm.js` — six-lens review with adversarial
   verification of every finding. Use it before merging anything substantial.
 - `.claude/workflows/e2e-task.js` — the full line for a single task, with the
@@ -177,12 +181,19 @@ The wrappers:
 - `.codex/skills/` — the same roles with `agents/openai.yaml` manifests. Codex
   discovers skills only under `$CODEX_HOME/skills` and does not read them from a
   repository, so run `scripts/install-codex-skills` once per clone and again
-  after pulling changes to them. Codex reads `AGENTS.md` natively, which is why
-  there is no `CODEX.md`. Codex has no workflow engine, so the multi-agent
-  runners above have no Codex equivalent beyond `scripts/codex-parallel`.
+  after pulling changes to them. It also removes the skills it installed that the
+  repository no longer has, so a renamed role stops being offered under both
+  names; a skill it did not install is never touched. A role is spelled the same
+  in `.claude/agents/` and `.codex/skills/`. Codex reads `AGENTS.md` natively,
+  which is why there is no `CODEX.md`. Codex has no workflow engine, so the
+  multi-agent runners above have no Codex equivalent beyond
+  `scripts/codex-parallel`.
 
 `quotabar-dev` is the build-and-test **skill**; `quotabar-developer` is the agent
 that implements a change and uses it. Keep the two straight when adding either.
+`quotabar-pm` and `quotabar-product` divide the same way: the first owns the
+backlog — filing what nobody is building yet and answering what arrives — and the
+second scopes a change that is about to be built.
 
 `.claude/settings.json` allows `./quotabar ...` rather than raw `docker run ...`
 deliberately: the wrapper selects the right toolchain and keeps `.build` owned by
@@ -197,6 +208,11 @@ These describe the rules; they do not replace them. This file stays canonical.
 - Contributor and security policy live in `.github/CONTRIBUTING.md` and
   `.github/SECURITY.md`. GitHub surfaces both from there, so the repository
   root stays short; link to those paths rather than the old root ones.
+- Issues are filed through `.github/ISSUE_TEMPLATE/` — `bug_report.yml`,
+  `feature_request.yml` and `task.yml` for a scoped backlog item. Blank issues
+  are off, so every entry arrives with its fields; `docs/agent-guides/backlog.md`
+  covers filing one non-interactively and answering one that arrives. A
+  vulnerability is never a public issue.
 - `REVIEW.md` is a local/generated report and must not be committed.
 - App icons belong in `Resources`; `.icns` and source icon assets are intentional.
 - Use `scripts/install-hooks` once per clone to enable the repository hooks.

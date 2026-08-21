@@ -38,6 +38,11 @@ and `--format waybar` show it too.
 A feature that ships on one surface only is a legitimate choice. An unstated one
 is a defect someone finds after the pull request.
 
+`QuotaTray` is a third front end in the making: the rendering is built and tested,
+but `Package.swift` declares no product for it, so nothing installs it. Scope work
+there as code with tests and no user, and say so — `docs/agent-guides/ux-review.md`
+reviews it on the same terms.
+
 ## Acceptance criteria have to be assertable
 
 The repository tests exact boundaries, so write criteria that can become them.
@@ -89,3 +94,9 @@ scripts and developer workflow.
 5. The category label and a draft pull-request title written as a changelog line.
 6. Risks worth flagging: compatibility, a provider format that may change, a
    platform where this cannot be tested locally.
+
+Those six map onto `.github/ISSUE_TEMPLATE/task.yml`, which adds a `Notes` field
+for what is not a criterion and takes the draft title from the issue title rather
+than a body field. Hand them to the architect when the work starts now, and file
+them as a backlog item when it does not — `docs/agent-guides/backlog.md`. Change
+one and change the other.
