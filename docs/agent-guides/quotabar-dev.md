@@ -92,8 +92,12 @@ Things worth knowing before you touch it:
 - `scripts/wrapper-tests` covers that selection logic — which toolchain the
   wrapper picks, what it forwards and what it refuses — against a stubbed `uname`
   and `docker`, so it compiles nothing and starts no container. Run it after
-  editing `./quotabar`; CI runs it in the `Repository policy` job. The branches
-  behind an installed full Xcode are the one thing it cannot reach.
+  editing `./quotabar`; CI runs it in the `Repository policy` job. It pins the
+  Xcode probe through `$QUOTABAR_XCODEBUILD` instead of reading `/Applications`,
+  so it gives the same answers on a machine with full Xcode as on one without —
+  and reaches the host branch as well. Only host `coverage`, which execs
+  `scripts/coverage` rather than a command a stub PATH can replace, and the
+  macOS-only `run` branch stay outside it.
 - `--static-swift-stdlib` links only in **release**; a debug static link fails on
   missing ICU symbols.
 

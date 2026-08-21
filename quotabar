@@ -50,8 +50,14 @@ docker_swift() { docker_run swift "$@" }
 # app: Package.swift declares the QuotaBar target behind `#if os(macOS)`, so the
 # Linux image cannot build it at all. Say that before running, or a green run
 # reads as a full one.
+#
+# $QUOTABAR_XCODEBUILD repoints the probe, so scripts/wrapper-tests can pin both
+# answers on any machine. Without it those checks would take the host branch on
+# the primary development configuration -- macOS with full Xcode -- and run a
+# real `swift test` against their stub PATH, failing a wrapper that is correct.
 use_host_toolchain_for_suite() {
-  if [[ -x /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild ]]; then
+  local xcodebuild="${QUOTABAR_XCODEBUILD:-/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild}"
+  if [[ -x "$xcodebuild" ]]; then
     return 0
   fi
   if have docker; then

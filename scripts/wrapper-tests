@@ -12,9 +12,14 @@ set -eu
 # starting a container. Nothing is compiled and no container runs; this needs
 # only zsh and takes about a second.
 #
-# Not covered: the branches behind full Xcode. That probe is the absolute path
-# /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild, so only a macOS
-# machine with Xcode installed can take them.
+# The Xcode probe is an absolute path, which no stub PATH can influence, so
+# $QUOTABAR_XCODEBUILD overrides it and every case below pins it -- otherwise
+# the Darwin cases would take the host branch on a machine that has Xcode, run
+# `swift test` against a PATH that has no swift, and report a correct wrapper as
+# broken. Pinning it also reaches the host branch itself.
+#
+# Not covered: host `coverage`, which execs scripts/coverage rather than a
+# command a stub PATH can stand in for, and the macOS-only `run` branch.
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
@@ -25,8 +30,10 @@ trap 'rm -rf "$work"' EXIT INT TERM
 # genuinely cannot reach a docker -- not even the real one on this machine.
 plain_bin="$work/bin"
 docker_bin="$work/bin-docker"
+swift_bin="$work/bin-swift"
 docker_log="$work/docker-invocations"
-mkdir -p "$plain_bin" "$docker_bin" "$work/home" "$work/tmp"
+swift_log="$work/swift-invocations"
+mkdir -p "$plain_bin" "$docker_bin" "$swift_bin" "$work/home" "$work/tmp"
 
 for tool in zsh mkdir id; do
     tool_path=$(command -v "$tool") || {
@@ -66,6 +73,8 @@ fi
 image="swift:test-image"
 docker_status=0
 status=0
+# Absent unless a case says otherwise: the default is a machine without Xcode.
+xcodebuild="$work/absent"
 
 # run_wrapper <platform> <path> [wrapper arguments...]
 run_wrapper() {
@@ -73,6 +82,7 @@ run_wrapper() {
     run_path=$2
     shift 2
     : >"$docker_log"
+    : >"$swift_log"
     status=0
     env -i \
         PATH="$run_path" \
@@ -80,7 +90,9 @@ run_wrapper() {
         TMPDIR="$work/tmp" \
         QUOTABAR_TEST_PLATFORM="$run_platform" \
         QUOTABAR_TEST_DOCKER_LOG="$docker_log" \
+        QUOTABAR_TEST_SWIFT_LOG="$swift_log" \
         QUOTABAR_TEST_DOCKER_STATUS="$docker_status" \
+        QUOTABAR_XCODEBUILD="$xcodebuild" \
         ${image:+QUOTABAR_SWIFT_IMAGE="$image"} \
         "$repo_root/quotabar" "$@" >"$work/out" 2>"$work/err" || status=$?
 }
@@ -101,6 +113,7 @@ fail() {
     sed 's/^/    stdout: /' "$work/out"
     sed 's/^/    stderr: /' "$work/err"
     sed 's/^/    docker: /' "$docker_log"
+    sed 's/^/    swift: /' "$swift_log"
 }
 
 expect_status() {
@@ -189,6 +202,28 @@ run_wrapper Linux "$plain_bin" test
 expect_status 2 "Linux test without swift or docker exits 2"
 expect_contains "$work/err" "No Swift toolchain and no docker found." \
     "Linux test without swift or docker keeps its message"
+
+# With full Xcode the suite runs on the host and no container is involved. A
+# stub `swift` stands in for the toolchain; the caveat belongs to the container
+# path only, so seeing it here would mean the wrapper took the wrong branch.
+cat >"$swift_bin/swift" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"$QUOTABAR_TEST_SWIFT_LOG"
+STUB
+chmod +x "$swift_bin/swift"
+
+# The wrapper only asks whether the probe is executable, so an empty file is a
+# faithful stand-in for an Xcode installation and nothing ever runs it.
+: >"$work/xcodebuild"
+chmod +x "$work/xcodebuild"
+
+xcodebuild="$work/xcodebuild"
+run_wrapper Darwin "$swift_bin:$docker_bin:$plain_bin" test --filter QuotaCore
+xcodebuild="$work/absent"
+expect_status 0 "macOS test with full Xcode succeeds"
+expect_contains "$swift_log" "test --filter QuotaCore" "macOS test with full Xcode runs on the host"
+expect_empty "$docker_log" "macOS test with full Xcode starts no container"
+expect_lacks "$work/err" "$app_caveat" "macOS test with full Xcode does not warn about the app target"
 
 # The default image, with nothing in the environment to override it.
 image=""
