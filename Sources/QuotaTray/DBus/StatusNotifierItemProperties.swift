@@ -7,7 +7,8 @@ import QuotaCore
 /// mapping from quota state to what the user sees in the system tray is testable
 /// without a session. `StatusNotifierItem` is a freedesktop protocol that KDE,
 /// and via libayatana-appindicator most other trays, already implement — so
-/// serving it directly costs one small C library instead of pulling in GTK.
+/// serving it directly costs a few hundred lines of marshalling instead of
+/// linking libdbus or pulling in GTK.
 public enum StatusNotifierItemProperties {
     /// The tray reports the state of an application, not hardware or a
     /// conversation, which is what the spec's `ApplicationStatus` means.
