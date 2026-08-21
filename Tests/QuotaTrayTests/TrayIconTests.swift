@@ -23,9 +23,12 @@ final class TrayIconTests: XCTestCase {
     private let track: [UInt8] = [0x8E, 0x8E, 0x93, 56]
     private let clear: [UInt8] = [0, 0, 0, 0]
 
+    /// `Int(_:)` traps on NaN and on an infinity, so the badge falls back to the
+    /// no-reading dash for a percentage the renderer is going to reject anyway.
     private func quota(_ provider: Provider, _ used: Double?, label: String = "5-hour") -> MenuBarQuota {
         MenuBarQuota(selection: QuotaSelection(provider: provider, windowLabel: label),
-                     usedPercent: used, badge: used.map { "\(Int($0))" } ?? "—")
+                     usedPercent: used,
+                     badge: used.flatMap { $0.isFinite ? "\(Int($0))" : nil } ?? "—")
     }
 
     private func pixel(_ bitmap: TrayBitmap, _ x: Int, _ y: Int) -> [UInt8] {
@@ -96,17 +99,38 @@ final class TrayIconTests: XCTestCase {
         XCTAssertEqual(TrayIcon.filledWidth(usedPercent: 50, trackWidth: 40), 20)
     }
 
-    func testUnusedQuotaKeepsOnePixelAndZeroKeepsNone() {
+    /// Every reading keeps a pixel, including a reading of exactly zero: the
+    /// bare track has to mean "no reading" and nothing else.
+    func testEveryReadingFromZeroUpwardsKeepsOnePixel() {
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: 0, trackWidth: 22), 1)
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: 0.4, trackWidth: 22), 1)
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: 0, trackWidth: 1), 1)
+
         let barely = TrayIcon.rasterise([quota(.gemini, 0.1)])
         XCTAssertEqual(pixel(barely, 0, 10), geminiTint)
         XCTAssertEqual(pixel(barely, 1, 10), track)
 
         let unused = TrayIcon.rasterise([quota(.gemini, 0)])
-        XCTAssertEqual(onlyRow(unused), Array(repeating: track, count: Self.size))
+        XCTAssertEqual(pixel(unused, 0, 10), geminiTint)
+        XCTAssertEqual(pixel(unused, 1, 10), track)
+        for y in Self.singleRow {
+            XCTAssertEqual(pixel(unused, 0, y), geminiTint, "row \(y)")
+        }
+    }
+
+    /// The bug this pins: a window at 0% used and a window with no reading at
+    /// all drew the same bytes, so a failed probe read as "fine, nothing used".
+    func testZeroPercentIsDistinguishableFromNoReading() {
+        let zero = TrayIcon.rasterise([quota(.gemini, 0)])
+        let missing = TrayIcon.rasterise([quota(.gemini, nil)])
+        XCTAssertNotEqual(zero, missing)
+        XCTAssertNotEqual(TrayIcon.png(zero), TrayIcon.png(missing))
+        XCTAssertEqual(onlyRow(missing), Array(repeating: track, count: Self.size))
     }
 
     /// Percentages come from CLI output, so out-of-range values must clamp
-    /// instead of drawing outside the track.
+    /// instead of drawing outside the track — and a value that is no reading at
+    /// all must not borrow the stub a real zero now gets.
     func testOutOfRangePercentagesClamp() {
         let over = TrayIcon.rasterise([quota(.claude, 150)])
         XCTAssertEqual(onlyRow(over), Array(repeating: red, count: Self.size))
@@ -114,8 +138,19 @@ final class TrayIconTests: XCTestCase {
         let under = TrayIcon.rasterise([quota(.claude, -5)])
         XCTAssertEqual(onlyRow(under), Array(repeating: track, count: Self.size))
 
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: -5, trackWidth: 22), 0)
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: -0.0001, trackWidth: 22), 0)
         XCTAssertEqual(TrayIcon.filledWidth(usedPercent: .nan, trackWidth: 22), 0)
-        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: .infinity, trackWidth: 22), 22)
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: .infinity, trackWidth: 22), 0)
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: -.infinity, trackWidth: 22), 0)
+        XCTAssertEqual(TrayIcon.filledWidth(usedPercent: 0, trackWidth: 0), 0)
+
+        // Whatever the rejected value was, the track is still drawn in full, so
+        // the tray item stays visible and reads as "no reading".
+        for rejected in [Double.nan, .infinity, -.infinity, -5] {
+            XCTAssertEqual(onlyRow(TrayIcon.rasterise([quota(.claude, rejected)])),
+                           Array(repeating: track, count: Self.size), "\(rejected)")
+        }
     }
 
     func testQuotaWithoutAReadingDrawsTrackOnly() {
