@@ -123,6 +123,10 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       NFPM_VERSION: 2.47.0
       NFPM_DEB_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
+    defaults:
+      run:
+        # Container jobs default to `sh -e`, which has no pipefail.
+        shell: bash
     steps:
       - name: Check out repository
         uses: actions/checkout@v6

@@ -64,6 +64,11 @@ covers. It is not a merge gate; the three commands above are. Go through the
 wrapper rather than `scripts/coverage` directly: on Linux without a toolchain
 the wrapper runs the script inside the container that produced the profile.
 
+Coverage is enforced: the Linux CI job fails below 90% region. The threshold
+was switched on only once the suite cleared it — 95.18% region and 98.27% line
+at the time — so it has never been a gate main could not pass. Raise it when the
+code genuinely supports a higher number; do not exclude files to reach one.
+
 On macOS `./quotabar test` requires full Xcode. On Linux it runs natively, or in
 the upstream Swift container when no toolchain is installed, and covers
 `QuotaCore` and the CLI but not the macOS app. If a suite cannot be executed,
