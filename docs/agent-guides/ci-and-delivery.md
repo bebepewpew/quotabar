@@ -115,7 +115,9 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
   that in the PR rather than letting a reviewer read the absence as a failure.
 - **`scripts/` and `.githooks/` entries are asserted executable** by the policy
   job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
-  line in that job.
+  line in that job — and, because the policy job runs
+  `scripts/check-workflow-permissions` directly, a missing bit there takes the
+  permissions check down with it.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
 - **`always()` on the gate reports a red check for a cancelled run.** The
@@ -145,6 +147,16 @@ A floating `@main` is a remote-code-execution path into CI. It is never acceptab
 and only where needed — `security-events: write` for SARIF upload,
 `contents: write`/`id-token: write`/`attestations: write` for the release job,
 `packages: write` for the container push.
+
+This is enforced rather than remembered. `scripts/check-workflow-permissions`,
+run by the `policy` job for every change, fails a workflow whose top-level block
+is anything but `contents: read` — because a write scope up there is handed to
+every job somebody adds later, whose author never has to read the top of the
+file. The same script holds the other end: the escalations that used to arrive by
+inheritance are listed in it by job, so a job that drops its block fails there
+instead of half way through a release. Run it locally; it needs nothing but
+`awk`. It cannot tell whether a job asks for more than it uses — that stays a
+review question.
 
 The only credentials in play are `GITHUB_TOKEN` and the OIDC identity that keyless
 signing derives from. There is no long-lived secret, and adding one is a

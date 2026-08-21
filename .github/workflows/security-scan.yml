@@ -25,14 +25,20 @@ on:
     # the last commit, so the scan cannot only run when someone pushes.
     - cron: '17 6 * * 1'
 
+# The safe default. `security-events: write` is the right to write code-scanning
+# alerts, so it is escalated by the two jobs that upload SARIF and by nothing
+# else -- a scan job added later cannot publish alerts unless it says so.
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   repository:
     name: Working tree (secrets, misconfiguration)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Only for the upload-sarif step below.
+      security-events: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -78,6 +84,10 @@ jobs:
   toolchain-image:
     name: Toolchain image (swift:6.3-noble)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Only for the upload-sarif step below.
+      security-events: write
     steps:
       - name: Check out repository
         # upload-sarif resolves the commit it is annotating from the checkout.
