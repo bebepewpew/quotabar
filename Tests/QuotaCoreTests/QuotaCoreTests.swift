@@ -177,10 +177,20 @@ final class QuotaCoreTests: XCTestCase {
         XCTAssertTrue(script.contains("proc classify_auth"))
         XCTAssertTrue(script.contains("{classify_auth}"))
         XCTAssertFalse(script.contains("select.*auth)} {puts \"QUOTABAR_AUTH\""))
-        // Every branch that gives up still tears the child down.
-        for branch in script.components(separatedBy: "exit 0").dropLast() {
-            XCTAssertTrue(branch.contains("stop_child") || branch.contains("eof"),
-                          "an exit path leaves the child running")
+        // Every branch that gives up still tears the child down, the `eof`
+        // ones included: end of file means the pty slave was closed, not that
+        // the group Gemini spawned has exited, and `CommandRunner` signals
+        // expect's own group rather than the spawned session. Exempting a
+        // branch here because it mentions `eof` is how four of them shipped
+        // with no teardown at all.
+        let exitPaths = script.components(separatedBy: "exit 0").dropLast()
+        XCTAssertGreaterThanOrEqual(exitPaths.count, 8, "the exit paths stopped being enumerated")
+        XCTAssertGreaterThanOrEqual(exitPaths.filter { $0.contains("eof {") }.count, 4,
+                                    "the eof branches stopped being enumerated")
+        for path in exitPaths {
+            let branch = (path.split(separator: "\n").last.map(String.init) ?? path)
+                .trimmingCharacters(in: .whitespaces)
+            XCTAssertTrue(path.contains("stop_child"), "an exit path leaves the child running: \(branch)")
         }
     }
 
