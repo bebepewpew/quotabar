@@ -165,6 +165,12 @@ jobs:
               .github/workflows/*)
                 build=true; because="$because $file" ;;
 
+              # Not compiled either, but Tests/HarnessTests asserts its exit
+              # status and its messages, so a change to it is only proven by
+              # running the suite.
+              scripts/check-harness)
+                build=true; because="$because $file" ;;
+
               # Prose, per-tool wrappers and repository furniture. None of it
               # reaches swiftc, and `policy` below checks the parts that matter
               # for every change regardless.
@@ -208,6 +214,7 @@ jobs:
         uses: actions/checkout@v7
       - name: Validate repository policy
         run: |
+          test -x scripts/check-harness
           test -x scripts/install-hooks
           test -x scripts/install-codex-skills
           test -x scripts/codex-parallel
@@ -413,6 +420,15 @@ jobs:
       # gated jobs fails on a leaked secret.
       - name: Check the Gate covers every job in this workflow
         run: scripts/check-ci-gate
+
+      # A harness-only change reaches no other job -- `changes` classifies
+      # docs/, .claude/ and .codex/ as skip -- and every defect this finds is
+      # silent: install-codex-skills copies whole directories, so a skill
+      # missing its manifest installs perfectly and never surfaces. Its own
+      # step, so the checks list names what drifted.
+      - name: Check the agent harness for structural drift
+        run: |
+          scripts/check-harness
 
   # A committed credential is not advisory, so the scan that finds one has to be
   # able to fail a merge. `security-scan.yml` runs the same scan and publishes the
