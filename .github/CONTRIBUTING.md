@@ -1,21 +1,119 @@
 # Contributing to QuotaBar
 
-All changes, including maintainer changes, go through pull requests.
+QuotaBar reads quota figures out of the AI coding CLIs already installed on your
+machine and shows them in a macOS menu bar or a terminal. Bug reports, provider
+output that the parsers get wrong, and focused pull requests are all welcome —
+this is a small project, so a clear issue is worth as much as a patch.
 
-1. Run `scripts/install-hooks` once after cloning. If you use Codex, also
-   run `scripts/install-codex-skills` — Codex only loads skills from
-   `$CODEX_HOME/skills`, never from the repository.
-2. Update `main`, then create a focused branch such as `fix/gemini-timeout` or
+Everything below applies to human and AI contributors alike. All changes,
+including maintainer changes, go through pull requests.
+
+## Code of Conduct
+
+This project ships the [Contributor Covenant](CODE_OF_CONDUCT.md) and expects
+everyone taking part to follow it. Report unacceptable behaviour to
+borisiuk.eugene@gmail.com.
+
+## Reporting a bug
+
+**Never report a security vulnerability in a public issue.** QuotaBar executes
+authenticated provider CLIs on your machine, so anything that could cause
+credentials to be read, logged or transmitted, any command or script injection
+through binary discovery or the `expect` script, and any leaked or unbounded
+child process goes privately through GitHub security advisories instead. The
+scope, the threat model and the reporting link are in
+[SECURITY.md](SECURITY.md).
+
+For everything else, open a
+[bug report](https://github.com/bebepewpew/quotabar/issues/new?template=bug_report.yml).
+The form asks for the provider CLI involved, your OS and version,
+`quotabar --version`, and the output of `quotabar --json`, because a quota bug is
+almost always a provider's output that a parser did not expect, and that output
+is the only thing that reproduces it.
+
+Two things first:
+
+- Check the [troubleshooting table](../README.md#troubleshooting) in the README.
+  A missing `expect`, an unanswered Gemini folder-trust prompt, or a withdrawn
+  Gemini Code Assist tier are reported deliberately and are not bugs.
+- **Redact before you paste.** QuotaBar output carries account state — plans,
+  usage, reset times — and pasting it into a public issue publishes it. Remove
+  anything you would not put on the front page. The bug form makes you confirm
+  this, and this repository does not accept personal terminal captures in
+  commits either.
+
+## Proposing a change
+
+Open a
+[feature request](https://github.com/bebepewpew/quotabar/issues/new?template=feature_request.yml)
+before writing anything larger than a small fix, so the design can be agreed
+before you spend the time. Describe the problem you hit rather than the patch
+you already have in mind.
+
+Two constraints shape what is acceptable, and both are non-negotiable:
+
+- QuotaBar uses public, documented CLI interfaces only. Gemini quota collection
+  stays terminal-only through the interactive `/stats` view; Codex uses
+  `app-server --stdio` over pipes and Claude Code uses `-p /usage`. No private
+  JavaScript modules, no new pseudo-terminal dependencies for those two.
+- QuotaBar never reads, copies, logs or stores provider credentials and never
+  completes a login prompt. Authentication stays inside each vendor's CLI.
+
+[AGENTS.md](../AGENTS.md) carries the rest: process lifetime, untrusted output
+handling, persistence compatibility, and the fixture rules a parser change has
+to satisfy. Read it before you start.
+
+## Development environment
+
+[docs/development.md](../docs/development.md) has the build, run and test
+instructions for both platforms, including the container path for Linux hosts
+without a Swift toolchain.
+
+Two things to do once per clone:
+
+```sh
+scripts/install-hooks         # enable the repository hooks
+scripts/install-codex-skills  # Codex users only
+```
+
+Codex loads skills only from `$CODEX_HOME/skills`, never from a repository, so
+run the second script again after pulling changes to `.codex/skills/`.
+
+Then run these three before every pull request, and do not push past a failure:
+
+```sh
+./quotabar build
+./quotabar test
+git diff --check
+```
+
+The local hooks give fast feedback, but GitHub branch protection and CI are
+authoritative. On macOS `./quotabar test` needs full Xcode; if you cannot run the
+suite locally, say so in the pull request rather than implying it passed.
+
+## Pull-request process
+
+1. Update `main`, then create a focused branch such as `fix/gemini-timeout` or
    `feature/custom-badges`.
-3. Make the change and add proportionate tests.
-4. Run `./quotabar build`, `./quotabar test`, and `git diff --check`.
-5. Push the branch and open a pull request using the repository template.
-6. After required CI passes and all conversations are resolved, use **Squash and
-   merge**. Merge commits and rebase merges are disabled.
+2. Make the change, and keep it to one thing. Unrelated and pre-existing
+   working-tree changes stay untouched.
+3. Add proportionate tests. A parser change needs fixtures for boundaries,
+   malformed data, terminal redraws and every supported row form; a process
+   change needs timeout, authentication and cleanup coverage. Update the
+   documentation when user-facing behaviour moves.
+4. Run `./quotabar build`, `./quotabar test` and `git diff --check`.
+5. Push the branch and open a pull request using the repository template, with
+   an imperative title. The repository squash-merges, so that title becomes the
+   commit subject on `main` **and** the changelog line in the release notes —
+   write it for someone reading the release, not for the branch.
+6. Apply exactly one category label from the table below. `Labels` is a required
+   status check, so a pull request carrying none of them, or more than one,
+   cannot be merged until the labels are corrected. The check re-runs as soon as
+   a label changes; you do not need to push again.
+7. Once the required checks pass and every conversation is resolved, merge with
+   **Squash and merge**. Merge commits and rebase merges are disabled.
 
-The local hooks provide fast feedback, but GitHub branch protection and CI are
-authoritative. See [AGENTS.md](../AGENTS.md) for architecture, safety, and
-testing rules that apply to both human and AI contributors.
+Do not weaken CI, hooks or branch protection to make a change pass.
 
 ## Pull-request labels
 
@@ -46,10 +144,25 @@ list readable, not requirements.
 GitHub creates the first with a new repository and Dependabot applies the second
 to its own pull requests, so leave both spelled exactly as they are.
 
-An unlabelled pull request is not dropped — it lands in the catch-all **Other**
-section. That is a safety net rather than a destination: a change that reaches a
-release under Other is a change nobody categorised.
+An unlabelled pull request is not dropped from the notes — it lands in the
+catch-all **Other** section. That is a safety net rather than a destination: a
+change that reaches a release under Other is a change nobody categorised. It is
+also not a way around the `Labels` check, which still blocks the merge.
+
+The issue forms apply `fix` and `feature` themselves, so an issue already
+carries the label the pull request that closes it needs.
 
 Adding a category to [`release.yml`](release.yml) means adding its label here in
 the same pull request. A category whose label nobody applies renders an empty
 section in every release from then on.
+
+## Where the rules actually live
+
+[AGENTS.md](../AGENTS.md) is the canonical policy for this repository. Where it
+and this file disagree, AGENTS.md wins and this file is the bug: correct this
+file in the same pull request, or take the rule change to AGENTS.md first.
+
+It deliberately restates rules instead of linking to them. AI coding agents load
+that one file directly at the start of a task, and a rule behind a link is a rule
+that gets skipped. The duplication is the point; keep the two in step rather
+than replacing either with a pointer.
