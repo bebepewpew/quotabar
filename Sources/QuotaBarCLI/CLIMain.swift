@@ -69,6 +69,11 @@ struct QuotaBarCLI {
             if arguments.providers.isEmpty {
                 warn("No supported CLI found. Install codex, claude or gemini and authenticate it.")
             }
+            // stderr is enough for a person, but a status bar only reads stdout,
+            // and waybar never restarts an `exec` it has seen exit. Writing
+            // nothing here leaves the module permanently blank, so the
+            // machine-readable formats get their empty document before the exit.
+            emitEmptyState(arguments: arguments)
             exit(1)
         }
         if arguments.notify && !sink.isAvailable {
@@ -206,6 +211,18 @@ struct QuotaBarCLI {
             print(try Output.render(snapshots, format: arguments.format, color: useColor))
             // Piped output is block-buffered, which would stall a --watch stream
             // feeding a status bar. Passing nil flushes every open stream.
+            fflush(nil)
+        } catch {
+            warn("could not render output: \(error.localizedDescription)")
+        }
+    }
+
+    /// Emits the empty document for `--json` and waybar. The exit code is
+    /// unchanged and the text format keeps its stderr-only empty state.
+    private static func emitEmptyState(arguments: Arguments) {
+        do {
+            guard let document = try Output.emptyState(format: arguments.format) else { return }
+            print(document)
             fflush(nil)
         } catch {
             warn("could not render output: \(error.localizedDescription)")

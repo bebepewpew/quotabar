@@ -270,8 +270,52 @@ jobs:
         run: swift test
       - name: CLI smoke test
         run: |
-          swift run quotabar --version
-          swift run quotabar --help
+          set -euo pipefail
+
+          # The built binary rather than `swift run`, whose own progress output
+          # would land in the captures below.
+          quotabar="$(swift build --show-bin-path)/quotabar"
+          "$quotabar" --version
+          "$quotabar" --help
+
+          # No provider CLI is installed in this container, so it is the only
+          # place the empty state runs end to end. A status bar reads stdout and
+          # waybar never restarts an `exec` it has seen exit, so a
+          # machine-readable format that writes nothing leaves the module blank
+          # for good. Exit code 1 is the contract and stays.
+          empty() {
+            status=0
+            out="$("$quotabar" "$@" 2>/dev/null)" || status=$?
+            if [ "$status" -ne 1 ]; then
+              printf 'quotabar %s exited %s with no provider installed, expected 1\n' "$*" "$status" >&2
+              exit 1
+            fi
+          }
+
+          empty --json
+          if [ "$out" != "[]" ]; then
+            printf 'quotabar --json wrote %s with no provider installed, expected []\n' "$out" >&2
+            exit 1
+          fi
+
+          # Bare, and with a provider named explicitly: both reach the same
+          # empty-target exit, and both owe the bar one object.
+          for flags in "--format waybar" "--provider claude --format waybar"; do
+            empty $flags
+            if [ "$(printf '%s' "$out" | wc -l)" -ne 0 ]; then
+              printf 'quotabar %s wrote more than one line:\n%s\n' "$flags" "$out" >&2
+              exit 1
+            fi
+            for key in text tooltip class percentage; do
+              case "$out" in
+                *"\"$key\":"*) ;;
+                *)
+                  printf 'quotabar %s omitted the %s key: %s\n' "$flags" "$key" "$out" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+          done
       # Enforced. The threshold went in only once the suite actually cleared it:
       # main was at 95.18% region / 98.27% line when this was switched on, so it
       # has never been a gate that main could not pass.

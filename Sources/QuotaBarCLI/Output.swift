@@ -45,6 +45,20 @@ enum Output {
         String(decoding: try encoder().encode(snapshots), as: UTF8.self)
     }
 
+    /// The one document a machine-readable consumer is still owed when no
+    /// provider CLI is installed, so `--json` writes an empty array and waybar an
+    /// `n/a` payload instead of zero bytes. `nil` for the formats a person reads:
+    /// they already have the reason on stderr, in prose.
+    static func emptyState(format: Arguments.Format) throws -> String? {
+        switch format {
+        // Not `json([])`: the pretty-printing encoder writes an empty array as
+        // "[\n\n]", which reads as a truncated document. One line, on purpose.
+        case .json: return "[]"
+        case .waybar: return try waybar([])
+        case .text, .csv: return nil
+        }
+    }
+
     /// `quotabar history`. Text and CSV come from `QuotaCore` so the terminal and
     /// a future Linux front-end word history the same way.
     static func history(_ result: HistoryReadResult, cycles: [CycleSummary],
