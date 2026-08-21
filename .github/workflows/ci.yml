@@ -165,13 +165,25 @@ jobs:
               .github/workflows/*)
                 build=true; because="$because $file" ;;
 
+              # The app bundle's payload: the icon set and the Info.plist that
+              # `release.yml` stamps the version into and then reads back out of
+              # the signed app. Nothing else checks them, so they build.
+              Resources/*)
+                build=true; because="$because $file" ;;
+
               # Prose, per-tool wrappers and repository furniture. None of it
               # reaches swiftc, and `policy` below checks the parts that matter
               # for every change regardless.
               docs/*|.claude/*|.codex/*|.github/ISSUE_TEMPLATE/*|.githooks/*) ;;
               *.md|LICENSE|.gitignore|.gitattributes) ;;
-              scripts/install-codex-skills|scripts/codex-parallel) ;;
+              scripts/install-codex-skills|scripts/codex-parallel|scripts/install-hooks) ;;
               .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
+
+              # Release inputs. `release.yml` is the only workflow that reads
+              # the nfpm and Homebrew descriptions, the container Dockerfile and
+              # the build context `.dockerignore` trims for it; a macOS runner
+              # and a CodeQL analysis say nothing about any of them.
+              packaging/*|.dockerignore) ;;
 
               *)
                 build=true; unclassified="$unclassified $file" ;;

@@ -61,18 +61,28 @@ bit. A push to `main` always runs the full suite.
 
 `changes` sorts every changed path into three buckets, and the third is the
 point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, the
-`quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
-pipeline change is only ever proven by running it. **Skips:** `docs/`,
+`quotabar` wrapper, `scripts/coverage`, `Resources/` — the icon set and the
+`Info.plist` `release.yml` stamps a version into — and `.github/workflows/`,
+because a pipeline change is only ever proven by running it. **Skips:** `docs/`,
 `.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
-`.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
-that configure GitHub rather than the build. **Unclassified:** anything else — it
-builds, *and the job prints it by name*, which is the signal that the case
-statement needs a line rather than a silent guess in either direction.
+`.gitignore`, `.gitattributes`, the three `scripts/` entries that are not
+`coverage`, the `.github` files that configure GitHub rather than the build, and
+the release inputs `packaging/` and `.dockerignore`, which only `release.yml`
+reads. **Unclassified:** anything else — it builds, *and the job prints it by
+name*, which is the signal that the case statement needs a line rather than a
+silent guess in either direction.
 
 Both lists are explicit on purpose. An include-only list fails towards skipping,
 which is how a real change stops being tested; an exclude-only list fails towards
 building, which is how the whole mechanism quietly stops saving anything. Naming
 both leaves a bucket that can complain.
+
+That bucket only means something while it is empty on `main`: every tracked path
+matches one of the two lists today, so a printed name is a genuinely new kind of
+file rather than a backlog nobody reads. `Tests/QuotaCoreTests/ChangedPathsTests.swift`
+keeps it that way — it extracts the step's script straight out of `ci.yml` and
+runs it over a table of paths with a stub `git`, so a new family that is left
+unclassified fails the suite rather than printing into a log.
 
 `gate` is the required check. Two GitHub behaviours force that shape:
 
