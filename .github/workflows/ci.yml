@@ -206,7 +206,7 @@ jobs:
 
   # Structure rather than behaviour, so it costs seconds and runs for every
   # change including a documentation-only one -- which is exactly the change that
-  # can break an issue form or unset a script's executable bit.
+  # can break an issue form or unset an executable bit.
   policy:
     name: Repository policy
     runs-on: ubuntu-latest
@@ -215,6 +215,11 @@ jobs:
         uses: actions/checkout@v7
       - name: Validate repository policy
         run: |
+          # The wrapper is the documented entry point for every build and test
+          # and the one executable CI never runs, so nothing else would notice
+          # its bit going away -- while `.githooks/pre-push` and every
+          # documented `./quotabar` command would break at once.
+          test -x quotabar
           test -x scripts/check-harness
           test -x scripts/install-hooks
           test -x scripts/install-codex-skills

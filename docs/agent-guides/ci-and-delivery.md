@@ -204,10 +204,13 @@ stable codename, say. The weekly scan is what catches everything in between.
 - **A newly added workflow's first execution is the pull request that adds it.**
   A `pull_request`-triggered workflow cannot have run before its PR existed. Say
   that in the PR rather than letting a reviewer read the absence as a failure.
-- **`scripts/` and `.githooks/` entries are asserted executable** by the policy
-  job, along with `test ! -e REVIEW.md`, the `.claude/settings.json` allowlist
-  check and the scan targets above. A new script needs `chmod +x` *and* a line in
-  that job.
+- **The root `quotabar` wrapper and every `scripts/` and `.githooks/` entry are
+  asserted executable** by the policy job, along with `test ! -e REVIEW.md`, the
+  `.claude/settings.json` allowlist check and the scan targets above. A new
+  script needs `chmod +x` *and* a line in that job. The wrapper is in that list
+  because CI never runs it: no job would otherwise notice its bit going away,
+  and `.githooks/pre-push` plus every documented `./quotabar build` would break
+  the moment it did.
 - **A `${{ }}` expression inside `run:` is expanded before the shell sees it.**
   The policy job greps `security-scan.yml` for its image reference, so it has to
   match on `ghcr.io/.*:latest` — a grep written with the literal expression would
