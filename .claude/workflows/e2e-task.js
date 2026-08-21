@@ -369,8 +369,9 @@ Follow docs/agent-guides/implementing.md. In order:
      ./quotabar build
      ./quotabar test
      git diff --check
-   On macOS the suite needs full Xcode. If it cannot run, say so in details and
-   set validated false rather than claiming it passed.
+   On macOS the suite needs full Xcode, or docker for the container path that
+   skips the app target. If it cannot run, say so in details and set validated
+   false rather than claiming it passed.
 5. Commit with an imperative subject. Stage files by name, never git add -A.
 6. git push -u origin <branch>. Do NOT open a pull request — a later step does.
 

@@ -172,6 +172,8 @@ jobs:
               *.md|LICENSE|.gitignore|.gitattributes) ;;
               scripts/install-codex-skills|scripts/codex-parallel) ;;
               scripts/check-ci-gate|scripts/test-workflows) ;;
+              # Checks the wrapper without compiling anything; `policy` runs it.
+              scripts/wrapper-tests) ;;
               .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
 
               *)
@@ -212,6 +214,7 @@ jobs:
           test -x scripts/coverage
           test -x scripts/test-workflows
           test -x scripts/check-ci-gate
+          test -x scripts/wrapper-tests
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
@@ -226,6 +229,21 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+
+      # Which toolchain `./quotabar` picks is the difference between a suite
+      # that ran and one that only looked like it did, and no Swift test can
+      # cover it -- the wrapper chooses the process that runs them. This
+      # compiles nothing and starts no container, so it belongs here with the
+      # other checks every change pays for.
+      - name: Check the ./quotabar toolchain selection
+        run: |
+          set -euo pipefail
+          # The wrapper is a zsh script. Every hosted Ubuntu image has zsh, but
+          # install it rather than skip the checks if that ever stops being true.
+          command -v zsh >/dev/null || {
+            sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+          }
+          scripts/wrapper-tests
 
       # The multi-agent runners in .claude/workflows are the one part of the
       # agent harness a machine can execute rather than only read, and their

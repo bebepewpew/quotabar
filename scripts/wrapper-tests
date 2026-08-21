@@ -1,0 +1,235 @@
+#!/bin/sh
+set -eu
+
+# Check which toolchain ./quotabar picks, on a machine that has none of them.
+#
+#   scripts/wrapper-tests
+#
+# The wrapper decides from four observable things: `uname -s`, whether full
+# Xcode is installed, and whether `swift` and `docker` are on PATH. So each
+# branch is exercised by running the real wrapper against a stub PATH holding a
+# fake `uname` and a fake `docker` that records its arguments instead of
+# starting a container. Nothing is compiled and no container runs; this needs
+# only zsh and takes about a second.
+#
+# The Xcode probe is an absolute path, which no stub PATH can influence, so
+# $QUOTABAR_XCODEBUILD overrides it and every case below pins it -- otherwise
+# the Darwin cases would take the host branch on a machine that has Xcode, run
+# `swift test` against a PATH that has no swift, and report a correct wrapper as
+# broken. Pinning it also reaches the host branch itself.
+#
+# Not covered: host `coverage`, which execs scripts/coverage rather than a
+# command a stub PATH can stand in for, and the macOS-only `run` branch.
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/quotabar-wrapper-tests.XXXXXX")
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# Two directories rather than one, so "docker is not installed" is a PATH that
+# genuinely cannot reach a docker -- not even the real one on this machine.
+plain_bin="$work/bin"
+docker_bin="$work/bin-docker"
+swift_bin="$work/bin-swift"
+docker_log="$work/docker-invocations"
+swift_log="$work/swift-invocations"
+mkdir -p "$plain_bin" "$docker_bin" "$swift_bin" "$work/home" "$work/tmp"
+
+for tool in zsh mkdir id; do
+    tool_path=$(command -v "$tool") || {
+        printf 'wrapper-tests: %s is required and was not found on PATH\n' "$tool" >&2
+        exit 2
+    }
+    ln -s "$tool_path" "$plain_bin/$tool"
+done
+
+cat >"$plain_bin/uname" <<'STUB'
+#!/bin/sh
+# The wrapper only ever asks for -s.
+printf '%s\n' "$QUOTABAR_TEST_PLATFORM"
+STUB
+
+cat >"$docker_bin/docker" <<'STUB'
+#!/bin/sh
+# Record the invocation instead of starting a container, and fail when the
+# case under test wants to see a failing run propagate.
+printf '%s\n' "$*" >>"$QUOTABAR_TEST_DOCKER_LOG"
+exit "${QUOTABAR_TEST_DOCKER_STATUS:-0}"
+STUB
+
+chmod +x "$plain_bin/uname" "$docker_bin/docker"
+
+# A zsh that pulls a system-wide startup file could put the real /usr/bin back
+# on PATH, and then "no docker" would quietly become "the real docker". Prove
+# the stub environment holds before trusting a single assertion made in it.
+observed_path=$(env -i PATH="$plain_bin" HOME="$work/home" \
+    "$plain_bin/zsh" -c 'print -rn -- $PATH')
+if [ "$observed_path" != "$plain_bin" ]; then
+    printf 'wrapper-tests: zsh startup files rewrote PATH to %s; these checks would reach real tools.\n' \
+        "$observed_path" >&2
+    exit 2
+fi
+
+image="swift:test-image"
+docker_status=0
+status=0
+# Absent unless a case says otherwise: the default is a machine without Xcode.
+xcodebuild="$work/absent"
+
+# run_wrapper <platform> <path> [wrapper arguments...]
+run_wrapper() {
+    run_platform=$1
+    run_path=$2
+    shift 2
+    : >"$docker_log"
+    : >"$swift_log"
+    status=0
+    env -i \
+        PATH="$run_path" \
+        HOME="$work/home" \
+        TMPDIR="$work/tmp" \
+        QUOTABAR_TEST_PLATFORM="$run_platform" \
+        QUOTABAR_TEST_DOCKER_LOG="$docker_log" \
+        QUOTABAR_TEST_SWIFT_LOG="$swift_log" \
+        QUOTABAR_TEST_DOCKER_STATUS="$docker_status" \
+        QUOTABAR_XCODEBUILD="$xcodebuild" \
+        ${image:+QUOTABAR_SWIFT_IMAGE="$image"} \
+        "$repo_root/quotabar" "$@" >"$work/out" 2>"$work/err" || status=$?
+}
+
+checks=0
+failures=0
+
+pass() {
+    checks=$((checks + 1))
+    printf 'ok - %s\n' "$1"
+}
+
+fail() {
+    checks=$((checks + 1))
+    failures=$((failures + 1))
+    printf 'not ok - %s\n' "$1"
+    printf '    exit status: %s\n' "$status"
+    sed 's/^/    stdout: /' "$work/out"
+    sed 's/^/    stderr: /' "$work/err"
+    sed 's/^/    docker: /' "$docker_log"
+    sed 's/^/    swift: /' "$swift_log"
+}
+
+expect_status() {
+    if [ "$status" -eq "$1" ]; then
+        pass "$2"
+    else
+        fail "$2 (exit $status, wanted $1)"
+    fi
+}
+
+expect_contains() {
+    if grep -qF -- "$2" "$1"; then
+        pass "$3"
+    else
+        fail "$3"
+    fi
+}
+
+expect_lacks() {
+    if grep -qF -- "$2" "$1"; then
+        fail "$3"
+    else
+        pass "$3"
+    fi
+}
+
+expect_empty() {
+    if [ -s "$1" ]; then
+        fail "$2"
+    else
+        pass "$2"
+    fi
+}
+
+no_xcode="QuotaBar tests require the full Xcode toolchain"
+app_caveat="not a pass for the app"
+
+# macOS without full Xcode, with docker: the suite runs in the container.
+run_wrapper Darwin "$docker_bin:$plain_bin" test
+expect_status 0 "macOS test with docker succeeds"
+expect_contains "$docker_log" "$image swift test" "macOS test runs swift test in the image"
+expect_contains "$docker_log" "--user " "macOS test keeps .build owned by the invoking user"
+expect_contains "$work/err" "running the suite in $image" "macOS test names the image it fell back to"
+expect_contains "$work/err" "$app_caveat" "macOS test warns the app target is not covered"
+expect_lacks "$work/err" "$no_xcode" "macOS test with docker does not refuse"
+expect_empty "$work/out" "macOS test leaves stdout to the toolchain"
+
+run_wrapper Darwin "$docker_bin:$plain_bin" test --filter QuotaCore
+expect_contains "$docker_log" "swift test --filter QuotaCore" "macOS test forwards SwiftPM options"
+
+# A failing suite in the container has to fail the wrapper.
+docker_status=7
+run_wrapper Darwin "$docker_bin:$plain_bin" test
+docker_status=0
+expect_status 7 "macOS test propagates a failing container run"
+expect_contains "$work/err" "$app_caveat" "the caveat is printed before the run, not after a pass"
+
+# macOS without full Xcode and without docker: refuse exactly as before.
+run_wrapper Darwin "$plain_bin" test
+expect_status 2 "macOS test without docker exits 2"
+expect_contains "$work/err" "$no_xcode" "macOS test without docker keeps its message"
+expect_empty "$docker_log" "macOS test without docker starts nothing"
+
+# Coverage takes the same two paths, through scripts/coverage in the container.
+run_wrapper Darwin "$docker_bin:$plain_bin" coverage --lcov coverage.lcov
+expect_status 0 "macOS coverage with docker succeeds"
+expect_contains "$docker_log" "$image ./scripts/coverage --lcov coverage.lcov" \
+    "macOS coverage runs scripts/coverage in the image"
+expect_contains "$work/err" "$app_caveat" "macOS coverage warns the app target is not covered"
+expect_empty "$work/out" "macOS coverage leaves stdout for the report"
+
+run_wrapper Darwin "$plain_bin" coverage
+expect_status 2 "macOS coverage without docker exits 2"
+expect_contains "$work/err" "$no_xcode" "macOS coverage without docker keeps its message"
+expect_empty "$docker_log" "macOS coverage without docker starts nothing"
+
+# The Linux branch this borrows from stays as it was.
+run_wrapper Linux "$docker_bin:$plain_bin" test
+expect_status 0 "Linux test without swift uses the container"
+expect_contains "$docker_log" "$image swift test" "Linux test runs swift test in the image"
+
+run_wrapper Linux "$docker_bin:$plain_bin" coverage
+expect_contains "$docker_log" "$image ./scripts/coverage" "Linux coverage runs scripts/coverage in the image"
+
+run_wrapper Linux "$plain_bin" test
+expect_status 2 "Linux test without swift or docker exits 2"
+expect_contains "$work/err" "No Swift toolchain and no docker found." \
+    "Linux test without swift or docker keeps its message"
+
+# With full Xcode the suite runs on the host and no container is involved. A
+# stub `swift` stands in for the toolchain; the caveat belongs to the container
+# path only, so seeing it here would mean the wrapper took the wrong branch.
+cat >"$swift_bin/swift" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"$QUOTABAR_TEST_SWIFT_LOG"
+STUB
+chmod +x "$swift_bin/swift"
+
+# The wrapper only asks whether the probe is executable, so an empty file is a
+# faithful stand-in for an Xcode installation and nothing ever runs it.
+: >"$work/xcodebuild"
+chmod +x "$work/xcodebuild"
+
+xcodebuild="$work/xcodebuild"
+run_wrapper Darwin "$swift_bin:$docker_bin:$plain_bin" test --filter QuotaCore
+xcodebuild="$work/absent"
+expect_status 0 "macOS test with full Xcode succeeds"
+expect_contains "$swift_log" "test --filter QuotaCore" "macOS test with full Xcode runs on the host"
+expect_empty "$docker_log" "macOS test with full Xcode starts no container"
+expect_lacks "$work/err" "$app_caveat" "macOS test with full Xcode does not warn about the app target"
+
+# The default image, with nothing in the environment to override it.
+image=""
+run_wrapper Darwin "$docker_bin:$plain_bin" test
+image="swift:test-image"
+expect_contains "$docker_log" "swift:6.3-noble swift test" "the default image is swift:6.3-noble"
+
+printf 'Executed %d checks with %d failures\n' "$checks" "$failures"
+[ "$failures" -eq 0 ]

@@ -90,19 +90,29 @@ forwarded to `swift test`, so `--filter QuotaCore` still works. It measures
 not the CLI or the macOS app, which are separate executables the tests do not
 link. Use it when adding or changing tests, to see what a change actually
 covers. It is not a merge gate; the three commands above are. Go through the
-wrapper rather than `scripts/coverage` directly: on Linux without a toolchain
-the wrapper runs the script inside the container that produced the profile.
+wrapper rather than `scripts/coverage` directly: without a local toolchain the
+wrapper runs the script inside the container that produced the profile.
 
 Coverage is enforced: the Linux CI job fails below 90% region. The threshold
 was switched on only once the suite cleared it — 95.18% region and 98.27% line
 at the time — so it has never been a gate main could not pass. Raise it when the
 code genuinely supports a higher number; do not exclude files to reach one.
 
-On macOS `./quotabar test` requires full Xcode. On Linux it runs natively, or in
-the upstream Swift container when no toolchain is installed, and covers
-`QuotaCore` and the CLI but not the macOS app. If a suite cannot be executed,
-state that clearly; GitHub Actions remains the required test authority across
-both platforms. Never claim tests passed when they were not executed.
+On macOS `./quotabar test` and `./quotabar coverage` use full Xcode when it is
+installed, and that is the only way to cover the menu-bar app. Without it they
+fall back to the upstream Swift container, exactly as Linux without a toolchain
+does — the wrapper says so before it starts, because that path covers
+`QuotaCore`, `QuotaTray` and the CLI and cannot build the app target at all.
+With neither full Xcode nor docker they still refuse, with exit code 2. On Linux
+the suite runs natively when Swift is installed, in the container otherwise.
+If a suite cannot be executed, state that clearly, and say which path ran when
+one did: GitHub Actions remains the required test authority across both
+platforms, and a container run on macOS is not a result for the app. Never claim
+tests passed when they were not executed.
+
+`scripts/wrapper-tests` checks that selection itself — which toolchain the
+wrapper picks per platform, and what it refuses — with a stubbed `uname` and
+`docker`, so it needs neither. The `Repository policy` CI job runs it.
 
 Parser changes require fixtures for boundaries, malformed data, terminal redraws,
 and every supported row form. Process changes require timeout, authentication,

@@ -96,8 +96,10 @@ git diff --check
 ```
 
 The local hooks give fast feedback, but GitHub branch protection and CI are
-authoritative. On macOS `./quotabar test` needs full Xcode; if you cannot run the
-suite locally, say so in the pull request rather than implying it passed.
+authoritative. On macOS `./quotabar test` uses full Xcode when it is installed
+and otherwise runs the suite in the Swift container, which covers everything
+except the menu-bar app; with neither it refuses. Say in the pull request which
+one ran, rather than implying the whole suite passed.
 
 ## Pull-request process
 

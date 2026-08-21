@@ -33,6 +33,12 @@ actually fails a pull request), `.github/release.yml`, the tables in
 the closing pull request will — `docs/agent-guides/backlog.md` and the dropdown
 in `.github/ISSUE_TEMPLATE/task.yml`.
 
+The policy job also runs `scripts/wrapper-tests`, which checks which toolchain
+`./quotabar` selects per platform against a stubbed `uname` and `docker`. It
+compiles nothing and starts no container, so it belongs beside the structural
+checks rather than in the build jobs — and it is the only check that covers the
+wrapper at all, since the wrapper is what starts the suite the other jobs run.
+
 The issue forms have a check of their own, in the policy job: the three forms and
 `config.yml` must exist, be non-empty and keep their top-level keys. Nothing
 parses them, so **no job would catch a form that is valid YAML in the wrong

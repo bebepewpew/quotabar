@@ -33,10 +33,14 @@ you. `docs/agent-guides/quotabar-dev.md` has the build and coverage detail.
 
 ## Never claim a suite you did not run
 
-On macOS `./quotabar test` needs full Xcode; with only Command Line Tools it
-refuses. On Linux it runs natively or in `swift:6.3-noble` via docker. If a suite
-could not execute, say so plainly and report the change as unvalidated. A branch
-honestly marked "tests did not run here" is worth more than one that claims green.
+On macOS full Xcode runs everything; with only Command Line Tools the wrapper
+runs the suite in `swift:6.3-noble` via docker, and refuses with exit 2 when
+there is no docker either. On Linux it runs natively or in the same container.
+The container has no macOS app target, so say which path ran — "the container
+suite passed; the app was not tested" is a different claim from "the suite
+passed". If a suite could not execute, say so plainly and report the change as
+unvalidated. A branch honestly marked "tests did not run here" is worth more than
+one that claims green.
 
 ## The rules that bite while you are typing
 
