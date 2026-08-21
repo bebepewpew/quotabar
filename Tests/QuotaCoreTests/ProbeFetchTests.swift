@@ -339,16 +339,22 @@ final class ProbeFetchTests: XCTestCase {
                                             before: Date().addingTimeInterval(10), transcript: &transcript))
     }
 
+    /// `runExpect` resolves the binary itself, so a machine without `expect`
+    /// lets the search fall through to the login shells. `ShellStartupFiles`
+    /// keeps those out of the developer's startup files, and covers the guard
+    /// as well so it resolves the same way `runExpect` will.
     func testSystemProbeRunnerRunsExpectOrExplainsItIsMissing() throws {
         let runner = SystemProbeRunner()
-        guard CommandRunner.find("expect") != nil else {
-            XCTAssertThrowsError(try runner.runExpect("puts QUOTABAR_OK", timeout: 5, currentDirectory: nil)) { error in
-                XCTAssertEqual((error as? ProbeError)?.errorDescription, CommandRunner.expectInstallHint)
+        try ShellStartupFiles.suppressed {
+            guard CommandRunner.find("expect") != nil else {
+                XCTAssertThrowsError(try runner.runExpect("puts QUOTABAR_OK", timeout: 5, currentDirectory: nil)) { error in
+                    XCTAssertEqual((error as? ProbeError)?.errorDescription, CommandRunner.expectInstallHint)
+                }
+                return
             }
-            return
+            let output = try runner.runExpect("puts QUOTABAR_OK", timeout: 10, currentDirectory: nil)
+            XCTAssertTrue(output.contains("QUOTABAR_OK"))
         }
-        let output = try runner.runExpect("puts QUOTABAR_OK", timeout: 10, currentDirectory: nil)
-        XCTAssertTrue(output.contains("QUOTABAR_OK"))
     }
 
     // MARK: - Helpers

@@ -226,11 +226,11 @@ final class CommandRunnerTests: XCTestCase {
                           "an unsafe name is rejected before any shell is spawned")
     }
 
-    func testFindReturnsNilWhenNothingProvidesTheExecutable() {
-        let started = Date()
-        XCTAssertNil(CommandRunner.find("quotabar-absent-\(UUID().uuidString.prefix(8))"))
-        XCTAssertLessThan(Date().timeIntervalSince(started), 30, "the login-shell fallback stays bounded")
-    }
+    // A name nothing provides falls through to the login shells, which on a
+    // developer's machine means running their `$SHELL`, zsh and bash with
+    // `-lic` and sourcing their startup files. That case is asserted against a
+    // staged ladder instead, in
+    // `CommandRunnerEdgeTests.testFindReturnsNilWhenNoKnownLocationAndNoStagedShellProvidesIt`.
 
     func testLoginShellsAreExecutableUniqueAndFlaggedForTheirDialect() {
         let shells = CommandRunner.loginShells()
@@ -273,26 +273,34 @@ final class CommandRunnerTests: XCTestCase {
         #endif
     }
 
+    /// `runExpect` resolves `expect` itself, so the ladder it walks when the
+    /// binary is absent cannot be staged from here — `ShellStartupFiles` keeps
+    /// the shells it does run out of the developer's startup files, and the
+    /// guard resolves under the same staging so it agrees with `runExpect`.
     func testRunExpectReportsAnUnsupportedProbeWhenExpectIsMissing() throws {
-        guard CommandRunner.find("expect") == nil else {
-            throw XCTSkip("expect is installed here, so the missing-binary branch cannot be reached")
-        }
-        XCTAssertThrowsError(try CommandRunner.runExpect("puts quotabar", timeout: 5)) { error in
-            guard case .unsupported(let hint)? = error as? ProbeError else {
-                return XCTFail("expected ProbeError.unsupported, got \(error)")
+        try ShellStartupFiles.suppressed {
+            guard CommandRunner.find("expect") == nil else {
+                throw XCTSkip("expect is installed here, so the missing-binary branch cannot be reached")
             }
-            XCTAssertEqual(hint, CommandRunner.expectInstallHint)
+            XCTAssertThrowsError(try CommandRunner.runExpect("puts quotabar", timeout: 5)) { error in
+                guard case .unsupported(let hint)? = error as? ProbeError else {
+                    return XCTFail("expected ProbeError.unsupported, got \(error)")
+                }
+                XCTAssertEqual(hint, CommandRunner.expectInstallHint)
+            }
         }
     }
 
     /// End-to-end check that a quoted value survives Tcl substitution intact.
     func testRunExpectReturnsTheScriptOutputWhenExpectIsInstalled() throws {
-        guard CommandRunner.find("expect") != nil else {
-            throw XCTSkip("expect is not installed here")
+        try ShellStartupFiles.suppressed {
+            guard CommandRunner.find("expect") != nil else {
+                throw XCTSkip("expect is not installed here")
+            }
+            let value = #"/Users/a b/gemini "100%" [$HOME] \ok"#
+            let output = try CommandRunner.runExpect("puts \(CommandRunner.tclQuoted(value))", timeout: 10)
+            XCTAssertEqual(output.trimmingCharacters(in: .newlines), value)
         }
-        let value = #"/Users/a b/gemini "100%" [$HOME] \ok"#
-        let output = try CommandRunner.runExpect("puts \(CommandRunner.tclQuoted(value))", timeout: 10)
-        XCTAssertEqual(output.trimmingCharacters(in: .newlines), value)
     }
 
     func testTclQuotedEscapesEverySubstitutionTclWouldPerform() {

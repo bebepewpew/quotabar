@@ -7,6 +7,20 @@ import Glibc
 
 public enum CommandRunner {
     public static func find(_ executable: String) -> String? {
+        find(executable, shells: loginShells())
+    }
+
+    /// The search with its shell ladder supplied. Shipped code goes through
+    /// `find(_:)` above, which passes the real `loginShells()`; a test passes a
+    /// staged ladder instead.
+    ///
+    /// It has to be a parameter rather than a staged `$SHELL`, because a name
+    /// that resolves nowhere is asked of *every* candidate — so a stub in
+    /// `$SHELL` would still be followed by the machine's own `/bin/zsh -lic`,
+    /// an interactive login shell sourcing whatever the developer keeps in
+    /// `~/.zshrc`. The ladder is an autoclosure so it is still only built when
+    /// the known locations and `PATH` come up empty.
+    static func find(_ executable: String, shells: @autoclosure () -> [(path: String, flags: String)]) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let explicit = ["\(home)/.local/bin/\(executable)", "\(home)/.volta/bin/\(executable)",
                         "\(home)/.npm-global/bin/\(executable)", "\(home)/.bun/bin/\(executable)",
@@ -15,7 +29,7 @@ public enum CommandRunner {
         if let match = (explicit + fromPath).first(where: FileManager.default.isExecutableFile) { return match }
 
         guard executable.range(of: #"^[A-Za-z0-9._+-]+$"#, options: .regularExpression) != nil else { return nil }
-        for shell in loginShells() {
+        for shell in shells() {
             guard let data = try? run(shell.path, [shell.flags, "command -v -- \(executable)"], timeout: 4) else { continue }
             if let match = String(decoding: data, as: UTF8.self)
                 .split(whereSeparator: \.isNewline).map(String.init)

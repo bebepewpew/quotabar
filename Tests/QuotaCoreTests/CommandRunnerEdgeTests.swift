@@ -18,6 +18,13 @@ import Glibc
 /// one that answers `command -v`, and one that refuses its flags the way
 /// nushell, elvish and restricted shells do. Everything here is a real process
 /// with a short deadline.
+///
+/// A staged `$SHELL` only covers the first rung: `find` asks every candidate
+/// before it gives up, so a search that resolves nothing would go on to run the
+/// machine's own `/bin/zsh -lic` and source the developer's startup files. The
+/// cases that expect no answer therefore hand `find` the whole ladder through
+/// `shells:`. `testFindTriesTheNextCandidateWhenTheConfiguredShellRejectsItsFlags`
+/// is the deliberate exception — the real ladder is the thing it asserts on.
 final class CommandRunnerEdgeTests: XCTestCase {
     private var scratch = URL(fileURLWithPath: NSTemporaryDirectory())
 
@@ -67,9 +74,45 @@ final class CommandRunnerEdgeTests: XCTestCase {
         let empty = scratch.appendingPathComponent("empty-path")
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
 
-        try withEnvironment(["SHELL": shell, "PATH": empty.path]) {
-            XCTAssertNil(CommandRunner.find(name))
+        try withEnvironment(["PATH": empty.path]) {
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
         }
+    }
+
+    /// Nothing on the machine provides the name, which is the answer every
+    /// probe gets for a CLI that is not installed.
+    ///
+    /// It is asserted against a staged ladder rather than the machine's own
+    /// shells, and this is the reason the ladder is a parameter at all: `find`
+    /// asks every candidate before giving up, so staging `$SHELL` alone would
+    /// still run `/bin/zsh -lic` and source the developer's `~/.zshrc`. The
+    /// staged `$HOME` here is a canary for exactly that — a startup file in it
+    /// records being sourced, and the search must not have touched one.
+    func testFindReturnsNilWhenNoKnownLocationAndNoStagedShellProvidesIt() throws {
+        try requireLiveEnvironment()
+        let name = "quotabar-absent-\(UUID().uuidString.prefix(8))"
+        let sourced = scratch.appendingPathComponent("sourced.log").path
+        let home = try makeHomeRecordingItsStartupFiles(into: sourced)
+        let asked = scratch.appendingPathComponent("asked.log").path
+        let shell = try makeShell(named: "not-found-shell", body: """
+        echo "$@" >> "\(asked)"
+        echo '\(name): command not found' >&2
+        exit 127
+        """)
+        let empty = scratch.appendingPathComponent("empty-path")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+
+        let started = Date()
+        try withEnvironment(["PATH": empty.path, "HOME": home, "ZDOTDIR": home]) {
+            XCTAssertNil(CommandRunner.find(name, shells: [(shell, "-lic")]))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "the fallback stays bounded")
+
+        XCTAssertTrue(String(decoding: FileManager.default.contents(atPath: asked) ?? Data(), as: UTF8.self)
+            .contains("command -v -- \(name)"), "the staged shell was never asked")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sourced),
+                       "an interactive login shell was run, sourcing startup files: "
+                       + String(decoding: FileManager.default.contents(atPath: sourced) ?? Data(), as: UTF8.self))
     }
 
     /// A `$SHELL` that exits rather than accepting `-lc`/`-lic` must not make
@@ -143,6 +186,20 @@ final class CommandRunnerEdgeTests: XCTestCase {
     /// answer rather than about any real shell's dialect.
     private func makeShell(named name: String, body: String) throws -> String {
         try makeExecutable(named: name, in: scratch.appendingPathComponent("shells"), body: body)
+    }
+
+    /// A home directory whose shell startup files announce themselves. Every
+    /// name a login or interactive `sh`, `bash` or `zsh` reads is present, so
+    /// running any of them against this `HOME` leaves the log behind.
+    private func makeHomeRecordingItsStartupFiles(into log: String) throws -> String {
+        let home = scratch.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        for name in [".profile", ".bash_profile", ".bash_login", ".bashrc",
+                     ".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            try Data("echo '\(name)' >> \"\(log)\"\n".utf8)
+                .write(to: home.appendingPathComponent(name))
+        }
+        return home.path
     }
 
     @discardableResult
