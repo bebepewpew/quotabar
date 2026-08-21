@@ -126,29 +126,36 @@ resolved by whichever way the model leans that day.
 
 ## The parts a machine can check
 
-Structural drift is mechanical, and worth running before reading:
+Structural drift is mechanical, so it is a gate rather than a reading exercise.
+Run it before you read a word:
 
 ```sh
-# every guide a wrapper points at exists
-grep -rho 'docs/agent-guides/[a-z0-9-]*\.md' .claude .codex AGENTS.md \
-  | sort -u | while read -r f; do test -f "$f" || echo "missing: $f"; done
-
-# every role exists on both sides, with its Codex manifest
-for a in .claude/agents/*.md; do
-    n=$(basename "$a" .md)
-    test -f ".codex/skills/$n/SKILL.md" || echo "no Codex skill: $n"
-done
-for s in .codex/skills/*/; do
-    n=$(basename "$s")
-    test -f "$s/agents/openai.yaml" || echo "no manifest: $n"
-    grep -q "\`$n\`" AGENTS.md || echo "not in the AGENTS.md roster: $n"
-done
+scripts/check-harness        # this checkout
+scripts/check-harness DIR    # some other tree
 ```
 
+It names, and exits 1 on, four things:
+
+- a `docs/agent-guides/*.md` referenced by full path from `.claude/`, `.codex/`
+  or `AGENTS.md` that does not exist;
+- a `.claude/agents/<name>.md` with no `.codex/skills/<name>/SKILL.md`;
+- a `.codex/skills/<name>/` with no `agents/openai.yaml`;
+- a Codex skill missing from the `AGENTS.md` roster.
+
+Exit 2 is different: the check could not run against that tree at all, which is
+not the same as a clean one. Every problem is reported, not just the first.
+
+The `policy` job in `.github/workflows/ci.yml` runs it on every pull request —
+including the harness-only ones, which `changes` keeps away from every other job
+— and `Tests/HarnessTests/CheckHarnessTests.swift` removes one piece of a
+synthetic harness at a time to prove each of those failures really fails.
+
 `quotabar-dev` and `quotabar-fixtures` are skills rather than agents, so they
-have no `.claude/agents/` twin and the loops are right to stay quiet about them.
-Everything else is silent on a clean tree, so anything the snippet names is drift
-the change under review introduced.
+have no `.claude/agents/` twin and the check is right to stay quiet about them.
+Throwaway checkouts under `.claude/worktrees` are skipped for the same reason: a
+stale branch parked there is not this tree's harness. Everything else is silent
+on a clean tree, so anything the check names is drift the change under review
+introduced.
 
 A role uses the same name on both sides. It did not always: the reviewing roles
 were `quotabar-review` and `quotabar-security-review` under `.codex/skills/`

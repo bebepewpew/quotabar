@@ -200,6 +200,15 @@ deliberately: the wrapper selects the right toolchain and keeps `.build` owned b
 the invoking user. Its deny entries for pushes to `main` are a speed bump only;
 `.githooks/pre-push` and branch protection are the enforcement.
 
+`scripts/check-harness` fails on structural drift across all of the above: a
+guide a wrapper points at that no longer exists, a role present on one side only,
+a `.codex/skills/` entry without its `agents/openai.yaml` manifest, a skill
+missing from the roster in this file. The `policy` CI job runs it on every pull
+request, because that is the only job a harness-only change reaches and every one
+of those defects is otherwise silent — `scripts/install-codex-skills` copies
+whole directories, so a skill missing its manifest installs perfectly and simply
+never surfaces.
+
 These describe the rules; they do not replace them. This file stays canonical.
 
 ## Repository hygiene

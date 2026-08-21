@@ -7,7 +7,7 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, the agent-harness drift check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | called by `ci.yml`, plus weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
@@ -40,7 +40,16 @@ shape, or one whose `id`s collide** — GitHub reports that in its own UI when
 somebody tries to file. `blank_issues_enabled` flipping to `true` is likewise
 uncaught beyond the key still being present.
 
-Two details in `ci.yml` exist only for this job. `pull_request` lists `labeled`
+The agent harness has a check of its own in the same job, `scripts/check-harness`
+— a guide a wrapper points at that is gone, a role present on one side only, a
+Codex skill without `agents/openai.yaml`, a skill missing from the `AGENTS.md`
+roster. It runs on every pull request for the same reason the rest of `policy`
+does: `changes` classifies `docs/`, `.claude/` and `.codex/` as skip, so a
+harness-only change would otherwise reach no job at all, and every defect it
+looks for fails silently rather than red.
+`docs/agent-guides/harness-review.md` has the detail.
+
+Two details in `ci.yml` exist only for the Labels job. `pull_request` lists `labeled`
 and `unlabeled` in its `types`, or a pull request held back for a missing label
 would stay red until its next push, long after someone applied the label. And the
 `concurrency` group cancels superseded pull-request runs, because a label usually
@@ -61,7 +70,8 @@ bit. A push to `main` always runs the full suite.
 
 `changes` sorts every changed path into three buckets, and the third is the
 point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, the
-`quotabar` wrapper, `scripts/coverage` — and `.github/workflows/`, because a
+`quotabar` wrapper, `scripts/coverage`, `scripts/check-harness` — whose exit
+status and messages the suite asserts — and `.github/workflows/`, because a
 pipeline change is only ever proven by running it. **Skips:** `docs/`,
 `.claude/`, `.codex/`, `.githooks/`, the issue forms, any `*.md`, `LICENSE`,
 `.gitignore`, `.gitattributes`, the two Codex scripts, and the `.github` files
