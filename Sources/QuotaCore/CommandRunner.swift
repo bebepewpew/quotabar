@@ -59,26 +59,33 @@ public enum CommandRunner {
     /// uninstalled. `sh` gets `-lc`, since a POSIX shell need not accept `-i`
     /// alongside `-c`.
     ///
-    /// Candidates are compared by the file they resolve to rather than by the
-    /// path they were spelled as: on a merged-`/usr` Linux `/bin/bash` and
-    /// `/usr/bin/bash` are one executable, and spawning both runs the user's
-    /// startup files twice to learn the same answer.
+    /// Candidates are compared by the file they resolve to *and* the name they
+    /// are invoked under. The file matters because on a merged-`/usr` Linux
+    /// `/bin/bash` and `/usr/bin/bash` are one executable, and spawning both
+    /// runs the user's startup files twice to learn the same answer. The name
+    /// matters because bash reads `argv[0]`: invoked as `rbash` it is a
+    /// restricted shell and as `sh` it is a POSIX one. `/bin/rbash` and
+    /// `/bin/bash` are one file on Arch, Debian and Fedora but not one shell,
+    /// so deduplicating on the file alone would delete the only unrestricted,
+    /// `~/.bashrc`-sourcing rung for anyone whose `$SHELL` is `/bin/rbash` or a
+    /// bash-backed `/bin/sh`.
     static func loginShells() -> [(path: String, flags: String)] {
         var seen = Set<String>()
         return [ProcessInfo.processInfo.environment["SHELL"],
                 "/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"]
             .compactMap { $0 }
-            .filter { FileManager.default.isExecutableFile(atPath: $0) && seen.insert(resolvedPath($0)).inserted }
-            .map { path in
-                let name = URL(fileURLWithPath: path).lastPathComponent
-                return (path, ["zsh", "bash"].contains(name) ? "-lic" : "-lc")
-            }
+            .filter { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { (path: $0, name: URL(fileURLWithPath: $0).lastPathComponent) }
+            // A NUL appears in neither half, so one pair has one spelling and
+            // two different pairs cannot collide into it.
+            .filter { seen.insert("\(resolvedPath($0.path))\u{0}\($0.name)").inserted }
+            .map { ($0.path, ["zsh", "bash"].contains($0.name) ? "-lic" : "-lc") }
     }
 
     /// The file a candidate path actually names, so two spellings of one shell
-    /// are recognised as one. Anything that cannot be resolved — a dangling
-    /// symlink, a path that vanished between the check and here — keeps its
-    /// original spelling and is simply not deduplicated.
+    /// under one name are recognised as one. Anything that cannot be resolved —
+    /// a dangling symlink, a path that vanished between the check and here —
+    /// keeps its original spelling and is simply not deduplicated.
     static func resolvedPath(_ path: String) -> String {
         #if os(Windows)
         return URL(fileURLWithPath: path).resolvingSymlinksInPath().path

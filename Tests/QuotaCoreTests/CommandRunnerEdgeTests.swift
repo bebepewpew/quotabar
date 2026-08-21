@@ -289,25 +289,55 @@ final class CommandRunnerEdgeTests: XCTestCase {
 
     // MARK: - loginShells
 
-    /// Two spellings of one shell are one candidate. On a merged-`/usr` Linux
-    /// `/bin/bash` and `/usr/bin/bash` are the same file, and running the user's
-    /// startup files twice to learn the same answer is pure cost.
-    func testLoginShellsListAnExecutableOnceEvenUnderSeveralNames() throws {
+    /// Two spellings of one shell under one name are one candidate. On a
+    /// merged-`/usr` Linux `/bin/bash` and `/usr/bin/bash` are the same file,
+    /// and running the user's startup files twice to learn the same answer is
+    /// pure cost. The symlink here carries its target's own basename, because
+    /// that is the case the merged-`/usr` duplicate is: same file, same
+    /// invocation name, two paths.
+    func testLoginShellsListAnExecutableOnceEvenUnderSeveralPaths() throws {
         try requireLiveEnvironment()
         let target = try systemBinary("sh")
-        let link = scratch.appendingPathComponent("login-shell")
+        let directory = scratch.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let link = directory.appendingPathComponent(URL(fileURLWithPath: target).lastPathComponent)
         try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: target)
 
         withEnvironment(["SHELL": link.path]) {
             let shells = CommandRunner.loginShells()
             XCTAssertEqual(shells.first?.path, link.path, "the configured shell is still tried first")
+            XCTAssertFalse(shells.dropFirst().contains { $0.path == target },
+                           "the symlinked shell and its target are one candidate: \(shells.map(\.path))")
 
-            let resolved = shells.map { CommandRunner.resolvedPath($0.path) }
-            XCTAssertEqual(Set(resolved).count, resolved.count,
-                           "one executable was going to be asked more than once: \(shells.map(\.path))")
-            XCTAssertEqual(resolved.filter { $0 == CommandRunner.resolvedPath(target) }.count, 1,
-                           "the symlinked shell and its target are one candidate")
+            let invocations = shells.map { Self.invocation($0) }
+            XCTAssertEqual(Set(invocations).count, invocations.count,
+                           "one shell was going to be asked the same question twice: \(invocations)")
         }
+    }
+
+    /// The other half of that rule: bash decides from `argv[0]` whether it is
+    /// restricted, so `/bin/rbash` and `/bin/bash` are one file and two shells.
+    /// Collapsing them would leave a user whose `$SHELL` is a restricted shell —
+    /// or a bash-backed `/bin/sh` — with no rung that sources `~/.bashrc`, which
+    /// is exactly where a version manager puts its shims.
+    func testLoginShellsKeepAShellWhoseNameChangesWhatItDoes() throws {
+        try requireLiveEnvironment()
+        let bash = try systemBinary("bash")
+        let restricted = scratch.appendingPathComponent("rbash")
+        try FileManager.default.createSymbolicLink(atPath: restricted.path, withDestinationPath: bash)
+
+        withEnvironment(["SHELL": restricted.path]) {
+            let shells = CommandRunner.loginShells()
+            XCTAssertEqual(shells.first?.path, restricted.path, "the configured shell is still tried first")
+            XCTAssertEqual(shells.first?.flags, "-lc", "a shell named rbash is not asked for -i")
+            XCTAssertTrue(shells.dropFirst().contains { $0.path == bash && $0.flags == "-lic" },
+                          "the same file invoked as bash is a different, unrestricted shell and has to survive "
+                              + "the deduplication: \(shells.map(\.path))")
+        }
+    }
+
+    private static func invocation(_ shell: (path: String, flags: String)) -> String {
+        "\(CommandRunner.resolvedPath(shell.path)) as \(URL(fileURLWithPath: shell.path).lastPathComponent)"
     }
 
     /// An unresolvable path keeps its own spelling rather than disappearing from
