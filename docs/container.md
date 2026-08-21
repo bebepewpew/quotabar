@@ -62,9 +62,9 @@ $ docker build -f packaging/Dockerfile -t quotabar .
 
 These are the three lines `packaging/Dockerfile` records, and the ones
 `release.yml` runs. The configuration is not optional: the image ships no Swift
-runtime, and `--static-swift-stdlib` links only in release — a build without
-`-c release` writes `.build/debug/` and the copy above then finds nothing to
-stage. Without a local toolchain,
+runtime, so `--static-swift-stdlib` is required, and the copy above reads
+`.build/release/` — a build without `-c release` writes `.build/debug/` and
+leaves it nothing to stage. Without a local toolchain,
 `./quotabar build -c release --static-swift-stdlib` runs the same build inside
 `swift:6.3-noble` and leaves the same `.build/release/quotabar` behind, owned by
 you.
