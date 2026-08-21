@@ -99,7 +99,10 @@ and the reset time — to a local file. Readings that have not moved are skipped
 so three months costs well under a megabyte, and anything older than 120 days is
 dropped. Refreshing more often writes proportionally more: about 830 KB for
 three months at the default fifteen minutes, and about 2.5 MB at the five-minute
-floor `--interval` accepts.
+floor `--interval` accepts. Two backstops sit behind that horizon: the file is
+trimmed oldest-first if it ever reaches 32 MB, and at most 256 distinct windows
+are tracked, so a provider that names a new one per model cannot grow the record
+without limit.
 
 From that QuotaBar reconstructs *cycles*: the span between one reset and the
 next. Providers report a level, not a cycle, so a reset is inferred from usage
