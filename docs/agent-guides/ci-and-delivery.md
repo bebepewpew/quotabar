@@ -7,7 +7,7 @@ without knowing which is how a gate quietly stops gating.
 
 | Workflow | Triggers | Authoritative for |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Labels** gate, build and test on macOS and Linux, the CLI smoke test, the 90% region coverage gate, the repository-policy check |
+| `ci.yml` | push to `main`, every pull request, and `labeled`/`unlabeled` | the **Gate** every merge waits on: the **Labels** check, the repository-policy check, build and test on macOS and Linux, the CLI smoke test, and the 90% region coverage gate |
 | `codeql.yml` | push, pull request, weekly | Swift static analysis. macOS only, because that is the one host where a single build covers all four targets |
 | `security-scan.yml` | push, pull request, Mondays 06:17 UTC | leaked secrets (the only failing result), plus informational working-tree and toolchain-image findings |
 | `release.yml` | `workflow_dispatch` only | building, signing, tagging and publishing a release, and pushing the Homebrew tap |
@@ -33,7 +33,7 @@ actually fails a pull request), `.github/release.yml`, the tables in
 the closing pull request will — `docs/agent-guides/backlog.md` and the dropdown
 in `.github/ISSUE_TEMPLATE/task.yml`.
 
-The issue forms have a gate of their own, in the policy step: the three forms and
+The issue forms have a check of their own, in the policy job: the three forms and
 `config.yml` must exist, be non-empty and keep their top-level keys. Nothing
 parses them, so **no job would catch a form that is valid YAML in the wrong
 shape, or one whose `id`s collide** — GitHub reports that in its own UI when
@@ -46,6 +46,43 @@ would stay red until its next push, long after someone applied the label. And th
 `concurrency` group cancels superseded pull-request runs, because a label usually
 lands moments after `opened` and each correction would otherwise leave a full
 macOS and Linux build running beside the one replacing it.
+
+## The Gate, and why the required check is not a build
+
+`ci.yml` has six jobs, and only one of them is a required status check.
+
+`changes` diffs the pull request against its base and decides whether anything
+compiled was touched. If not — documentation, `.claude/`, `.codex/`, the issue
+forms, a root `*.md` — then `build-and-test` and `build-and-test-linux` are
+skipped, and a documentation change stops holding a macOS runner. `policy` has no
+such guard and runs for everything, which matters precisely *because* it is the
+documentation-shaped change that can break an issue form or unset an executable
+bit. A push to `main` always runs the full suite.
+
+The allowlist in `changes` is an allowlist deliberately: a path nobody thought
+about counts as code and builds. A new top-level directory is then a decision
+somebody makes in that job rather than a hole that silently skips the suite.
+
+`gate` is the required check. Two GitHub behaviours force that shape:
+
+- a workflow stopped by `paths-ignore` never reports at all, so a check required
+  by branch protection stays **pending** and the pull request is unmergeable
+  rather than fast — which is why the filtering is a job, not a path filter;
+- `if: success()` on an aggregating job makes that job skip as soon as anything
+  it needs is skipped, and a skipped required check satisfies nothing. `gate` is
+  `if: always()` and inspects `needs.*.result` itself, counting `skipped` as a
+  pass and everything that is not `success` as a failure.
+
+`codeql.yml` is the one workflow that may use `paths-ignore`, and does: it is not
+a required check, so a run that never starts leaves nothing pending. Its ignore
+list is the same set `changes` treats as documentation, written a second time
+because the two mechanisms cannot share one — so they move together, and a path
+added to one without the other is drift.
+
+Branch protection on `main` therefore requires **`Gate`** and **`Labels`**, not
+the two build jobs. Renaming a job in this file without renaming it there is how
+a merge blocks on a check that no longer exists; adding a job means adding it to
+`gate`'s `needs`, or it cannot fail a merge.
 
 ## Traps this repository has already paid for
 
@@ -64,8 +101,10 @@ macOS and Linux build running beside the one replacing it.
   A `pull_request`-triggered workflow cannot have run before its PR existed. Say
   that in the PR rather than letting a reviewer read the absence as a failure.
 - **`scripts/` and `.githooks/` entries are asserted executable** by the policy
-  step, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
-  line in that step.
+  job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
+  line in that job.
+- **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
+  nothing: the only required check never learns it failed.
 
 ## Pinning
 

@@ -3,7 +3,19 @@ name: CodeQL
 on:
   push:
     branches: [main]
+  # A path filter is safe *here* and nowhere else in this repository: CodeQL is
+  # not a required status check, so a run that never starts leaves nothing
+  # pending. `ci.yml` filters with a job instead, because its Gate is required.
+  # These paths are the ones `changes` in ci.yml treats as documentation; the two
+  # lists move together.
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '.claude/**'
+      - '.codex/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '*.md'
+      - 'LICENSE'
   schedule:
     # Weekly, so newly published CodeQL queries reach the default branch even
     # when nothing has been merged for a while.
