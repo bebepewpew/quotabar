@@ -53,10 +53,24 @@ release, not for the branch.
   and return concise actionable errors without exposing raw sensitive output.
 - Keep UI and observable state on the main actor; do blocking CLI work off the
   cooperative executor.
-- Persist through `StateStore`: `UserDefaults` on macOS, an XDG JSON file on
-  Linux. Keep storage keys stable and decoding backward compatible.
+- Persist settings and small state through `StateStore`: `UserDefaults` on macOS,
+  an XDG JSON file on Linux. Keep storage keys stable and decoding backward
+  compatible.
+- Persist usage history through `HistoryStore` instead. It is a second seam, not
+  a bypass: `StateStore` rewrites its whole file on every write, which is the
+  wrong shape for an append-only series that has to retain three months. The log
+  is `history.bin` under `~/Library/Application Support/QuotaBar` on macOS,
+  `${XDG_STATE_HOME:-~/.local/state}/quotabar` on Linux — history is state, not
+  configuration. Its series catalogue still goes through `StateStore`.
+- Keep the history format backward compatible the same way storage keys are kept
+  stable. The header carries a version and a record stride; a file written by a
+  newer build is read as far as it can be and **never appended to or deleted**,
+  and a file that is not ours is left alone rather than replaced.
+- Recording history is best effort. A history file that cannot be written or is
+  damaged must never turn a working quota refresh into a failure — read paths
+  report what they skipped, write paths stay silent.
 - Use stable quota-window keys; labels and reset timestamps are display data,
-  not identity.
+  not identity. History is keyed on the window key for the same reason.
 
 ## Validation
 
@@ -97,34 +111,78 @@ tests.
 
 ## Agent tooling
 
-The guidance lives once, in `docs/agent-guides/`:
+The guidance lives once, in `docs/agent-guides/`. Everything else — every skill,
+agent and workflow, in both toolchains — is a thin wrapper pointing at one of
+these, the same way `CLAUDE.md` and `GEMINI.md` point here instead of restating
+policy.
 
+**Doing the work**
+
+- `product-shaping.md` — turning a request into a scope with assertable
+  acceptance criteria, and refusing one no provider CLI can supply.
+- `architecture-review.md` — which target a change belongs in, which persistence
+  seam, and the compatibility story that comes with it.
+- `implementing.md` — the loop from branch to pushed branch, and the traps this
+  repository has already paid for.
 - `quotabar-dev.md` — build, test and pre-PR validation, including the Linux
   container path and the platform facts that are easy to get wrong.
 - `probe-fixture.md` — what a parser change must cover, and the parsing traps
   this repository has already hit.
+- `qa-plan.md` — what each kind of change owes in tests, and how to prove a test
+  can actually fail.
+
+**Checking the work**
+
 - `review-checklist.md` — how a change is reviewed against this file.
 - `security-review.md` — the threat model: binary discovery, script
   construction, untrusted CLI output, credentials, process lifetime, supply chain.
+- `red-team.md` — the attacks to actually build and run against those surfaces.
+- `ux-review.md` — the visible surface: legibility, a non-colour signal for every
+  state, error and empty states, `--json` and waybar as an interface.
+- `performance-review.md` — process spawns, deadlines, main-actor blocking,
+  history growth, backtracking over untrusted output.
+- `ci-and-delivery.md` — the four workflows, what each is authoritative for, and
+  the pinning and permission rules.
+- `docs-writing.md` — where each document lives, and what goes stale.
+- `risk-signoff.md` — deciding that what is now known is acceptable to ship, and
+  recording what was accepted.
+- `release.md` — cutting and verifying a release.
+
+**Running several agents at once**
+
 - `review-swarm.md` — reviewing through six narrow lenses instead of one broad one.
 - `parallel-tasks.md` — running independent tasks at once in separate
   worktrees, one pull request per task.
+- `e2e-task.md` — one task from scope to an open pull request: shape, design,
+  build, assure from every angle, remediate what survives refutation, sign off.
 
-Each tool gets a thin wrapper pointing at those, the same way `CLAUDE.md` and
-`GEMINI.md` point here instead of restating policy:
+The wrappers:
 
-- `.claude/` — `settings.json`, `skills/quotabar-dev`, `skills/quotabar-fixtures`
-  and `agents/quotabar-reviewer`. Claude Code reads these from the repository.
+- `.claude/skills/` — `quotabar-dev` and `quotabar-fixtures`. Claude Code reads
+  these from the repository.
+- `.claude/agents/` — one per role: `quotabar-product`, `quotabar-architect`,
+  `quotabar-developer`, `quotabar-qa`, `quotabar-reviewer`,
+  `quotabar-security-reviewer`, `quotabar-red-team`, `quotabar-ux`,
+  `quotabar-performance`, `quotabar-devops`, `quotabar-writer`, `quotabar-ciso`
+  and `quotabar-release`. Each is usable on its own; the workflows only decide
+  the order they run in.
 - `.claude/workflows/review-swarm.js` — six-lens review with adversarial
   verification of every finding. Use it before merging anything substantial.
+- `.claude/workflows/e2e-task.js` — the full line for a single task, with the
+  same adversarial verification and a sign-off that treats an angle which failed
+  to run as a reason to hold rather than a clean result.
 - `.claude/workflows/parallel-tasks.js` and `scripts/codex-parallel` — the
   parallel runners for each toolchain. Both open a pull request only for a
   task that passed the validation above.
-- `.codex/skills/` — the same three with `agents/openai.yaml` manifests. Codex
+- `.codex/skills/` — the same roles with `agents/openai.yaml` manifests. Codex
   discovers skills only under `$CODEX_HOME/skills` and does not read them from a
   repository, so run `scripts/install-codex-skills` once per clone and again
   after pulling changes to them. Codex reads `AGENTS.md` natively, which is why
-  there is no `CODEX.md`.
+  there is no `CODEX.md`. Codex has no workflow engine, so the multi-agent
+  runners above have no Codex equivalent beyond `scripts/codex-parallel`.
+
+`quotabar-dev` is the build-and-test **skill**; `quotabar-developer` is the agent
+that implements a change and uses it. Keep the two straight when adding either.
 
 `.claude/settings.json` allows `./quotabar ...` rather than raw `docker run ...`
 deliberately: the wrapper selects the right toolchain and keeps `.build` owned by

@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Docs"
+  short_description: "Keep the documentation true"
+  default_prompt: "Use $quotabar-writer to find the documented claims this change made false and correct them, following docs/agent-guides/docs-writing.md."
+policy:
+  allow_implicit_invocation: false

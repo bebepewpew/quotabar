@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Architect"
+  short_description: "Decide the target, the persistence seam and the compatibility story"
+  default_prompt: "Use $quotabar-architect to design this change against docs/agent-guides/architecture-review.md before any code is written."
+policy:
+  allow_implicit_invocation: false

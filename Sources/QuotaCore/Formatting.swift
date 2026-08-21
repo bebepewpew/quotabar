@@ -88,6 +88,39 @@ public enum QuotaFormatting {
         return String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
     }
 
+    /// Eight-level sparkline. `nil` is a bucket nothing was sampled in and
+    /// renders as a gap, so an unwatched stretch never looks like zero usage.
+    public static func sparkline(_ values: [Double?]) -> String {
+        let ramp: [Character] = ["\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}",
+                                 "\u{2585}", "\u{2586}", "\u{2587}", "\u{2588}"]
+        return String(values.map { value -> Character in
+            guard let value else { return " " }
+            let clamped = min(max(value, 0), 100)
+            return ramp[min(Int(clamped / 100 * Double(ramp.count - 1) + 0.5), ramp.count - 1)]
+        })
+    }
+
+    /// Buckets `count` equal time slices across `from...to`, taking the **highest**
+    /// reading in each. Maximum rather than mean because a downsampled chart that
+    /// loses the peak loses the only number that matters.
+    public static func buckets(_ points: [(at: Date, usedPercent: Double)],
+                               from: Date, to: Date, count: Int) -> [Double?] {
+        guard count > 0 else { return [] }
+        let span = to.timeIntervalSince(from)
+        guard span > 0 else {
+            let only = points.map(\.usedPercent).max()
+            return Array(repeating: only, count: count)
+        }
+        var out = [Double?](repeating: nil, count: count)
+        for point in points {
+            let offset = point.at.timeIntervalSince(from)
+            guard offset >= 0, offset <= span else { continue }
+            let index = min(Int(offset / span * Double(count)), count - 1)
+            out[index] = max(out[index] ?? -1, point.usedPercent)
+        }
+        return out
+    }
+
     /// The single most urgent row, used for one-line status bars. Rows without a
     /// reading are never the leader — a bar should say "n/a" rather than show a
     /// provider name next to an empty percentage.

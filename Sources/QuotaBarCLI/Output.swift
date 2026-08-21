@@ -4,6 +4,7 @@ import QuotaCore
 enum Output {
     private enum ANSI: String {
         case reset = "\u{1B}[0m", yellow = "\u{1B}[33m", red = "\u{1B}[31m", dim = "\u{1B}[2m"
+        case green = "\u{1B}[32m"
     }
 
     static func render(_ snapshots: [QuotaSnapshot], format: Arguments.Format,
@@ -12,6 +13,9 @@ enum Output {
         case .text: return text(snapshots, now: now, color: color)
         case .json: return try json(snapshots)
         case .waybar: return try waybar(snapshots, now: now)
+        // `Arguments.validate` rejects csv for status, so this is unreachable;
+        // falling back to text keeps the switch honest without inventing a format.
+        case .csv: return text(snapshots, now: now, color: color)
         }
     }
 
@@ -38,10 +42,64 @@ enum Output {
     }
 
     static func json(_ snapshots: [QuotaSnapshot]) throws -> String {
+        String(decoding: try encoder().encode(snapshots), as: UTF8.self)
+    }
+
+    /// `quotabar history`. Text and CSV come from `QuotaCore` so the terminal and
+    /// a future Linux front-end word history the same way.
+    static func history(_ result: HistoryReadResult, cycles: [CycleSummary],
+                        labels: [HistorySeriesID: String], from: Date, to: Date,
+                        arguments: Arguments) throws -> String {
+        switch arguments.format {
+        case .csv:
+            return UsageReport.csv(samples: result.samples)
+        case .json:
+            let payload = UsageReport.historyPayload(samples: result.samples, cycles: cycles,
+                                                     from: from, to: to, labels: labels,
+                                                     damagedRecords: result.damagedRecords)
+            return String(decoding: try encoder().encode(payload), as: UTF8.self)
+        case .text, .waybar:
+            return arguments.showCycles
+                ? UsageReport.cycles(cycles, labels: labels)
+                : UsageReport.history(samples: result.samples, from: from, to: to,
+                                      labels: labels, diagnostic: result.diagnostic)
+        }
+    }
+
+    static func advice(_ recommendations: [Recommendation], format: Arguments.Format,
+                       color: Bool) throws -> String {
+        guard format != .json else {
+            return String(decoding: try encoder().encode(UsageReport.advicePayload(recommendations)),
+                          as: UTF8.self)
+        }
+        guard color else { return UsageReport.advice(recommendations) }
+        // Colour only the severity badge: the evidence lines are numbers the user
+        // may want to copy, and escape codes travel with a copy.
+        return UsageReport.advice(recommendations).split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                guard let severity = Recommendation.Severity.allCases.first(where: {
+                    line.hasPrefix(UsageReport.badge($0))
+                }) else { return String(line) }
+                let badge = UsageReport.badge(severity)
+                return paint(badge, with: tone(severity), enabled: true) + line.dropFirst(badge.count)
+            }
+            .joined(separator: "\n")
+    }
+
+    private static func encoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return String(decoding: try encoder.encode(snapshots), as: UTF8.self)
+        return encoder
+    }
+
+    private static func tone(_ severity: Recommendation.Severity) -> ANSI? {
+        switch severity {
+        case .critical: .red
+        case .warning: .yellow
+        case .opportunity: .green
+        case .info: .dim
+        }
     }
 
     static func waybar(_ snapshots: [QuotaSnapshot], now: Date = Date()) throws -> String {

@@ -26,6 +26,11 @@ its whole mechanism, and it shapes the risk:
 - Persisted state (quota percentages, window keys, notification markers) is stored
   in `UserDefaults` on macOS and `${XDG_CONFIG_HOME:-~/.config}/quotabar/state.json`
   on Linux. Nothing secret is written there.
+- Usage history (percentages, timestamps and reset times, retained 120 days) is a
+  separate local file: `history.bin` under `~/Library/Application Support/QuotaBar`
+  on macOS and `${XDG_STATE_HOME:-~/.local/state}/quotabar` on Linux. It records no
+  prompts, filenames or credentials, is never transmitted, and is deleted by
+  `quotabar history --clear`.
 
 ## In scope
 

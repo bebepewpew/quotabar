@@ -1,0 +1,6 @@
+interface:
+  display_name: "QuotaBar Developer"
+  short_description: "Implement one change through to a pushed branch"
+  default_prompt: "Use $quotabar-developer to implement this change following docs/agent-guides/implementing.md, run the AGENTS.md gate, and push a focused branch without opening a pull request."
+policy:
+  allow_implicit_invocation: false

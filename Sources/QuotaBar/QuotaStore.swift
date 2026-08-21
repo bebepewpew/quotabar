@@ -23,10 +23,20 @@ final class QuotaStore: ObservableObject {
             if hasStarted { scheduleRefreshes() }
         }
     }
+    /// Recorded usage for the sparkline strip and the advisor panel. Recomputed
+    /// after every refresh rather than held live, so the app never keeps three
+    /// months of samples resident.
+    @Published private(set) var recommendations: [Recommendation] = []
+    @Published private(set) var recentUsage: [HistorySeriesID: [Double?]] = [:]
+    /// The span the sparklines cover, so the caption can say what it is.
+    static let sparklineSpan: TimeInterval = 7 * 86_400
+
     private var schedulerTask: Task<Void, Never>?
     private var hasStarted = false
     private let store: StateStore
     private let cache: SnapshotCache
+    private let history: FileHistoryStore
+    private let recorder: UsageRecorder
     private static let intervalKey = "QuotaBar.refreshIntervalMinutes"
     private static let menuBarKey = "QuotaBar.menuBarSelections.v1"
     static let refreshIntervals = QuotaEngine.refreshIntervals
@@ -34,6 +44,8 @@ final class QuotaStore: ObservableObject {
     init(store: StateStore = StateStoreFactory.makeDefault()) {
         self.store = store
         cache = SnapshotCache(store: store)
+        history = FileHistoryStore(store: store)
+        recorder = UsageRecorder(store: history)
         installedProviders = []
         snapshots = []
         let savedInterval = store.integer(forKey: Self.intervalKey)
@@ -51,10 +63,49 @@ final class QuotaStore: ObservableObject {
             snapshots = QuotaEngine.retainingLastGood(fresh: values, previous: snapshots)
             migrateMenuBarSelections()
             cache.update(with: snapshots)
-            isRefreshing = false
+            // `values`, not `snapshots`: a retained snapshot is the previous
+            // reading served again, and recording it would draw a flat line the
+            // user never actually used.
             let successful = values.filter { $0.error == nil && !$0.windows.isEmpty }
+            await reloadHistory(recording: successful)
+            isRefreshing = false
             Task { await QuotaNotifier.shared.evaluate(successful) }
+            Task { [recommendations] in await QuotaNotifier.shared.evaluate(projections: recommendations) }
         }
+    }
+
+    /// Records the refresh and recomputes what the UI shows from it. The file
+    /// work happens off the main actor; only the results land back on it.
+    private func reloadHistory(recording successful: [QuotaSnapshot]) async {
+        let recorder = self.recorder
+        let history = self.history
+        let span = Self.sparklineSpan
+        let current = snapshots
+        let computed = await Task.detached(priority: .utility) { () -> ([Recommendation], [HistorySeriesID: [Double?]]) in
+            recorder.record(successful)
+            let now = Date()
+            let all = history.read().samples
+            let advice = Advisor.recommendations(
+                for: Advisor.inputs(history: all, snapshots: current, now: now), now: now)
+            let from = now.addingTimeInterval(-span)
+            let strips = Dictionary(grouping: all.filter { $0.at >= from }, by: \.series)
+                .mapValues { samples in
+                    QuotaFormatting.buckets(samples.sorted { $0.at < $1.at }
+                        .map { (at: $0.at, usedPercent: $0.usedPercent) },
+                                            from: from, to: now, count: 32)
+                }
+            return (advice, strips)
+        }.value
+        recommendations = computed.0
+        recentUsage = computed.1
+    }
+
+    /// Deletes every recorded sample. Surfaced in Settings so the privacy promise
+    /// in the README has a button behind it.
+    func clearHistory() {
+        history.removeAll()
+        recommendations = []
+        recentUsage = [:]
     }
 
     func startScheduler() {

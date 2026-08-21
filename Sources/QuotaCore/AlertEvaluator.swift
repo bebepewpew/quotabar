@@ -2,6 +2,10 @@ import Foundation
 
 public enum AlertLevel: String, Sendable, CaseIterable {
     case warning, critical
+    /// Not a threshold on the current reading but on where it is heading: the
+    /// window is on course to run out before it resets. Only the advisor raises
+    /// it, so `init?(usedPercent:)` never returns it.
+    case projected
 
     public init?(usedPercent: Double) {
         if usedPercent >= 95 { self = .critical }
@@ -9,7 +13,13 @@ public enum AlertLevel: String, Sendable, CaseIterable {
         else { return nil }
     }
 
-    public var title: String { self == .critical ? "almost exhausted" : "running low" }
+    public var title: String {
+        switch self {
+        case .critical: "almost exhausted"
+        case .warning: "running low"
+        case .projected: "on course to run out early"
+        }
+    }
 }
 
 public struct QuotaAlert: Sendable, Equatable {
@@ -111,5 +121,37 @@ extension AlertEvaluator {
         for alert in pending(for: snapshots, now: now) where await sink.deliver(alert) {
             markDelivered(alert, at: now)
         }
+    }
+
+    /// The advisor's forecasts as alerts, deduplicated and delivered exactly like
+    /// the threshold ones.
+    public func dispatch(projections: [Recommendation], through sink: some QuotaNotificationSink,
+                         now: Date = Date()) async {
+        for alert in Self.projectedAlerts(for: projections) where delivered[alert.identifier] == nil {
+            if await sink.deliver(alert) { markDelivered(alert, at: now) }
+        }
+    }
+
+    /// Turns `projectedExhaustion` recommendations into alerts.
+    ///
+    /// The identifier is keyed on the cycle the forecast is about, not on the
+    /// forecast itself. A projection is recomputed every refresh and would
+    /// otherwise re-fire every fifteen minutes for the same window.
+    public static func projectedAlerts(for recommendations: [Recommendation]) -> [QuotaAlert] {
+        recommendations.filter { $0.kind == .projectedExhaustion }.map { recommendation in
+            QuotaAlert(
+                identifier: "quota.\(recommendation.series.provider.id).\(recommendation.series.windowKey)."
+                    + "\(cyclePeriod(of: recommendation)).\(AlertLevel.projected.rawValue)",
+                provider: recommendation.series.provider,
+                level: .projected,
+                title: "\(recommendation.series.provider.rawValue) quota is \(AlertLevel.projected.title)",
+                body: recommendation.evidence.joined(separator: ", ") + ".")
+        }
+    }
+
+    /// The reset the forecast belongs to, so one cycle raises one alert. The
+    /// advisor only emits this kind when there is a reset to compare against.
+    private static func cyclePeriod(of recommendation: Recommendation) -> String {
+        recommendation.cycleResetAt.map { String(Int($0.timeIntervalSince1970)) } ?? "no-reset"
     }
 }

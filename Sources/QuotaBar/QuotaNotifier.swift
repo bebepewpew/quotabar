@@ -97,11 +97,21 @@ actor QuotaNotifier {
     }
 
     func evaluate(_ snapshots: [QuotaSnapshot]) async {
-        if NotificationEnvironment.supportsUserNotifications {
-            let settings = await UNUserNotificationCenter.current().notificationSettings()
-            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
-        }
+        guard await isAuthorized() else { return }
         await evaluator.dispatch(snapshots, through: sink)
+    }
+
+    /// The advisor's "will run out before it resets" findings, delivered through
+    /// the same sink and deduplicated per cycle so one forecast alerts once.
+    func evaluate(projections: [Recommendation]) async {
+        guard await isAuthorized() else { return }
+        await evaluator.dispatch(projections: projections, through: sink)
+    }
+
+    private func isAuthorized() async -> Bool {
+        guard NotificationEnvironment.supportsUserNotifications else { return true }
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        return settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
     }
 }
 
