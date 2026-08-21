@@ -74,6 +74,8 @@ still surfaces both from there, and the root stays short enough to read.
 - Compact metric badges: `S`/`W` for session and weekly windows, and
   `P`/`F`/`L` for recognizable Gemini model families.
 - Provider-colored progress below 80% used, amber at 80%, and red at 95%.
+- A VoiceOver label on the menu-bar item naming each selected quota and its
+  current reading, so the state is not carried by color alone.
 - Local macOS notifications at the 80% and 95% thresholds, deduplicated per
   provider, quota window, reset period, and threshold — plus a forecast alert
   when a window is on course to run out before it resets.
@@ -304,7 +306,10 @@ quotabar-tray --interval 300     # seconds between refreshes (default 900)
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/),
 which is what KDE Plasma reads natively and what libayatana-appindicator exposes
 to most other panels. It colours bars amber at 80% and red at 95%, lists every
-window in the tooltip, and offers Refresh and Quit. A left click refreshes.
+window in the tooltip, and offers Refresh and Quit. A left click refreshes. A
+window at 0% used keeps a one-pixel stub of its bar, so an empty track always
+means there is no reading — a window that has not reported yet, or a probe that
+failed — rather than a quota that is merely untouched.
 
 The icon shows the three busiest windows. Choosing which ones appear is a macOS
 feature today — the setting is stored per platform and no Linux front-end writes

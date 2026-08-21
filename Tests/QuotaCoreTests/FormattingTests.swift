@@ -123,6 +123,57 @@ final class FormattingTests: XCTestCase {
         }
     }
 
+    // MARK: - resetLine
+
+    /// The macOS card gives the reset a line of its own and used to render it with
+    /// SwiftUI's `Text(_:style:.relative)`, which counts upward past an elapsed
+    /// date. A retained snapshot whose reset has already passed is exactly the
+    /// state someone opens the popover in, so it has to read "Resets now".
+    func testResetLineSaysNowForAnElapsedReset() {
+        XCTAssertEqual(QuotaFormatting.resetLine(epoch, from: epoch), "Resets now")
+        XCTAssertEqual(QuotaFormatting.resetLine(epoch.addingTimeInterval(-1), from: epoch), "Resets now")
+        XCTAssertEqual(QuotaFormatting.resetLine(epoch.addingTimeInterval(-86_400), from: epoch), "Resets now")
+        XCTAssertEqual(QuotaFormatting.resetLine(epoch.addingTimeInterval(0.4), from: epoch), "Resets now",
+                       "sub-second remainders round down to zero")
+    }
+
+    func testResetLineIsSentenceCasedAroundTheSharedWording() {
+        XCTAssertEqual(QuotaFormatting.resetLine(epoch.addingTimeInterval(30), from: epoch),
+                       "Resets in under a minute")
+        XCTAssertEqual(QuotaFormatting.resetLine(epoch.addingTimeInterval(2 * 3_600), from: epoch), "Resets in 2h")
+        XCTAssertEqual(QuotaFormatting.resetLine(epoch.addingTimeInterval(2 * 86_400), from: epoch), "Resets in 2d")
+    }
+
+    /// One reset, two front-ends: whatever follows "Resets " on the card must be
+    /// exactly what follows "resets " in the CLI row for the same window.
+    func testResetLineMatchesTheCLIRowForTheSameWindow() {
+        let minute: TimeInterval = 60
+        let hour: TimeInterval = 3_600
+        let day: TimeInterval = 86_400
+        var offsets: [TimeInterval] = []
+        offsets.append(-day)
+        offsets.append(-1)
+        offsets.append(0)
+        offsets.append(30)
+        offsets.append(minute)
+        offsets.append(45 * minute)
+        offsets.append(2 * hour)
+        offsets.append(3 * hour + 12 * minute)
+        offsets.append(2 * day + 4 * hour)
+        for offset in offsets {
+            let reset = epoch.addingTimeInterval(offset)
+            let window = QuotaWindow(label: "Pro", usedPercent: 42, resetAt: reset)
+            let snapshot = QuotaSnapshot(provider: .gemini, windows: [window])
+            let row = QuotaFormatting.rows(for: [snapshot], now: epoch)[0]
+            let card = QuotaFormatting.resetLine(reset, from: epoch)
+            XCTAssertTrue(card.hasPrefix("Resets "), "offset \(offset): \(card)")
+            XCTAssertTrue(row.resetText.hasPrefix("resets "), "offset \(offset): \(row.resetText)")
+            XCTAssertEqual(String(card.dropFirst("Resets ".count)),
+                           String(row.resetText.dropFirst("resets ".count)),
+                           "offset \(offset)")
+        }
+    }
+
     // MARK: - rows
 
     func testRowsFlattenWindowsAndKeepFailedProvidersVisible() {

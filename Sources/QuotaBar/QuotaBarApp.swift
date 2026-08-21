@@ -93,6 +93,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func updateIcon(_ quotas: [MenuBarQuota]) {
         statusItem.button?.image = MenuBarIconRenderer.render(quotas: quotas)
         statusItem.button?.toolTip = "AI Quotas"
+        // The button is colour, a one-character badge and a bar, none of which
+        // VoiceOver can read. Without a label carrying the reading itself, the
+        // item announces exactly the same thing at 5% used and at 99%.
+        statusItem.button?.setAccessibilityLabel(MenuBarCompositeIcon.accessibilityDescription(for: quotas))
     }
 
     private func updatePopoverSize(for store: QuotaStore) {
@@ -222,14 +226,17 @@ struct MenuBarCompositeIcon: View {
     var body: some View {
         Image(nsImage: MenuBarIconRenderer.render(quotas: quotas))
             .id(signature)
-            .accessibilityLabel(accessibilityDescription)
+            .accessibilityLabel(Self.accessibilityDescription(for: quotas))
     }
 
     private var signature: String {
         quotas.map { "\($0.id):\($0.usedPercent ?? -1)" }.joined(separator: ",")
     }
 
-    private var accessibilityDescription: String {
+    /// Spoken description of what the icon is showing, shared by this view and the
+    /// status item itself. It names every selected quota and its reading, so the
+    /// label changes whenever the picture does instead of naming the app.
+    static func accessibilityDescription(for quotas: [MenuBarQuota]) -> String {
         guard !quotas.isEmpty else { return "AI Quotas" }
         return quotas.map { quota in
             let value = quota.usedPercent.map { "\(QuotaFormatting.percent($0)) used" } ?? "waiting for data"
@@ -464,7 +471,11 @@ struct QuotaCard: View {
                             .accessibilityLabel("Usage over the last 7 days")
                     }
                     if let reset = window.resetAt {
-                        Text("Resets \(reset, style: .relative)").font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
+                        // The wording the CLI and the tray use, rather than
+                        // `Text(_:style:.relative)`, which localises and counts upward
+                        // past an elapsed reset instead of saying "now". Fixed at
+                        // render time, so it moves when the store publishes a snapshot.
+                        Text(QuotaFormatting.resetLine(reset)).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
             }
@@ -565,19 +576,25 @@ struct AdvisorStrip: View {
     }
 }
 
+/// Both tint helpers read the hex through `TintRGB`, so a value the menu bar
+/// cannot parse is the same neutral grey the Linux tray falls back to instead of
+/// the pure black an integer parse would have produced. An icon nobody can see
+/// is a worse failure than one in the wrong colour.
 extension Color {
     init(hex: String) {
-        let value = UInt64(hex, radix: 16) ?? 0
-        self.init(red: Double((value >> 16) & 255) / 255, green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255)
+        let rgb = TintRGB(hex: hex)
+        self.init(red: Double(rgb.red) / 255, green: Double(rgb.green) / 255, blue: Double(rgb.blue) / 255)
     }
 }
 
-private extension NSColor {
+/// Internal rather than private so `QuotaBarTests` can assert that fallback
+/// without rendering and sampling a menu-bar image.
+extension NSColor {
     convenience init(hex: String) {
-        let value = UInt64(hex, radix: 16) ?? 0
-        self.init(red: CGFloat((value >> 16) & 255) / 255,
-                  green: CGFloat((value >> 8) & 255) / 255,
-                  blue: CGFloat(value & 255) / 255,
+        let rgb = TintRGB(hex: hex)
+        self.init(red: CGFloat(rgb.red) / 255,
+                  green: CGFloat(rgb.green) / 255,
+                  blue: CGFloat(rgb.blue) / 255,
                   alpha: 1)
     }
 }

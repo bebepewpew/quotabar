@@ -141,9 +141,7 @@ final class QuotaStore: ObservableObject {
 
     var menuBarIndicators: [MenuBarQuota] {
         let base = menuBarSelections.map { selection in
-            let window = snapshots.first(where: { $0.provider == selection.provider })?
-                .windows.first(where: { $0.key == selection.windowKey || $0.label == selection.windowLabel })
-            return (selection, window?.usedPercent, QuotaBadge.preferred(for: selection))
+            (selection, selection.window(in: snapshots)?.usedPercent, QuotaBadge.preferred(for: selection))
         }
         // Provider symbols already distinguish identical window badges across
         // providers. Number only collisions within the same provider.
@@ -178,12 +176,12 @@ final class QuotaStore: ObservableObject {
         }
     }
 
-    private func migrateMenuBarSelections() {
-        menuBarSelections = menuBarSelections.map { saved in
-            guard let window = snapshots.first(where: { $0.provider == saved.provider })?.windows.first(where: {
-                $0.key == saved.windowKey || $0.label == saved.windowLabel
-            }) else { return saved }
-            return QuotaSelection(provider: saved.provider, windowKey: window.key, windowLabel: window.label)
-        }
+    /// Refreshes the stored display label of each saved selection from the latest
+    /// probe result. Matching is on the window key alone, and the key is never
+    /// rewritten — the result is persisted by `menuBarSelections.didSet`, so a
+    /// selection bound to the wrong window here would outlive the render that
+    /// produced it. Internal so the persisted half is directly testable.
+    func migrateMenuBarSelections() {
+        menuBarSelections = menuBarSelections.map { $0.refreshingLabel(in: snapshots) }
     }
 }

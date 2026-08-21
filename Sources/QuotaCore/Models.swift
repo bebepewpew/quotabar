@@ -25,6 +25,47 @@ public enum Provider: String, CaseIterable, Identifiable, Sendable, Codable {
     }
 }
 
+/// The red, green and blue bytes of a tint written as `RRGGBB`, the form
+/// `Provider.tint` stores.
+///
+/// The parse lives in the core rather than once per front-end because the
+/// front-ends used to disagree about a tint they cannot read: the Linux tray
+/// fell back to a neutral grey, the macOS menu bar to pure black. One
+/// implementation cannot drift from itself.
+public struct TintRGB: Equatable, Sendable {
+    public let red: UInt8
+    public let green: UInt8
+    public let blue: UInt8
+
+    /// What a tint that cannot be parsed draws as: `secondaryLabelColor`,
+    /// opaque. An invisible icon is a worse failure than a wrong colour, so the
+    /// fallback is never black and never transparent.
+    public static let fallback = TintRGB(red: 0x8E, green: 0x8E, blue: 0x93)
+
+    public init(red: UInt8, green: UInt8, blue: UInt8) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+    }
+
+    /// Parses `RRGGBB`, with an optional leading `#`. Anything else is
+    /// ``fallback``.
+    public init(hex: String) {
+        let digits = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        // `UInt32(_:radix:)` accepts a leading sign, so "+12345" would otherwise
+        // parse as 0x012345 — a wrong colour rather than the documented grey.
+        // Six ASCII hex digits is the only form this reads.
+        guard digits.count == 6, digits.allSatisfy({ $0.isASCII && $0.isHexDigit }),
+              let value = UInt32(digits, radix: 16) else {
+            self = .fallback
+            return
+        }
+        self.init(red: UInt8((value >> 16) & 0xFF),
+                  green: UInt8((value >> 8) & 0xFF),
+                  blue: UInt8(value & 0xFF))
+    }
+}
+
 public struct QuotaSelection: Identifiable, Hashable, Codable, Sendable {
     public let provider: Provider
     public let windowKey: String
@@ -118,4 +159,33 @@ public struct QuotaSnapshot: Identifiable, Sendable, Codable {
     }
 
     public static func loading(_ provider: Provider) -> Self { .init(provider: provider) }
+}
+
+/// Resolving a saved menu-bar or tray selection against a fresh probe result.
+///
+/// Shared rather than duplicated in a front-end because it is an identity
+/// decision, not a presentation one: the window key identifies the quota and the
+/// label is display text a provider may reword between releases.
+extension QuotaSelection {
+    /// The window this selection points at, or `nil` when the provider is not
+    /// reporting that key right now.
+    ///
+    /// Matched on the window key alone. Two windows of one provider can share a
+    /// label — a Gemini stats view listing both `Flash` and `gemini-flash` yields
+    /// the keys `flash` and `gemini-flash` under the one display name — so a
+    /// label fallback binds a saved selection to a reading the user never chose.
+    /// A payload written before selections carried a key still resolves, because
+    /// `init(from:)` derives the key from the label on decode.
+    public func window(in snapshots: [QuotaSnapshot]) -> QuotaWindow? {
+        snapshots.first { $0.provider == provider }?.windows.first { $0.key == windowKey }
+    }
+
+    /// The same selection with its display label taken from the current probe
+    /// result, or unchanged when the provider is not reporting that key. The key
+    /// is never rewritten: a renamed window keeps the choice the user made, and an
+    /// absent one is left alone rather than repointed at some other window.
+    public func refreshingLabel(in snapshots: [QuotaSnapshot]) -> QuotaSelection {
+        guard let window = window(in: snapshots) else { return self }
+        return QuotaSelection(provider: provider, windowKey: window.key, windowLabel: window.label)
+    }
 }

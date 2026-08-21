@@ -46,20 +46,11 @@ public struct TrayColor: Equatable, Sendable {
 
     /// Parses `RRGGBB` the way `Provider.tint` stores it, with an optional `#`.
     /// Anything else is a neutral grey: an unparsable tint must still be a
-    /// visible icon, never a transparent or black one.
+    /// visible icon, never a transparent or black one. `TintRGB` owns that rule
+    /// so the tray and the macOS menu bar cannot answer it differently.
     public init(hex: String) {
-        let digits = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
-        // `UInt32(_:radix:)` accepts a leading sign, so "+12345" would otherwise
-        // parse as 0x012345 — a wrong colour rather than the documented grey.
-        // Six ASCII hex digits is the only form this reads.
-        guard digits.count == 6, digits.allSatisfy({ $0.isASCII && $0.isHexDigit }),
-              let value = UInt32(digits, radix: 16) else {
-            self.init(red: 0x8E, green: 0x8E, blue: 0x93)
-            return
-        }
-        self.init(red: UInt8((value >> 16) & 0xFF),
-                  green: UInt8((value >> 8) & 0xFF),
-                  blue: UInt8(value & 0xFF))
+        let rgb = TintRGB(hex: hex)
+        self.init(red: rgb.red, green: rgb.green, blue: rgb.blue)
     }
 
     var bytes: [UInt8] { [red, green, blue, alpha] }
@@ -87,7 +78,9 @@ public enum TrayIcon {
     /// bars stacked and centred vertically; there is no glyph beside them
     /// because 22px carries no legible text without a toolkit. A quota with no
     /// reading yet, and an empty selection, draw the track alone rather than
-    /// nothing at all, so the tray item never becomes invisible.
+    /// nothing at all, so the tray item never becomes invisible; a quota that
+    /// reported 0% used draws a one-pixel stub instead, so the bare track means
+    /// "no reading" and nothing else.
     public static func rasterise(_ quotas: [MenuBarQuota], size: Int = defaultSize) -> TrayBitmap {
         let side = max(1, size)
         var bitmap = TrayBitmap(width: side, height: side)
@@ -123,10 +116,17 @@ public enum TrayIcon {
 
     /// Filled pixels for `usedPercent` of `trackWidth`, rounded to the nearest
     /// pixel. Percentages arrive from CLI output, so they are clamped here too;
-    /// any usage above zero keeps at least one pixel so "barely used" still
-    /// reads differently from "no reading yet".
+    /// every reading from zero upwards keeps at least one pixel, so "nothing
+    /// used yet" and "barely used" both read differently from the bare track,
+    /// which means "no reading" — a failed probe must not look like a healthy
+    /// empty quota.
+    ///
+    /// A value that is not a reading at all is rejected rather than clamped: a
+    /// negative, NaN or infinite percentage draws no fill, because inventing a
+    /// stub — or a full red bar — out of garbage input is worse than showing
+    /// the same "no reading" the probe failure already means.
     static func filledWidth(usedPercent: Double, trackWidth: Int) -> Int {
-        guard trackWidth > 0, usedPercent > 0 else { return 0 }
+        guard trackWidth > 0, usedPercent.isFinite, usedPercent >= 0 else { return 0 }
         let clamped = min(usedPercent, 100)
         let exact = (Double(trackWidth) * clamped / 100).rounded()
         return max(1, min(trackWidth, Int(exact)))
