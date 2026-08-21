@@ -1,8 +1,9 @@
 # Building and validating QuotaBar
 
-Always go through `./quotabar`. It picks the right toolchain per platform, and on
-Linux falls back to the upstream Swift container so a machine without Swift still
-builds. Invoking `swift` or `docker` directly bypasses that and produces
+Always go through `./quotabar`. It picks the right toolchain per platform and
+falls back to the upstream Swift container when the machine has no usable one,
+so a Linux box without Swift still builds and a macOS box without full Xcode
+still tests. Invoking `swift` or `docker` directly bypasses that and produces
 `.build` artifacts owned by the wrong user.
 
 ```sh
@@ -59,24 +60,40 @@ Things worth knowing before you touch it:
 - The report goes to stdout and everything else to stderr, so
   `./quotabar coverage > report.txt` captures the report alone. CI appends it to
   `$GITHUB_STEP_SUMMARY` and uploads the lcov file as an artifact.
-- `llvm-cov` must be the toolchain that wrote the profile, so on Linux without
-  Swift the whole script runs inside the container, not just `swift test`
+- `llvm-cov` must be the toolchain that wrote the profile, so whenever the suite
+  runs in the container the whole script does, not just `swift test`
   (`docker_run` in `./quotabar` runs any command there). Paths you pass, `--lcov`
   included, are then container paths under `/workspace`: keep them relative to
   the repository root.
-- macOS reaches `llvm-cov` through `xcrun`, so `./quotabar coverage` needs full
-  Xcode there for the same reason `./quotabar test` does.
+- macOS reaches `llvm-cov` through `xcrun`, so with full Xcode installed the
+  report is a macOS one. Without it, `./quotabar coverage` takes the container
+  path with the same caveat as `./quotabar test` — no app target in it.
 - The lcov file is a build artifact. Write it somewhere you will not commit.
 
 ## Platform truths worth knowing
 
-- **macOS:** `./quotabar test` needs full Xcode. With only Command Line Tools it
-  refuses, and GitHub Actions is then the only authority. Say so plainly rather
-  than implying the suite ran.
+- **macOS:** full Xcode runs the whole suite, the app target included, and
+  nothing else can. Command Line Tools ship neither XCTest nor Swift Testing, so
+  with only those `./quotabar test` and `./quotabar coverage` run in the
+  container instead when docker is installed, printing the caveat first. Report
+  that as what it is: the app was not tested. With no docker either they refuse
+  with exit 2, GitHub Actions is the only authority, and you say so plainly
+  rather than implying the suite ran.
 - **Linux:** runs natively if Swift is installed, otherwise inside
   `$QUOTABAR_SWIFT_IMAGE` (default `swift:6.3-noble`) via docker. `QuotaBar`, the
   macOS app target, does not exist on Linux — `Package.swift` declares it behind
-  `#if os(macOS)` — so a green Linux run says nothing about the app.
+  `#if os(macOS)` — so a green Linux run says nothing about the app, and neither
+  does a green container run on macOS.
+- **The container shares `.build` with the host**, because it bind-mounts the
+  repository. SwiftPM keeps products in per-triple subdirectories, so the two do
+  not overwrite each other, but they do share the manifest cache and the
+  `debug`/`release` symlinks: alternating between a host build and a container
+  run on the same machine can cost a rebuild.
+- `scripts/wrapper-tests` covers that selection logic — which toolchain the
+  wrapper picks, what it forwards and what it refuses — against a stubbed `uname`
+  and `docker`, so it compiles nothing and starts no container. Run it after
+  editing `./quotabar`; CI runs it in the `Repository policy` job. The branches
+  behind an installed full Xcode are the one thing it cannot reach.
 - `--static-swift-stdlib` links only in **release**; a debug static link fails on
   missing ICU symbols.
 
