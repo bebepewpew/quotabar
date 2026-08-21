@@ -102,6 +102,64 @@ final class ProbeParsingEdgeTests: XCTestCase {
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [60])
     }
 
+    /// Gemini omits the `Resets:` clause from a bucket it has not computed yet.
+    /// The row parser used to read straight across the line break to find one,
+    /// and reported the *next* model's percentage under the unfinished name.
+    func testGeminiParseKeepsARowWithoutAResetFromClaimingTheNextRowsPercentage() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let transcript = """
+        Model usage
+        Pro ▬▬ 3%
+        Flash ▬▬ 97% Resets: 10:05 AM (16h 18m)
+        (Press Esc to close)
+        """
+        let snapshot = try GeminiTerminalProbe.parse(transcript, now: now)
+        XCTAssertEqual(snapshot.windows.map(\.key), ["flash"], "an unfinished row must not borrow the row below it")
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [97])
+        XCTAssertEqual(try XCTUnwrap(snapshot.windows[0].resetAt).timeIntervalSince(now), 58_680)
+
+        // The same reach, one line shorter: a bare model name is not a row.
+        let bare = try GeminiTerminalProbe.parse("""
+        Model usage
+        Pro
+        Flash ▬▬ 97% Resets: 10:05 AM (16h 18m)
+        """, now: now)
+        XCTAssertEqual(bare.windows.map(\.key), ["flash"])
+    }
+
+    /// A narrow terminal breaks the reset parenthetical across the line it
+    /// opened on. That wrap is a supported row form, so confining the row to a
+    /// single line must not cost it.
+    func testGeminiParseAcceptsAResetParentheticalThatWrapsOnce() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let snapshot = try GeminiTerminalProbe.parse("""
+        Model usage
+        gemini-3.5-flash ▬▬▬ 4.5% Resets: 10:05 AM (16h
+        18m)
+        (Press Esc to close)
+        """, now: now)
+        XCTAssertEqual(snapshot.windows.map(\.key), ["gemini-3.5-flash"])
+        XCTAssertEqual(try XCTUnwrap(snapshot.windows[0].resetAt).timeIntervalSince(now), 58_680)
+    }
+
+    /// The parse runs after the process deadline is already satisfied, so
+    /// nothing bounds it, and `QuotaStore.refresh` holds `isRefreshing` until it
+    /// returns. Rows that open like a model row and never finish used to cost
+    /// quadratic time in three separate ways; 186 KB took about a minute.
+    func testGeminiParseRejectsRowsThatNeverFinishWithoutBacktrackingForever() {
+        let unfinished = ["Pro ▬▬▬ 3% used of the window\n",  // never reaches Resets:
+                          "Pro ▬▬ 3% Resets: 10:05 AM soon\n",  // never reaches an open paren
+                          "Pro ▬▬ 3% Resets: 10:05 AM (16h\n"]  // never closes the paren
+        for row in unfinished {
+            let transcript = String(repeating: row, count: 186_000 / row.count)
+            XCTAssertGreaterThan(transcript.count, 180_000)
+            let started = Date()
+            XCTAssertThrowsError(try GeminiTerminalProbe.parse(transcript, now: Date()))
+            XCTAssertLessThan(Date().timeIntervalSince(started), 1,
+                              "\(transcript.count) characters of unfinished rows took too long to reject")
+        }
+    }
+
     /// Coming back with nothing has two different causes and two different
     /// answers: a row that a redraw cut in half is not the same complaint as a
     /// screen that never held quota at all.
@@ -195,6 +253,23 @@ final class ProbeParsingEdgeTests: XCTestCase {
         let output = "Current session: 120% used · resets Aug 22 at 2am (Europe/Warsaw)"
         let snapshot = try ClaudePrintProbe.parse(output, now: Date())
         XCTAssertEqual(snapshot.windows.map(\.usedPercent), [100])
+    }
+
+    /// A pool name and a time-zone name are display text on the row's own line.
+    /// Letting either cross the line break smuggled a newline into a window
+    /// label, and made an unclosed parenthesis send every attempt scanning the
+    /// rest of the transcript for a `)`: 180 KB of it used to take seconds.
+    func testClaudeParseConfinesARowToASingleLine() {
+        XCTAssertEqual(claudeParseFailure("Current week (all\nmodels): 50% used · resets Aug 22 at 2am (Europe/Warsaw)"),
+                       "Claude returned an unreadable /usage response.")
+        XCTAssertEqual(claudeParseFailure("Current week: 50% used · resets Aug 22 at 2am (Europe/\nWarsaw)"),
+                       "Claude returned an unreadable /usage response.")
+
+        let transcript = String(repeating: "Current week (aaaaaaaaaa: 50% used · resets x\n", count: 4_000)
+        let started = Date()
+        XCTAssertEqual(claudeParseFailure(transcript), "Claude returned an unreadable /usage response.")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1,
+                          "\(transcript.count) characters of unclosed parentheses took too long to reject")
     }
 
     /// Coming back with no rows is either a sign-in prompt, which is

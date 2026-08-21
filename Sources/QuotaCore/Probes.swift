@@ -220,7 +220,14 @@ struct GeminiTerminalProbe: QuotaProbe {
 
     static func parse(_ raw: String, now: Date) throws -> QuotaSnapshot {
         let output = normalize(raw)
-        let modelPattern = #"(?ims)^\s*(Flash Lite|Flash|Pro|gemini-[a-z0-9._-]+)\s+.*?(\d{1,3}(?:\.\d+)?)%\s+Resets:\s+.*?\(([^)]*)\)"#
+        // Every run here is confined to one line, and the parenthetical to two.
+        // A dotall `.*?` between the model name and the percent let a row
+        // without a `Resets:` clause reach into the row below and report the
+        // neighbour's percentage under its own name, and made a transcript of
+        // rows that never complete cost quadratic time to reject. `[^\S\n]` is
+        // `\s` minus the newline; the reset parenthetical may still wrap once,
+        // which is how a narrow terminal breaks `(16h 18m)`.
+        let modelPattern = #"(?im)^[^\S\n]*(Flash Lite|Flash|Pro|gemini-[a-z0-9._-]+)[^\S\n]+[^\n]*?(\d{1,3}(?:\.\d+)?)%[^\S\n]+Resets:[^\S\n]+[^\n]*?\(([^)\n]*(?:\n[^)\n]*)?)\)"#
         let modelRegex = try NSRegularExpression(pattern: modelPattern)
         var windows: [QuotaWindow] = []
         var seen = Set<String>()
@@ -318,7 +325,10 @@ struct ClaudePrintProbe: QuotaProbe {
 
     static func parse(_ output: String, now: Date) throws -> QuotaSnapshot {
         var windows: [QuotaWindow] = []
-        let pattern = #"(?im)^Current (session|week)(?: \(([^)]+)\))?:\s*(\d{1,3}(?:\.\d+)?)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)\s*$"#
+        // `[^)\n]` rather than `[^)]`: an unclosed parenthesis used to send
+        // each attempt scanning the rest of the transcript for a `)`, which is
+        // quadratic over untrusted output. A row is one line.
+        let pattern = #"(?im)^Current (session|week)(?: \(([^)\n]+)\))?:\s*(\d{1,3}(?:\.\d+)?)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)\n]+)\)\s*$"#
         let regex = try NSRegularExpression(pattern: pattern)
         for match in regex.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
             guard let kindRange = Range(match.range(at: 1), in: output),
