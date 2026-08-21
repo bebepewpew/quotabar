@@ -223,6 +223,57 @@ jobs:
           done
           test -s .github/ISSUE_TEMPLATE/config.yml
           grep -q '^blank_issues_enabled:' .github/ISSUE_TEMPLATE/config.yml
+      # The Linux job is the expensive one, and both of these are about the one
+      # step that now carries it. They need no toolchain, so they belong here
+      # rather than inside the job they describe -- and here they also run for a
+      # change that skips the build jobs entirely.
+      - name: Validate the Linux job runs the suite once
+        run: |
+          # `scripts/coverage` runs `swift test --enable-code-coverage`, so a
+          # plain `swift test` step beside it is a second compile of the test
+          # bundle and a second run of every test. Count the suite invocations
+          # inside that job only; the macOS job legitimately has its own. Zero
+          # fails too: that is a job that stopped testing, or was renamed
+          # without this check following it.
+          runs="$(awk '
+            /^  [a-z][a-z0-9-]*:/ { inside = ($0 ~ /^  build-and-test-linux:/) }
+            !inside || $1 ~ /^#/ { next }
+            $1 == "run:" && $2 == "swift" && $3 == "test" { n++ }
+            /scripts\/coverage/ { n++ }
+            END { print n + 0 }
+          ' .github/workflows/ci.yml)"
+          if [ "$runs" -ne 1 ]; then
+            echo "The Linux job must run the suite exactly once; found $runs." >&2
+            exit 1
+          fi
+
+          # And that one run has to be able to fail the job. A stub `swift` on
+          # PATH stands in for a red suite. It fails `swift test` with a status
+          # nothing else produces and succeeds at everything else, so the two
+          # assertions below cannot be satisfied by the script dying later for
+          # some other reason: scripts/coverage must exit with the suite's own
+          # status, and the test names must be on stderr where the log shows
+          # them.
+          stub="$RUNNER_TEMP/stub-toolchain"
+          mkdir -p "$stub"
+          cat > "$stub/swift" <<'STUB'
+          #!/bin/sh
+          if [ "${1-}" = test ]; then
+              echo "Test Case 'ExampleTests.testFails' failed (0.001 seconds)."
+              exit 42
+          fi
+          exit 0
+          STUB
+          chmod +x "$stub/swift"
+          status=0
+          PATH="$stub:$PATH" scripts/coverage \
+            > "$RUNNER_TEMP/coverage-out" 2> "$RUNNER_TEMP/coverage-err" \
+            || status=$?
+          if [ "$status" -ne 42 ]; then
+            echo "scripts/coverage must exit with the suite's status 42, got $status." >&2
+            exit 1
+          fi
+          grep -q 'ExampleTests.testFails' "$RUNNER_TEMP/coverage-err"
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)
@@ -266,16 +317,21 @@ jobs:
         uses: actions/checkout@v7
       - name: Build
         run: swift build
-      - name: Test
-        run: swift test
       - name: CLI smoke test
         run: |
           swift run quotabar --version
           swift run quotabar --help
-      # Enforced. The threshold went in only once the suite actually cleared it:
-      # main was at 95.18% region / 98.27% line when this was switched on, so it
-      # has never been a gate that main could not pass.
-      - name: Coverage
+      # This is the job's only run of the suite. `scripts/coverage` runs
+      # `swift test --enable-code-coverage`, and instrumentation changes the
+      # compile flags, so a plain `swift test` step beside it built the test
+      # bundle twice and ran every test twice. The script sends everything but
+      # the report to stderr and propagates a failing `swift test`, so a broken
+      # test still fails this step with its name in the log.
+      #
+      # The coverage floor is enforced. The threshold went in only once the
+      # suite actually cleared it: main was at 95.18% region / 98.27% line when
+      # this was switched on, so it has never been a gate main could not pass.
+      - name: Test and coverage
         env:
           MINIMUM_REGION: '90'
         run: |

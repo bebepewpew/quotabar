@@ -118,6 +118,10 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
   line in that job.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
+- **`swift test` beside `scripts/coverage` runs the Linux suite twice.** The
+  script's body is `swift test --enable-code-coverage`, and instrumentation is a
+  different compile, so the second step was a second build of the test bundle and
+  a second execution of every test. The `policy` job now counts them.
 - **`always()` on the gate reports a red check for a cancelled run.** The
   `concurrency` group cancels a superseded run every time a label lands just
   after `opened`, and `always()` runs even then — so the gate failed on a run
@@ -150,12 +154,24 @@ The only credentials in play are `GITHUB_TOKEN` and the OIDC identity that keyle
 signing derives from. There is no long-lived secret, and adding one is a
 supply-chain decision that belongs in the pull request, not in repository settings.
 
-## The coverage gate
+## The coverage gate, and the Linux job's single test run
 
 The Linux job runs `scripts/coverage --lcov coverage.lcov`, appends the report to
 the step summary, reads the `TOTAL` row's fourth column with `awk`, and fails below
 `MINIMUM_REGION: '90'`. It measures `QuotaCore` and `QuotaTray` only — the
 libraries the test binary links.
+
+That step, `Test and coverage`, is also **the job's only run of the suite**. The
+script's body is `swift test --enable-code-coverage`, and instrumentation changes
+the compile flags, so the plain `swift test` step that used to sit beside it built
+the test bundle a second time and ran every test a second time. A red test still
+fails the job by name: the script runs under `set -eu`, propagates the exit status,
+and sends everything but the report to stderr, so the suite output is in the log.
+Two checks in the `policy` job hold that shape — one counts the suite invocations
+inside the Linux job and requires exactly one, the other puts a stub `swift` on
+`PATH` that fails only `swift test` and requires `scripts/coverage` to exit with
+that suite's own status and to leave the test names on stderr. Neither needs a
+toolchain, so they also run for a change that skips the build jobs.
 
 The threshold was switched on only once the suite cleared it: 95.18% region and
 98.27% line at the time. Raise it when the code genuinely supports a higher number.
