@@ -17,7 +17,13 @@ log, or store provider credentials or complete login prompts.
 - Never commit or push directly to `main`. Create a focused branch and open a
   pull request for every change.
 - Merge pull requests with **Squash and merge** only. Keep the PR title concise
-  and imperative because it becomes the commit subject on `main`.
+  and imperative because it becomes the commit subject on `main` and the
+  changelog line in the release notes.
+- Label every pull request with exactly one category label, applied when the
+  pull request is opened: `feature`, `fix`, `security`, `performance`,
+  `tooling`, `ci`, `documentation`, `docs`, `dependencies`, or
+  `skip changelog`. The `Labels` CI job fails a pull request that carries none
+  of them or more than one.
 - Preserve unrelated and pre-existing working-tree changes. Do not rewrite,
   delete, or stage them.
 - Keep commits focused and use imperative commit subjects.
@@ -25,6 +31,15 @@ log, or store provider credentials or complete login prompts.
 - Do not commit `.build`, credentials, terminal captures containing personal
   data, generated review reports, or other local artifacts.
 - Do not weaken CI, hooks, or branch protection to make a change pass.
+
+### Release notes
+
+Release notes are generated from merged pull requests and grouped by label, as
+`.github/release.yml` configures. Give every pull request exactly one category
+label from the table in `.github/CONTRIBUTING.md`; an unlabelled one still
+appears, under the catch-all Other section. Because the repository squash-merges,
+the pull-request title is the changelog line — write it for someone reading the
+release, not for the branch.
 
 ## Implementation constraints
 

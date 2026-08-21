@@ -33,22 +33,26 @@ and write its caption at the same time, and delete the placeholder it replaces.
 | --- | --- |
 | `Package.swift`, `Sources/`, `Tests/` | The SwiftPM package: every target and its tests |
 | `Resources/` | `Info.plist` and the icons the macOS app bundle is built from |
-| `Formula/` | The Homebrew formula for the `quotabar` command |
-| `packaging/` | The nfpm configuration the release workflow builds the `.deb` and `.rpm` from |
+| `packaging/` | What the release workflow builds distributables from: the nfpm configuration for the `.deb` and `.rpm`, the container `Dockerfile`, and `homebrew/quotabar.rb` |
 | `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` |
-| `docs/agent-guides/` | The long-form guidance the agent tooling points at |
-| `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `CONTRIBUTING.md`, `SECURITY.md` |
+| `docs/` | [`development.md`](docs/development.md) for building and testing from a checkout, [`container.md`](docs/container.md) for the published image, and `agent-guides/` for the long-form guidance the agent tooling points at |
+| `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `ISSUE_TEMPLATE/`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md` |
 | `.claude/`, `.codex/`, `.githooks/` | Per-tool wrappers and the repository hooks |
 | `quotabar` | The wrapper that picks a toolchain: `./quotabar build`, `test`, `coverage`, `run`, `cli` |
 
-Two of those cannot move, so please do not re-litigate them:
+One of those cannot move, so please do not re-litigate it:
 
-- **`Formula/` stays at the top level.** Homebrew discovers formulae only in
-  `Formula/`, `HomebrewFormula/`, or the repository root. Nesting it anywhere
-  else breaks `brew tap`.
 - **`Package.swift`, `Sources/`, `Tests/` and `Resources/` stay where they
   are.** SwiftPM requires the manifest at the package root and finds target
   sources by convention.
+
+The Homebrew formula is `packaging/homebrew/quotabar.rb`, and that directory is
+not a tap — Homebrew installs from
+[`bebepewpew/homebrew-tap`](https://github.com/bebepewpew/homebrew-tap), which
+the release workflow renders this file into. It is kept here because a formula's
+`install` and `test` blocks execute on every user's machine, so they belong
+behind this repository's review and branch protection; the tap is generated
+output. See [Homebrew](#macos--homebrew) below.
 
 `CONTRIBUTING.md` and `SECURITY.md` live under `.github/` deliberately: GitHub
 still surfaces both from there, and the root stays short enough to read.
@@ -135,18 +139,25 @@ record it — the macOS app, `quotabar --watch`, or each one-shot invocation.
 
 Released binaries and packages are published on the
 [releases page](https://github.com/bebepewpew/quotabar/releases). To
-build from a checkout instead, skip to [Build and run](#build-and-run).
+build from a checkout instead, see [From source](#from-source).
+
+Every artifact is signed and checksummed. The commands below install without
+checking that — see [Verifying a release](#verifying-a-release) for the one extra
+step, which is worth taking on anything you are about to run as root.
 
 ### macOS — Homebrew
 
 ```sh
-brew tap bebepewpew/quotabar https://github.com/bebepewpew/quotabar
+brew tap bebepewpew/tap
 brew install quotabar
 ```
 
-The explicit URL is what lets the formula live in this repository instead of a
-separate `homebrew-quotabar` tap. If `quotabar` is ambiguous on your machine,
-name it in full: `brew install bebepewpew/quotabar/quotabar`.
+No URL is needed: Homebrew maps `user/name` to `github.com/user/homebrew-name`,
+which is the [`homebrew-tap`](https://github.com/bebepewpew/homebrew-tap)
+tap. The release workflow renders `packaging/homebrew/quotabar.rb` into that
+tap and then audits, installs and tests it on a macOS runner — pushing only if
+all three pass, so a release cannot publish a formula that does not build. If `quotabar` is ambiguous on your machine, name it in full:
+`brew install bebepewpew/tap/quotabar`.
 
 The formula builds from source on purpose. A downloaded Mach-O that Apple has
 not notarized picks up the `com.apple.quarantine` attribute and Gatekeeper
@@ -156,15 +167,23 @@ for the Swift 6 toolchain.
 
 ### Linux — `.deb` and `.rpm`
 
-Download the package for your distribution from the release, then:
-
 ```sh
+VERSION=0.1.0
+BASE=https://github.com/bebepewpew/quotabar/releases/download/v$VERSION
+
 # Debian, Ubuntu
-sudo apt install ./quotabar_<version>_amd64.deb
+curl -fLO "$BASE/quotabar_${VERSION}_amd64.deb"
+sudo apt install "./quotabar_${VERSION}_amd64.deb"
 
 # Fedora, RHEL
-sudo rpm -i quotabar-<version>.x86_64.rpm
+curl -fLO "$BASE/quotabar-${VERSION}.x86_64.rpm"
+sudo rpm -i "quotabar-${VERSION}.x86_64.rpm"
 ```
+
+Set `VERSION` to the release you want; the
+[releases page](https://github.com/bebepewpew/quotabar/releases/latest) has the
+current one. The filenames are not stable across versions, which is why there is
+no `releases/latest/download/…` shortcut here.
 
 Both install `/usr/bin/quotabar`. The binary is linked with
 `--static-swift-stdlib`, so it carries the Swift runtime and needs no Swift
@@ -174,15 +193,34 @@ the first is used only by the Gemini probe, the second only by `--notify`.
 ### Any platform — static tarball
 
 ```sh
-tar -xzf quotabar-<version>-linux-x86_64.tar.gz
-sudo install -m 0755 quotabar-<version>-linux-x86_64/quotabar /usr/local/bin/
+VERSION=0.1.0
+BASE=https://github.com/bebepewpew/quotabar/releases/download/v$VERSION
+
+# Linux
+NAME=quotabar-${VERSION}-linux-x86_64
+# macOS
+NAME=quotabar-${VERSION}-macos-universal
+
+curl -fLO "$BASE/${NAME}.tar.gz"
+tar -xzf "${NAME}.tar.gz"
+sudo install -m 0755 "${NAME}/quotabar" /usr/local/bin/
 ```
 
-The macOS build is published the same way as
-`quotabar-<version>-macos-universal.tar.gz`. Each tarball holds the `quotabar`
-binary alongside `README.md` and `LICENSE`. Prefer the Homebrew tap on macOS:
-a browser download picks up `com.apple.quarantine` and Gatekeeper then blocks
-the unnotarized binary on first run.
+Set `NAME` to whichever of the two matches your platform. Each tarball holds the
+`quotabar` binary alongside `README.md` and `LICENSE`. Prefer the Homebrew tap on
+macOS: a browser download picks up `com.apple.quarantine` and Gatekeeper then
+blocks the unnotarized binary on first run.
+
+### Container
+
+```sh
+docker run --rm ghcr.io/bebepewpew/quotabar:latest --json
+```
+
+Tagged with the release version as well as `latest`. The image is only useful
+for the CLI's own output — it cannot see provider CLIs or credentials on the
+host unless you mount them, which QuotaBar deliberately does not do for you.
+[`docs/container.md`](docs/container.md) covers what to mount and why.
 
 ### Verifying a release
 
@@ -192,34 +230,18 @@ identity and carries a GitHub build provenance attestation, and `SHA256SUMS`
 covers the whole set. Each release's notes carry the exact `cosign verify-blob`
 and `gh attestation verify` commands for that version.
 
-## Build and run
-
-### macOS
+### From source
 
 ```sh
 git clone https://github.com/bebepewpew/quotabar.git
 cd quotabar
-./quotabar run
+./quotabar run          # macOS: builds and launches the menu-bar app
+./quotabar cli --json   # Linux and macOS: builds and runs the command
 ```
 
-The wrapper builds an ad-hoc signed `.build/QuotaBar.app` agent bundle and runs
-it as a menu-bar app. Build without launching it with `./quotabar build`. The
-wrapper also selects a compatible installed macOS SDK when Command Line Tools
-contains a compiler/SDK version mismatch.
-
-### Linux
-
-```sh
-git clone https://github.com/bebepewpew/quotabar.git
-cd quotabar
-./quotabar cli --json
-```
-
-With a Swift toolchain installed, this is `swift run quotabar`. Without one — as
-on Arch, which has no official Swift package — the wrapper builds a statically
-linked binary inside the upstream `swift:6.3-noble` container and then runs it on
-the host, where the provider CLIs and your session bus actually live. Override
-the image with `QUOTABAR_SWIFT_IMAGE`.
+The wrapper picks the toolchain for you, and on Linux without Swift installed it
+builds in a container. [`docs/development.md`](docs/development.md) has the
+detail, along with how to run the tests.
 
 ## Usage
 
@@ -284,33 +306,6 @@ causes:
 A failed provider never clears the values QuotaBar already had; the last
 successful reading stays visible with the error beside it.
 
-## Porting to another platform
-
-`QuotaCore` carries no UI framework, and the platform seams are `StateStore`,
-`QuotaNotificationSink` and `QuotaProbe`. A new platform means a new front-end
-target plus implementations of those, declared in `Package.swift` the way the
-macOS app already is.
-
-What Windows would still need, none of which is in the way today:
-
-- process termination via a Job Object, where POSIX uses `setpgid` and a
-  process-group `kill`;
-- `LockFileEx` in `JSONFileStateStore` in place of `flock`;
-- `ENABLE_VIRTUAL_TERMINAL_PROCESSING` before ANSI colour means anything;
-- a toast notification sink instead of `notify-send`;
-- a native pseudo-terminal (ConPTY) for the Gemini probe, which is the only
-  part that genuinely needs one. Codex and Claude Code already run over pipes.
-
-## Tests
-
-```sh
-./quotabar test
-```
-
-On macOS this requires the full Xcode toolchain; the wrapper reports a clear
-error when the standalone Command Line Tools installation does not include
-XCTest. On Linux it runs natively or in the container, matching `./quotabar build`.
-
 ## Privacy and behavior
 
 All probes execute installed CLIs locally. Gemini runs inside a fixed-size
@@ -346,3 +341,39 @@ All changes go through pull requests with required CI. Read
 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) and the shared human/AI
 rules in [AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone
 (and `scripts/install-codex-skills` if you use Codex).
+[`docs/development.md`](docs/development.md) covers building, testing, and what a
+new platform front-end would take.
+
+## Pull requests
+
+The repository squash-merges, and merge commits and rebase merges are disabled.
+One pull request therefore becomes exactly one commit on `main` and exactly one
+line in the release notes, and the **pull-request title** is that line — not the
+branch name, and not the commit messages on the branch. Write it concise and
+imperative: "Bound the Gemini probe deadline", not "gemini fixes".
+
+Every pull request also carries exactly **one** category label, applied when the
+pull request is opened. The `Labels` CI job fails the pull request until exactly
+one is present. The label decides which section the title appears under, exactly
+as [`.github/release.yml`](.github/release.yml) configures:
+
+| Label | Release-notes section |
+| --- | --- |
+| `feature` | Added |
+| `fix` | Fixed |
+| `security` | Security |
+| `performance` | Performance |
+| `tooling` | Tooling |
+| `ci` | Tooling |
+| `documentation` | Documentation |
+| `docs` | Documentation |
+| `dependencies` | Dependencies |
+| `skip changelog` | none — the pull request is left out of the notes entirely |
+
+Use `skip changelog` for a change that should not appear in the release notes at
+all. An unlabelled pull request is not dropped: it lands in the catch-all
+**Other** section, which is a safety net rather than a destination — a change
+that reaches a release under Other is a change nobody categorised.
+
+[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) lists the same labels with
+the colours to create them in.
