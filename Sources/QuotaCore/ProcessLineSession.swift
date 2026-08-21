@@ -22,6 +22,7 @@ final class ProcessLineSession: @unchecked Sendable {
     private var buffer = ""
     private var pending: [String] = []
     private var closed = false
+    private var tornDown = false
 
     init(executable: String, arguments: [String], currentDirectory: URL? = nil) throws {
         // Before the first write can reach a child that may already be gone.
@@ -109,27 +110,95 @@ final class ProcessLineSession: @unchecked Sendable {
         return pending.isEmpty ? nil : pending.removeFirst()
     }
 
+    /// Whether the direct child is still running. Teardown takes a different
+    /// path once it has exited and been reaped, and a test aiming at that path
+    /// has to be able to wait for it rather than guess at the timing.
+    var isChildRunning: Bool { process.isRunning }
+
     /// Terminates the complete process group. A bare `terminate()` would leave
     /// anything the child spawned running, and a child that ignores SIGTERM
     /// would linger past the caller's deadline.
+    ///
+    /// The child exiting is not the tree exiting: `codex app-server` can spawn
+    /// something of its own and leave, and that grandchild stays in the group
+    /// `init` created, still holding the stdout it inherited. Firing
+    /// `kill(-pid, …)` unconditionally once the child has been reaped would be
+    /// the wrong answer though — the kernel is free to hand that number to an
+    /// unrelated process — so the reaped path is gated on evidence that the
+    /// tree is still ours: the group still has a member, and the read end has
+    /// not reached end of file. `CommandRunner.run` reads the same evidence off
+    /// its readers when the command is gone but its pipes are still held.
     func close() {
-        output.fileHandleForReading.readabilityHandler = nil
+        // Teardown runs once. The probes call `close()` from a `defer` that can
+        // follow an earlier one, and a second pass would wait on a handler that
+        // is already gone before signalling a group that is already dead.
+        condition.lock()
+        let alreadyTornDown = tornDown
+        tornDown = true
+        condition.unlock()
+        guard !alreadyTornDown else { return }
+
         try? input.fileHandleForWriting.close()
 
         let pid = process.processIdentifier
         if process.isRunning {
-            #if !os(Windows)
-            if pid > 1 { _ = kill(-pid, SIGTERM) }
-            #endif
+            signalGroup(pid, SIGTERM)
             process.terminate()
-            if !waitForExit(within: 2) {
-                #if !os(Windows)
-                if pid > 1 { _ = kill(-pid, SIGKILL) }
-                #endif
+            if !waitForExit(within: 2) { signalGroup(pid, SIGKILL) }
+        } else if groupHasMembers(pid) && !waitForEndOfOutput(within: 0.25) {
+            // Grandchild territory. The waits are shorter than the running-child
+            // path's so that the whole teardown still fits inside its two
+            // seconds, and each one ends as soon as the pipe is finally
+            // released rather than running to its bound.
+            signalGroup(pid, SIGTERM)
+            if !waitForEndOfOutput(within: 0.75) {
+                signalGroup(pid, SIGKILL)
+                _ = waitForEndOfOutput(within: 0.75)
             }
         }
+        // Last, not first: while the handler is live it keeps draining, so a
+        // descendant blocked writing into a full pipe can still reach its exit.
+        output.fileHandleForReading.readabilityHandler = nil
         try? output.fileHandleForReading.close()
         CommandRunner.deregisterLiveChild(pid)
+    }
+
+    /// Signals the child's complete process group. `init` gave the child a
+    /// group of its own, so this reaches the grandchildren too; a bare signal
+    /// to the child would orphan them.
+    private func signalGroup(_ pid: pid_t, _ signal: Int32) {
+        guard pid > 1 else { return }
+        #if !os(Windows)
+        _ = kill(-pid, signal)
+        #endif
+    }
+
+    /// Whether anything is left in the child's process group. Signal `0` is
+    /// delivered to nobody and only reports reachability, which is how a pid
+    /// that has been reaped and reissued elsewhere is told apart from one whose
+    /// group this process still owns: a group that is gone answers `ESRCH`, and
+    /// one that is not ours to signal answers `EPERM`. Neither gets a signal.
+    private func groupHasMembers(_ pid: pid_t) -> Bool {
+        guard pid > 1 else { return false }
+        #if os(Windows)
+        return false
+        #else
+        return kill(-pid, 0) == 0
+        #endif
+    }
+
+    /// Waits for the read end to reach end of file, which happens only when
+    /// every copy of the write end is closed — the child's, and every one it
+    /// passed on. Returning false means the pipe is still held after the child
+    /// itself is gone, which is the evidence a descendant is still alive.
+    private func waitForEndOfOutput(within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        condition.lock()
+        defer { condition.unlock() }
+        while !closed {
+            guard condition.wait(until: deadline) else { return closed }
+        }
+        return true
     }
 
     private func waitForExit(within seconds: TimeInterval) -> Bool {

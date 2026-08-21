@@ -11,12 +11,12 @@ import Glibc
 /// end of file before the awaited line ever arrives, a final line with no
 /// trailing newline, a deadline that expires while the child is halfway through
 /// writing one, a write attempted after the pipe is gone, and a teardown facing
-/// a child that ignores `SIGTERM`.
+/// a child that ignores `SIGTERM` or that exited leaving a grandchild behind.
 ///
 /// `QuotaCoreTests` covers the interleaved request/response exchange the Codex
-/// probe depends on. Everything here drives `/bin/sh` and `/bin/echo` with
-/// sub-second deadlines, so the real pipe and signal behaviour is exercised
-/// without the suite getting slow.
+/// probe depends on. Everything here drives `/bin/sh`, `/bin/echo` and — for
+/// the grandchild cases — `bash`, with sub-second deadlines, so the real pipe
+/// and signal behaviour is exercised without the suite getting slow.
 final class ProcessLineSessionTests: XCTestCase {
     private var scratch = URL(fileURLWithPath: NSTemporaryDirectory())
 
@@ -208,6 +208,85 @@ final class ProcessLineSessionTests: XCTestCase {
                       "a child that ignores SIGTERM was left running after close()")
     }
 
+    /// The case #76 was filed for. A provider CLI that hands its work to a
+    /// helper and exits leaves that grandchild in the process group `init`
+    /// created, still holding the stdout it inherited. Teardown used to keep
+    /// every signal inside `if process.isRunning`, so once the direct child had
+    /// been reaped nothing was signalled at all and the grandchild outlived the
+    /// app that started it.
+    func testCloseTerminatesAGrandchildThatOutlivedTheChild() throws {
+        let shell = try systemBinary("sh")
+        let childPid = scratch.appendingPathComponent("child.pid").path
+        let grandchildPid = scratch.appendingPathComponent("grandchild.pid").path
+        let session = try ProcessLineSession(executable: shell, arguments: [
+            try grandchildScript(childPidFile: childPid,
+                                 grandchildPidFile: grandchildPid,
+                                 holdingOutput: true)
+        ])
+
+        var transcript: [String] = []
+        XCTAssertEqual(session.waitForLine(matching: { $0 == "ready" },
+                                           before: Date().addingTimeInterval(3),
+                                           transcript: &transcript),
+                       "ready")
+        let child = try readPid(at: childPid)
+        let grandchild = try readPid(at: grandchildPid)
+        XCTAssertEqual(getpgid(grandchild), child,
+                       "the grandchild has to be in the session's group for this to test anything")
+        XCTAssertTrue(waitUntil(3) { !session.isChildRunning },
+                      "the direct child has to be gone before close() for this to be the reaped path")
+
+        let started = Date()
+        session.close()
+        // Repeating it is what the probes do from nested `defer`s, and the
+        // second pass must not wait on a stream nobody is reading any more.
+        session.close()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2,
+                          "teardown stays inside the bound the running-child path already spends")
+        XCTAssertTrue(waitUntil(3) { self.hasExited(grandchild) },
+                      "a grandchild holding the session's stdout was left running after close()")
+    }
+
+    /// The other half of that. A reaped pid belongs to the kernel again, so the
+    /// only thing that justifies signalling its group is the stdout still being
+    /// held: that pipe can only be held by something the child passed it to. A
+    /// descendant that let go of the pipe is deliberately left alone rather
+    /// than risk a signal landing on whatever now owns the number.
+    func testCloseSignalsNothingWhenTheReapedChildLeftNoOneHoldingTheOutput() throws {
+        let shell = try systemBinary("sh")
+        let childPid = scratch.appendingPathComponent("child.pid").path
+        let grandchildPid = scratch.appendingPathComponent("grandchild.pid").path
+        let session = try ProcessLineSession(executable: shell, arguments: [
+            try grandchildScript(childPidFile: childPid,
+                                 grandchildPidFile: grandchildPid,
+                                 holdingOutput: false)
+        ])
+
+        var transcript: [String] = []
+        XCTAssertNil(session.waitForLine(matching: { _ in false },
+                                         before: Date().addingTimeInterval(3),
+                                         transcript: &transcript),
+                     "the stream ends when the child exits, because nothing else holds the write end")
+        XCTAssertEqual(transcript, ["ready"])
+        let child = try readPid(at: childPid)
+        let survivor = try readPid(at: grandchildPid)
+        XCTAssertEqual(getpgid(survivor), child,
+                       "a signal to the group would reach the survivor, which is what must not happen")
+        XCTAssertTrue(waitUntil(3) { !session.isChildRunning },
+                      "the direct child has to be gone before close() for this to be the reaped path")
+
+        let started = Date()
+        session.close()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1,
+                          "there is nothing to wait for once the stream has already ended")
+        // Long enough for a SIGTERM to have been delivered and acted on.
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertFalse(hasExited(survivor),
+                       "close() signalled a process group it no longer has any claim to")
+        // Nothing else will: it is not this process's child to wait on.
+        _ = kill(survivor, SIGKILL)
+    }
+
     // MARK: - Helpers
 
     private func systemBinary(_ name: String) throws -> String {
@@ -218,12 +297,69 @@ final class ProcessLineSessionTests: XCTestCase {
         return path
     }
 
+    /// A child that spawns a grandchild and exits, the shape a provider CLI
+    /// takes when it hands its work to a helper. The grandchild is forked only
+    /// after a pause: the session sets the child's process group once `run()`
+    /// has returned, and anything forked before that would land in this
+    /// process's group instead and prove nothing.
+    ///
+    /// `holdingOutput` decides whether the grandchild keeps the stdout it
+    /// inherited or redirects it away. That pipe is the only evidence teardown
+    /// has left once the child itself has been reaped.
+    ///
+    /// The grandchild drops every inherited descriptor above stdio, which is
+    /// what a helper meaning to outlive its launcher does anyway and is also
+    /// what makes this reach the reaped path on Linux: swift-corelibs-foundation
+    /// watches a socket it passes to the child, so a grandchild that keeps it
+    /// open holds `Process.isRunning` at true for as long as it lives — measured
+    /// here as the child sitting in state `Z` while Foundation still called it
+    /// running. Darwin reports the exit either way, so the loop is a no-op cost
+    /// there. `/dev/fd` names the open ones on both platforms, which a fixed
+    /// range cannot: the whole suite has far more descriptors open than one test
+    /// does, and Foundation's socket lands well above where a short range stops.
+    /// It is `bash`, not `sh`: dash takes only single-digit descriptors in a
+    /// redirection and reads `exec 30>&-` as a request to run a program called
+    /// `30`, which replaces the grandchild with a failed exec.
+    private func grandchildScript(childPidFile: String,
+                                  grandchildPidFile: String,
+                                  holdingOutput: Bool) throws -> String {
+        let bash = try systemBinary("bash")
+        let child = scratch.appendingPathComponent("child.sh")
+        try """
+        echo $$ > "\(childPidFile)"
+        sleep 0.3
+        \(bash) -c '
+            for entry in /dev/fd/*; do
+                fd="${entry##*/}"
+                case "$fd" in
+                    0|1|2|*[!0-9]*) continue ;;
+                esac
+                eval "exec $fd>&-"
+            done
+            echo $$ > "\(grandchildPidFile)"
+            # Bounded, so a run where nothing signals the group cannot leave
+            # this behind for the rest of the suite.
+            count=0
+            while [ $count -lt 100 ]; do
+                sleep 0.2
+                count=$((count + 1))
+            done
+        '\(holdingOutput ? "" : " > /dev/null") &
+        echo ready
+        """.write(to: child, atomically: true, encoding: .utf8)
+        return child.path
+    }
+
+    /// Waits for a *readable* pid rather than for the file to exist: the shell
+    /// creates it with the redirection and writes the number a moment later.
     private func readPid(at path: String) throws -> pid_t {
-        XCTAssertTrue(waitUntil(2) { FileManager.default.fileExists(atPath: path) },
-                      "the child never recorded its pid")
+        XCTAssertTrue(waitUntil(2) { self.pid(at: path) != nil }, "the child never recorded its pid")
+        return try XCTUnwrap(pid(at: path), "unreadable pid file")
+    }
+
+    private func pid(at path: String) -> pid_t? {
         let text = String(decoding: FileManager.default.contents(atPath: path) ?? Data(), as: UTF8.self)
-        return try XCTUnwrap(pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-                             "unreadable pid file: \(text)")
+        return pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private func hasExited(_ pid: pid_t) -> Bool {
