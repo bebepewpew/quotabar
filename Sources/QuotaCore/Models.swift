@@ -86,6 +86,25 @@ public struct QuotaWindow: Identifiable, Sendable, Codable {
         usedPercent = try values.decode(Double.self, forKey: .usedPercent)
         resetAt = try values.decodeIfPresent(Date.self, forKey: .resetAt)
     }
+
+    /// Written out rather than synthesized: the synthesized encoder uses
+    /// `encodeIfPresent` for an optional and drops `resetAt` entirely when a
+    /// window has no known reset time. `--json` is a machine-readable interface,
+    /// so every key is always present and an unknown reset time is `null` — a
+    /// consumer reads a value instead of guarding a key, and can tell "no reset
+    /// time" apart from a truncated payload. Decoding stays `decodeIfPresent`,
+    /// so state written by older builds still loads.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(key, forKey: .key)
+        try container.encode(label, forKey: .label)
+        try container.encode(usedPercent, forKey: .usedPercent)
+        if let resetAt {
+            try container.encode(resetAt, forKey: .resetAt)
+        } else {
+            try container.encodeNil(forKey: .resetAt)
+        }
+    }
 }
 
 public struct QuotaSnapshot: Identifiable, Sendable, Codable {
