@@ -315,6 +315,66 @@ jobs:
   # checks stay pending and the pull request is unmergeable rather than fast.
   # This job always runs, so there is always exactly one check to require, and it
   # is the one that decides.
+  tray:
+    name: Tray (StatusNotifierItem)
+    needs: changes
+    # Behind the same filter as the build jobs: it compiles the package, so a
+    # documentation-only change has nothing here to run.
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container: swift:6.3-noble
+    # The tray is Linux-only and needs a session bus, so neither the macOS job
+    # nor the Linux one -- which has no bus -- can cover it. Without this job the
+    # only thing that ever exercised registration, the click routing and the exit
+    # was a person running it by hand against their own desktop.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        # Container jobs default to `sh -e`, which has no pipefail.
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install dbus
+        run: |
+          set -euo pipefail
+          # dbus-run-session only; the image ships neither a bus nor a client.
+          apt-get -qq update
+          apt-get -qq install -y --no-install-recommends dbus
+          command -v dbus-run-session
+
+      - name: Build the tray
+        run: |
+          set -euo pipefail
+          # An executable product, so it is not pulled in by building the tests.
+          swift build --product quotabar-tray
+          echo "QUOTABAR_TRAY_BIN=$(swift build --product quotabar-tray --show-bin-path)/quotabar-tray" \
+            >> "$GITHUB_ENV"
+
+      - name: Drive the tray over a real session bus
+        run: |
+          set -euo pipefail
+          test -x "$QUOTABAR_TRAY_BIN"
+          # A fresh, empty bus: org.kde.StatusNotifierWatcher is unowned there, so
+          # the tests can stand in for it. On a desktop that name belongs to
+          # Plasma and they skip instead of hijacking the panel.
+          dbus-run-session -- swift test --filter TrayIntegrationTests 2>&1 | tee tray-test.log
+
+          # These tests skip themselves when there is no usable bus, which is
+          # right locally and would be a silently green check here. Assert they
+          # actually ran.
+          if grep -qE "with [1-9][0-9]* test(s)? skipped" tray-test.log; then
+            echo "::error::the tray tests skipped; this job proved nothing"
+            exit 1
+          fi
+          if ! grep -qE "Executed [1-9][0-9]* tests, with 0 failures" tray-test.log; then
+            echo "::error::no tray tests executed"
+            exit 1
+          fi
+
   gate:
     name: Gate
     # Not `success()`: that would skip this job the moment a job it needs was
@@ -326,7 +386,7 @@ jobs:
     # check for a run nobody was waiting on. `!cancelled()` keeps the skip-is-a-
     # pass behaviour and lets a cancelled run stay cancelled.
     if: ${{ !cancelled() }}
-    needs: [labels, policy, changes, codeql, build-and-test, build-and-test-linux]
+    needs: [labels, policy, changes, codeql, build-and-test, build-and-test-linux, tray]
     runs-on: ubuntu-latest
     steps:
       - name: Require every job to have passed or been skipped
