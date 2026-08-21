@@ -62,6 +62,18 @@ public enum CommandRunner {
         // equivalent is a Job Object, which belongs with a Windows front-end.
         if process.processIdentifier > 1 { _ = setpgid(process.processIdentifier, process.processIdentifier) }
         #endif
+        // Same reason the stdin write end is closed below: the child holds its
+        // own copies, and `readDataToEndOfFile` returns only once every other
+        // write end is gone. This one has never been observed to stall — unlike
+        // `ProcessLineSession`, which held its pipe in a stored property and did
+        // — so it is here to stop the invariant depending on when Foundation
+        // happens to close a handle, not to fix a failure anyone has seen.
+        try? output.fileHandleForWriting.close()
+        try? errors.fileHandleForWriting.close()
+        // Same reason the stdin write end is closed below: the child holds its
+        // own copies, and `readDataToEndOfFile` returns only once every other
+        // write end is gone. Keeping these open makes the readers wait for the
+        // fallback timeout rather than for the child.
 
         let stdout = LockedData(), stderr = LockedData(), readers = DispatchGroup()
         readers.enter()

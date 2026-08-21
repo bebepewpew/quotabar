@@ -241,4 +241,26 @@ final class CommandRunnerEdgeTests: XCTestCase {
         }
         return path
     }
+
+    /// Guards the invariant `ProcessLineSessionTests` covers for the other pipe:
+    /// output arrives when the child closes its end, not when a fallback timer
+    /// gives up.
+    ///
+    /// Be clear about what this does not do. Removing the two `close()` calls in
+    /// `CommandRunner.run` does **not** make this fail — it was tried, and eight
+    /// iterations passed in eight milliseconds either way, because nothing here
+    /// keeps the pipe alive the way a stored property does. So this is a guard
+    /// against the invariant being broken later, not proof that it was broken;
+    /// the failing test for that defect is in `ProcessLineSessionTests`.
+    func testOutputArrivesAtEndOfFileRatherThanAtTheReaderFallback() throws {
+        let shell = try systemBinary("sh")
+        for iteration in 1...8 {
+            let started = Date()
+            let data = try CommandRunner.run(shell, ["-c", "echo ready"])
+            XCTAssertEqual(String(decoding: data, as: UTF8.self), "ready\n",
+                           "iteration \(iteration) lost the child's output")
+            XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
+                              "iteration \(iteration) waited for the reader fallback rather than end of file")
+        }
+    }
 }
