@@ -90,17 +90,21 @@ CLI, which is why it sits in the policy job rather than behind the `changes`
 filter — a workflow edit compiles nothing and would otherwise be checked by no
 job at all.
 
-## The Gate, and why the required check is not a build
+## The Gate, and why neither required check is a build
 
-`ci.yml` has seven jobs, and only one of them is a required status check.
+`ci.yml` has nine jobs — `labels`, `changes`, `policy`, `secret-scan`,
+`build-and-test`, `codeql`, `build-and-test-linux`, `tray` and `gate` — and
+branch protection on `main` requires exactly two of them as status checks:
+**`Labels`** and **`Gate`**. Every other job reaches a merge only through
+`gate`.
 
 `changes` diffs the pull request against its base and decides whether anything
 compiled was touched. If not — documentation, `.claude/`, `.codex/`, the issue
-forms, a root `*.md` — then `build-and-test` and `build-and-test-linux` are
-skipped, and a documentation change stops holding a macOS runner. `policy` has no
-such guard and runs for everything, which matters precisely *because* it is the
-documentation-shaped change that can break an issue form or unset an executable
-bit. A push to `main` always runs the full suite.
+forms, a root `*.md` — then `build-and-test`, `build-and-test-linux` and `tray`
+are skipped, and a documentation change stops holding a macOS runner. `policy`
+has no such guard and runs for everything, which matters precisely *because* it
+is the documentation-shaped change that can break an issue form or unset an
+executable bit. A push to `main` always runs the full suite.
 
 `changes` sorts every changed path into three buckets, and the third is the
 point. **Builds:** `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, the
@@ -129,7 +133,11 @@ keeps it that way — it extracts the step's script straight out of `ci.yml` and
 runs it over a table of paths with a stub `git`, so a new family that is left
 unclassified fails the suite rather than printing into a log.
 
-`gate` is the required check. Two GitHub behaviours force that shape:
+`labels` can be required by name because it always runs, whatever the change
+touched. The build jobs and `CodeQL` cannot: they skip for a documentation
+change, and a skipped required check satisfies nothing. `gate` is the second
+required check for exactly that reason — it stands in for every job that is
+allowed to skip. Two GitHub behaviours force that shape:
 
 - a workflow stopped by `paths-ignore` never reports at all, so a check required
   by branch protection stays **pending** and the pull request is unmergeable
@@ -147,10 +155,15 @@ alternative, a `paths-ignore` in `codeql.yml`, works only while nothing requires
 that check and becomes a permanent block the moment somebody does. Its weekly
 cron still fires standalone: a scheduled run has no base to diff against.
 
-Branch protection on `main` therefore requires **`Gate`** and **`Labels`**, not
-the two build jobs and not `CodeQL`. Renaming a job in this file without renaming it there is how
+So the required set is **`Labels`** and **`Gate`**, and nothing else: not the
+build jobs, not `Tray (StatusNotifierItem)`, not `Repository policy`, not
+`CodeQL`. That is what protection on `main` is configured with, read from the
+live settings on 2026-08-21; configure a fork the same way, or the checks that
+decide are advisory. Renaming a job in this file without renaming it there is how
 a merge blocks on a check that no longer exists; adding a job means adding it to
-`gate`'s `needs`, or it cannot fail a merge.
+`gate`'s `needs`, or it cannot fail a merge — and the `policy` job fails a pull
+request that adds or removes a job without updating the list above, because that
+list has already fallen behind `ci.yml` twice.
 
 `secret-scan` sits in that list with no `changes` guard, because a credential can
 arrive in any file, including one that compiles nothing. It is a job here rather
@@ -250,10 +263,16 @@ assertion, the packaging, the signing and the artifacts.
   The policy job greps `security-scan.yml` for its image reference, so it has to
   match on `ghcr.io/.*:latest` — a grep written with the literal expression would
   search for the *expanded* repository name and never match the file.
+- **This guide is asserted against `ci.yml` by the policy job.** It reads the job
+  names out of the workflow and fails if the list above does not name every one
+  of them or miscounts them, or if either this file or `.github/CONTRIBUTING.md`
+  stops naming `Labels` and `Gate` as the required checks. A new job therefore
+  needs a word in that list as well as a line in `gate`'s `needs`.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
-  nothing: the only required check never learns it failed. `scripts/check-ci-gate`
-  in the policy job fails on exactly that, and on a `Gate` or `Labels` renamed away
-  from the context branch protection requires.
+  nothing: `Gate` is the only required check that speaks for it, and it never
+  learns the job failed. `scripts/check-ci-gate` in the policy job fails on
+  exactly that, and on a `Gate` or `Labels` renamed away from the context branch
+  protection requires.
 - **`swift test` beside `scripts/coverage` runs the Linux suite twice.** The
   script's body is `swift test --enable-code-coverage`, and instrumentation is a
   different compile, so the second step was a second build of the test bundle and

@@ -120,8 +120,11 @@ one ran, rather than implying the whole suite passed.
    status check, so a pull request carrying none of them, or more than one,
    cannot be merged until the labels are corrected. The check re-runs as soon as
    a label changes; you do not need to push again.
-7. Once the required checks pass and every conversation is resolved, merge with
-   **Squash and merge**. Merge commits and rebase merges are disabled.
+7. Once the two required checks — `Labels` and `Gate` — pass and every
+   conversation is resolved, merge with **Squash and merge**. Merge commits and
+   rebase merges are disabled. `Gate` reports for the whole build: the other CI
+   jobs answer to it rather than to branch protection, so a build job that skips
+   for a documentation change never leaves a pull request pending.
 
 Do not weaken CI, hooks or branch protection to make a change pass.
 

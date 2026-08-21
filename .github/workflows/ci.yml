@@ -468,6 +468,57 @@ jobs:
       - name: Test the Codex parallel runner
         run: scripts/test-codex-parallel
 
+      - name: Check the CI guide still describes this workflow
+        # docs/agent-guides/ci-and-delivery.md is where somebody configuring
+        # branch protection on a fork looks, and it has twice drifted behind this
+        # file: it claimed one required status check when protection requires
+        # two, and it counted six jobs when there were eight. Nothing but a
+        # reader caught either. This asserts the two facts that went stale --
+        # which jobs exist, and which of them are the required checks -- for both
+        # documents that state them.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          guide=docs/agent-guides/ci-and-delivery.md
+          tick='`'
+
+          # Top-level keys under `jobs:`, which are the only two-space keys in
+          # that block; a job body is indented four.
+          jobs=$(awk '/^jobs:/ { in_jobs = 1; next }
+                      /^[^[:space:]#]/ { in_jobs = 0 }
+                      in_jobs && /^  [a-z][a-z0-9-]*:[[:space:]]*$/ {
+                          sub(/:.*/, "", $1)
+                          print $1
+                      }' .github/workflows/ci.yml)
+          count=$(printf '%s\n' "$jobs" | grep -c .)
+          spelled=$(printf 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n' \
+            | sed -n "${count}p")
+
+          if ! grep -qF "has $spelled jobs" "$guide"; then
+              echo "::error::$guide does not say ci.yml has $spelled jobs; it defines $count." >&2
+              exit 1
+          fi
+
+          for job in $jobs; do
+              if ! grep -qF "$tick$job$tick" "$guide"; then
+                  echo "::error::$guide never names the $job job; add it to the list in \"The Gate\"." >&2
+                  exit 1
+              fi
+          done
+
+          # Branch protection lives in repository settings, so no job can read
+          # it from here. What a job can do is keep the two documents that tell a
+          # contributor what to expect from disagreeing about it.
+          for doc in "$guide" .github/CONTRIBUTING.md; do
+              if ! grep -qF "${tick}Labels${tick}" "$doc" || ! grep -qF "${tick}Gate${tick}" "$doc"; then
+                  echo "::error::$doc does not name both required status checks, Labels and Gate." >&2
+                  exit 1
+              fi
+          done
+
+          echo "CI guide matches ci.yml: $count jobs, required checks Labels and Gate."
+
   # A committed credential is not advisory, so the scan that finds one has to be
   # able to fail a merge. `security-scan.yml` runs the same scan and publishes the
   # findings, but `gate` can only `needs:` jobs in its own workflow and branch
@@ -673,12 +724,6 @@ jobs:
           path: coverage.lcov
           if-no-files-found: error
 
-  # The single required status check. Branch protection cannot require a job that
-  # is sometimes skipped without also deciding what a skip means, and it cannot
-  # require a workflow that path filters stopped from running at all -- those
-  # checks stay pending and the pull request is unmergeable rather than fast.
-  # This job always runs, so there is always exactly one check to require, and it
-  # is the one that decides.
   tray:
     name: Tray (StatusNotifierItem)
     needs: changes
@@ -739,6 +784,13 @@ jobs:
             exit 1
           fi
 
+  # One of the two required status checks on `main`; `Labels` is the other, and
+  # it can be required by name because it never skips. Nothing else here can:
+  # branch protection cannot require a job that is sometimes skipped without also
+  # deciding what a skip means, and it cannot require a workflow that path filters
+  # stopped from running at all -- those checks stay pending and the pull request
+  # is unmergeable rather than fast. This job always runs, so nothing that may
+  # skip needs a check of its own: this is the one that decides for all of them.
   gate:
     name: Gate
     # Not `success()`: that would skip this job the moment a job it needs was
