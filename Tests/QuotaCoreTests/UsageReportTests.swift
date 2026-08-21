@@ -195,6 +195,129 @@ final class UsageReportTests: XCTestCase {
         XCTAssertEqual(UsageReport.csv(samples: []), "provider,window_key,at,used_percent,reset_at")
     }
 
+    /// A percentage only ever reaches CSV through `percentField`, so an absurd one
+    /// out of a hand-edited cache or a damaged record cannot land in the column a
+    /// spreadsheet sums.
+    func testCSVClampsAPercentageOutsideZeroToOneHundred() {
+        XCTAssertTrue(UsageReport.csv(samples: [
+            UsageSample(series: session, at: start, usedPercent: 150, resetAt: nil)
+        ]).hasSuffix(",100.00,"))
+        XCTAssertTrue(UsageReport.csv(samples: [
+            UsageSample(series: session, at: start, usedPercent: -12, resetAt: nil)
+        ]).hasSuffix(",0.00,"))
+        XCTAssertTrue(UsageReport.csv(samples: [
+            UsageSample(series: session, at: start, usedPercent: .nan, resetAt: nil)
+        ]).hasSuffix(",0.00,"))
+    }
+
+    /// A window key is the only free-form column, and a cache file is not a
+    /// trusted writer: a separator inside one has to be quoted rather than allowed
+    /// to split the row.
+    func testCSVQuotesAWindowKeyThatCarriesASeparator() {
+        let awkward = HistorySeriesID(provider: .codex, windowKey: "we,ird\n\"key\"")
+        let row = String(UsageReport.csv(samples: [
+            UsageSample(series: awkward, at: start, usedPercent: 10, resetAt: nil)
+        ]).dropFirst(UsageReport.csvHeader.count + 1))
+        XCTAssertEqual(row, "codex,\"we,ird\n\"\"key\"\"\",2023-11-14T22:13:20Z,10.00,")
+    }
+
+    // MARK: - CSV, status snapshot
+
+    private func window(_ label: String, _ used: Double, resetAt: Date? = nil) -> QuotaWindow {
+        QuotaWindow(label: label, usedPercent: used, resetAt: resetAt)
+    }
+
+    private func snapshot(_ provider: Provider, _ windows: [QuotaWindow],
+                          at: Date, error: String? = nil) -> QuotaSnapshot {
+        QuotaSnapshot(provider: provider, windows: windows, error: error,
+                      probeSucceeded: error == nil, updatedAt: at)
+    }
+
+    func testStatusCSVCarriesAHeaderAndOneRowPerWindow() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [window("Session", 41.5, resetAt: start.addingTimeInterval(3_600)),
+                              window("Weekly", 66.666)], at: start),
+            snapshot(.claude, [window("5-hour limit", 7)], at: start)
+        ])
+        XCTAssertEqual(text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init), [
+            "provider,window_key,at,used_percent,reset_at",
+            "codex,session,2023-11-14T22:13:20Z,41.50,2023-11-14T23:13:20Z",
+            "codex,weekly,2023-11-14T22:13:20Z,66.67,",
+            "claude,5-hour-limit,2023-11-14T22:13:20Z,7.00,"
+        ])
+    }
+
+    /// Windows are identified by key, never by the label the provider prints, so
+    /// the column that a consumer joins on has to be the key.
+    func testStatusCSVWritesTheWindowKeyRatherThanItsLabel() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.gemini, [QuotaWindow(key: "pro", label: "Gemini 3 Pro", usedPercent: 12,
+                                           resetAt: nil)], at: start)
+        ])
+        XCTAssertTrue(text.hasSuffix("gemini,pro,2023-11-14T22:13:20Z,12.00,"), text)
+        XCTAssertFalse(text.contains("Gemini 3 Pro"), text)
+    }
+
+    /// An unknown reset is an empty cell: a placeholder date would be read as a
+    /// real one, and dropping the column would shift every later field.
+    func testStatusCSVLeavesTheResetCellEmptyWhenTheResetIsUnknown() {
+        let text = UsageReport.csv(snapshots: [snapshot(.codex, [window("Session", 0)], at: start)])
+        let row = String(text.split(separator: "\n")[1])
+        XCTAssertEqual(row.filter { $0 == "," }.count, 4)
+        XCTAssertTrue(row.hasSuffix(",0.00,"), row)
+    }
+
+    /// The stamp is the reading's own, not the moment of the call: a reading
+    /// retained through a failed refresh is stale and the row has to admit it.
+    func testStatusCSVStampsEachRowWithTheSnapshotsOwnTime() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [window("Session", 30)], at: start.addingTimeInterval(-86_400),
+                     error: "Refresh failed: timed out")
+        ])
+        XCTAssertTrue(text.contains(",2023-11-13T22:13:20Z,30.00,"), text)
+    }
+
+    /// A provider with nothing to report has no number to record. The CLI names it
+    /// on stderr and exits non-zero; a row of blanks would be a reading.
+    func testStatusCSVOfProvidersWithoutWindowsIsStillJustAHeader() {
+        XCTAssertEqual(UsageReport.csv(snapshots: []), UsageReport.csvHeader)
+        XCTAssertEqual(UsageReport.csv(snapshots: [
+            snapshot(.gemini, [], at: start, error: "not authenticated")
+        ]), UsageReport.csvHeader)
+    }
+
+    /// Both writers emit the same columns, so `quotabar --format csv` appended by a
+    /// cron job and an export of `quotabar history --format csv` are one table.
+    func testStatusAndHistoryCSVShareTheirColumns() {
+        XCTAssertEqual(UsageReport.csv(snapshots: []), UsageReport.csv(samples: []))
+    }
+
+    /// `--watch` writes the header once. A later cycle that saw nothing renders as
+    /// the empty string, which the CLI prints as nothing rather than a blank row.
+    func testStatusCSVCanOmitTheHeaderForALaterWatchCycle() {
+        XCTAssertEqual(UsageReport.csv(snapshots: [snapshot(.codex, [window("Session", 5)], at: start)],
+                                       includeHeader: false),
+                       "codex,session,2023-11-14T22:13:20Z,5.00,")
+        XCTAssertEqual(UsageReport.csv(snapshots: [], includeHeader: false), "")
+    }
+
+    func testStatusCSVQuotesAWindowKeyThatCarriesASeparator() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [QuotaWindow(key: "we,ird", label: "Session", usedPercent: 10,
+                                          resetAt: nil)], at: start)
+        ], includeHeader: false)
+        XCTAssertEqual(text, "codex,\"we,ird\",2023-11-14T22:13:20Z,10.00,")
+    }
+
+    func testStatusCSVClampsAPercentageOutsideZeroToOneHundred() {
+        let text = UsageReport.csv(snapshots: [
+            snapshot(.codex, [window("High", 150), window("Low", -12), window("Broken", .nan)],
+                     at: start)
+        ])
+        let cells = text.split(separator: "\n").dropFirst().map { $0.split(separator: ",")[3] }
+        XCTAssertEqual(cells.map(String.init), ["100.00", "0.00", "0.00"])
+    }
+
     // MARK: - JSON payloads
 
     func testHistoryPayloadGroupsPointsBySeries() throws {
