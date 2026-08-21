@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+
+# Check that every GitHub Actions workflow defaults to the least privilege it
+# can and escalates per job.
+#
+#   scripts/check-workflow-permissions
+#
+# Two structural rules, so this costs milliseconds and the CI policy job runs it
+# for every change:
+#
+#   1. Each workflow's top-level `permissions:` is exactly `contents: read`.
+#      A workflow whose top level carries a write scope hands that scope to
+#      every job somebody adds later, including the ones written by someone who
+#      never read the top of the file.
+#   2. The escalations that used to arrive by inheritance are declared by the
+#      jobs that need them. Lowering a default is only safe while the jobs that
+#      were relying on it still ask for what they use.
+#
+# Neither rule can tell whether a job asks for more than it uses; that stays a
+# review question. They only keep the default from being the generous one.
+#
+# `sh` and `awk` only, so it runs anywhere a checkout does. The parsing is
+# indentation-based rather than a YAML parse: workflow files are hand-written in
+# one house style, and a shape it cannot read is reported, never assumed to pass.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+workflows=.github/workflows
+
+# The per-job escalations this repository depends on, as `workflow|job|permission`.
+# Every entry is a right nothing grants by default, so a job that loses its block
+# fails here rather than half way through a release.
+required_escalations='release.yml|tag|contents: write
+release.yml|release|contents: write
+release.yml|release|id-token: write
+release.yml|release|attestations: write
+release.yml|container|packages: write
+security-scan.yml|repository|security-events: write
+security-scan.yml|toolchain-image|security-events: write'
+
+failures=0
+
+fail() {
+    printf '%s\n' "$1" >&2
+    failures=$((failures + 1))
+}
+
+# The top-level `permissions:` mapping, one `key: value` per line. The inline
+# form (`permissions: read-all`) comes back as its single value, so it is
+# reported rather than read as an absent block.
+top_level_permissions() {
+    awk '
+        /^permissions:/ {
+            value = $0
+            sub(/^permissions:[ \t]*/, "", value)
+            sub(/[ \t]+#.*$/, "", value)
+            inblock = (value == "")
+            if (value != "") { print value }
+            next
+        }
+        /^[^ \t#]/ { inblock = 0 }
+        !inblock { next }
+        /^[ \t]*#/ { next }
+        NF {
+            sub(/^[ \t]+/, "")
+            sub(/[ \t]+#.*$/, "")
+            print
+        }
+    ' "$1"
+}
+
+# The `permissions:` mapping of one job, same shape. Jobs are the two-space keys
+# under `jobs:`, so the next job key or the next top-level key ends the block.
+job_permissions() {
+    awk -v job="$2" '
+        /^[^ \t#]/ { injob = 0; inperm = 0; next }
+        /^  [^ \t#]/ {
+            injob = ($0 == "  " job ":")
+            inperm = 0
+            next
+        }
+        !injob { next }
+        /^    [^ \t#]/ {
+            inperm = 0
+            if ($0 ~ /^    permissions:/) {
+                value = $0
+                sub(/^    permissions:[ \t]*/, "", value)
+                sub(/[ \t]+#.*$/, "", value)
+                # The inline form is the whole mapping; the block form
+                # continues on the more deeply indented lines below.
+                if (value != "") { print value } else { inperm = 1 }
+            }
+            next
+        }
+        !inperm { next }
+        /^[ \t]*#/ { next }
+        NF {
+            sub(/^[ \t]+/, "")
+            sub(/[ \t]+#.*$/, "")
+            print
+        }
+    ' "$1"
+}
+
+for workflow in "$workflows"/*.yml; do
+    granted=$(top_level_permissions "$workflow")
+    if [ -z "$granted" ]; then
+        fail "$workflow declares no top-level 'permissions:', so every job starts from the repository default rather than from read-only. Add 'permissions:' with 'contents: read' and escalate per job."
+    elif [ "$granted" != "contents: read" ]; then
+        fail "$workflow grants '$(printf '%s' "$granted" | tr '\n' ';')' at the top level, so every job added later inherits it. The top level is 'contents: read'; escalate inside the job that needs more."
+    fi
+done
+
+# A here-document rather than a pipe, so the loop runs in this shell and every
+# missing escalation is reported instead of only the first.
+while IFS='|' read -r file job permission; do
+    [ -n "$file" ] || continue
+    workflow="$workflows/$file"
+    if ! job_permissions "$workflow" "$job" | grep -qxF -- "$permission"; then
+        fail "$workflow: job '$job' needs '$permission' in its own 'permissions:' block; nothing grants it by default any more."
+    fi
+done <<EOF
+$required_escalations
+EOF
+
+if [ "$failures" -ne 0 ]; then
+    printf '%s\n' "Workflow permissions check failed." >&2
+    exit 1
+fi
+
+printf '%s\n' "Workflow permissions: every workflow defaults to 'contents: read' and every escalation is declared per job."

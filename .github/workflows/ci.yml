@@ -171,7 +171,7 @@ jobs:
               docs/*|.claude/*|.codex/*|.github/ISSUE_TEMPLATE/*|.githooks/*) ;;
               *.md|LICENSE|.gitignore|.gitattributes) ;;
               scripts/install-codex-skills|scripts/codex-parallel) ;;
-              scripts/check-release-order) ;;
+              scripts/check-release-order|scripts/check-workflow-permissions) ;;
               .github/CODEOWNERS|.github/dependabot.yml|.github/release.yml) ;;
 
               *)
@@ -211,6 +211,7 @@ jobs:
           test -x scripts/codex-parallel
           test -x scripts/coverage
           test -x scripts/check-release-order
+          test -x scripts/check-workflow-permissions
           test -x .githooks/pre-commit
           test -x .githooks/pre-push
           test ! -e REVIEW.md
@@ -230,6 +231,11 @@ jobs:
           # workflow before a release does, so this is the only check that can
           # notice the order going back to publishing first.
           scripts/check-release-order
+      # A workflow whose top level carries a write scope hands it to every job
+      # added afterwards, whose author never has to read the top of the file.
+      # Its own step so the report is legible when it fails.
+      - name: Require least-privilege workflow permissions
+        run: scripts/check-workflow-permissions
 
   build-and-test:
     name: macOS (menu-bar app, core, CLI)
