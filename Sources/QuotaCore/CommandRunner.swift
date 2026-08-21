@@ -96,7 +96,11 @@ public enum CommandRunner {
             _ = finished.wait(timeout: .now() + 1)
             Self.signalGroup(of: process, SIGKILL)
             _ = readers.wait(timeout: .now() + 2)
-            throw ProbeError.message("The CLI did not respond in time")
+            // The readers above are waited on before giving up so that whatever
+            // the child printed still travels with the error. A CLI that says
+            // what went wrong and only then hangs — clearing up its own
+            // children, say — has already answered the caller's question.
+            throw ProbeError.timeout(partialOutput: String(decoding: stdout.value, as: UTF8.self))
         }
         if readers.wait(timeout: .now() + 2) == .timedOut {
             // The command itself is gone, so whatever still holds the pipes is
@@ -239,7 +243,16 @@ private final class LockedData: @unchecked Sendable {
 }
 
 public enum ProbeError: LocalizedError {
-    case missing(String), timeout, message(String), unsupported(String)
+    case missing(String)
+    /// A deadline expired, carrying whatever the child had already printed.
+    ///
+    /// The payload is diagnostic input for the caller, never display text: a
+    /// script that announced *why* it was giving up and then stalled clearing
+    /// up its children would otherwise have that verdict replaced by a bare
+    /// "did not respond in time". `errorDescription` deliberately drops it, so
+    /// raw provider output cannot reach an error card.
+    case timeout(partialOutput: String)
+    case message(String), unsupported(String)
     /// A command that ran and exited non-zero for a reason no probe classified.
     case commandFailed(CommandFailure)
 
@@ -286,6 +299,13 @@ public enum ProbeError: LocalizedError {
     var diagnosticDetail: String? {
         guard case .commandFailed(let failure) = self, !failure.detail.isEmpty else { return nil }
         return failure.detail
+    }
+
+    /// What the child managed to print before its deadline, if this is a
+    /// timeout and anything arrived at all.
+    public var partialOutput: String? {
+        guard case .timeout(let output) = self, !output.isEmpty else { return nil }
+        return output
     }
 }
 

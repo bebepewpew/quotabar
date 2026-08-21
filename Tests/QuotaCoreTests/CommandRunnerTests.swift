@@ -125,14 +125,15 @@ final class CommandRunnerTests: XCTestCase {
                        "The CLI exited with status 2. Run it in a terminal to see what it reported.")
         XCTAssertNil(ProbeError.commandFailed(.init(command: "claude", status: 1, detail: "")).diagnosticDetail)
         XCTAssertNil(ProbeError.message("plain").diagnosticDetail, "only a command failure carries CLI output")
-        XCTAssertNil(ProbeError.timeout.diagnosticDetail)
+        XCTAssertNil(ProbeError.timeout(partialOutput: "boom").diagnosticDetail,
+                     "a deadline's partial output is not a command failure's detail")
     }
 
     /// Exit status, timeout and a stuck output stream have to stay tellable
     /// apart: they need different things done about them.
     func testTheThreeCommandFailuresKeepDistinctMessages() {
         let messages = [ProbeError.commandFailed(.init(command: "claude", status: 3, detail: "sk-live-key")),
-                        .timeout,
+                        .timeout(partialOutput: ""),
                         .message("The CLI exited but left its output stream open")]
             .map { $0.errorDescription ?? "" }
         XCTAssertEqual(Set(messages).count, 3, "\(messages)")
@@ -147,8 +148,30 @@ final class CommandRunnerTests: XCTestCase {
         let started = Date()
         XCTAssertThrowsError(try CommandRunner.run(shell, ["-c", "sleep 5"], timeout: 1)) { error in
             XCTAssertEqual((error as? ProbeError)?.errorDescription, "The CLI did not respond in time")
+            XCTAssertNil((error as? ProbeError)?.partialOutput, "a silent child has nothing to hand back")
         }
         XCTAssertLessThan(Date().timeIntervalSince(started), 4, "the deadline has to bound the call")
+    }
+
+    /// A CLI that says why it is giving up and only then hangs — clearing up its
+    /// own children, say — has already answered the caller's question. The
+    /// deadline used to discard that output, so the caller had nothing left to
+    /// report but the timeout itself. `echo` runs as its own process so the test
+    /// pins down the runner's behaviour rather than a shell's output buffering.
+    func testTimeoutCarriesWhatTheChildAlreadyPrinted() throws {
+        let shell = try systemBinary("sh")
+        let echo = try systemBinary("echo")
+        let started = Date()
+        XCTAssertThrowsError(try CommandRunner.run(shell, ["-c", "\(echo) QUOTABAR_TRUST; sleep 5"], timeout: 1)) { error in
+            guard case .timeout(let partial)? = error as? ProbeError else {
+                return XCTFail("expected ProbeError.timeout, got \(error)")
+            }
+            XCTAssertEqual(partial.trimmingCharacters(in: .newlines), "QUOTABAR_TRUST")
+            XCTAssertEqual((error as? ProbeError)?.partialOutput, partial)
+            XCTAssertEqual((error as? ProbeError)?.errorDescription, "The CLI did not respond in time",
+                           "the transcript is for the caller to classify, never for display")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4, "draining the output stays inside the deadline")
     }
 
     /// The regression this file exists for. Provider CLIs spawn children of

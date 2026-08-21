@@ -53,12 +53,18 @@ final class QuotaEngineTests: XCTestCase {
         XCTAssertNil(snapshot.error)
     }
 
+    /// A timeout carries whatever the child had already printed so the probe can
+    /// classify it. That payload is untrusted CLI output and must never reach the
+    /// snapshot the menu and the CLI display.
     func testLoadTurnsAThrownProbeErrorIntoAFailedSnapshot() {
-        let snapshot = QuotaEngine.load(.gemini) { _ in throw ProbeError.timeout }
+        let timeout = ProbeError.timeout(partialOutput: "QUOTABAR_TRUST\nsecret-transcript-42")
+        let snapshot = QuotaEngine.load(.gemini) { _ in throw timeout }
         XCTAssertEqual(snapshot.provider, .gemini)
         XCTAssertFalse(snapshot.probeSucceeded)
         XCTAssertTrue(snapshot.windows.isEmpty)
-        XCTAssertEqual(snapshot.error, ProbeError.timeout.localizedDescription)
+        XCTAssertEqual(snapshot.error, "The CLI did not respond in time")
+        XCTAssertFalse(snapshot.error?.contains("secret-transcript-42") ?? true,
+                       "the partial transcript is diagnostic input, not display text")
     }
 
     /// Anything a probe throws has to survive as readable text, not just
@@ -241,7 +247,7 @@ final class QuotaEngineTests: XCTestCase {
         let good = await QuotaEngine.refresh(Provider.allCases) { provider in
             .init(provider: provider, windows: [.init(label: "Session", usedPercent: 20, resetAt: nil)])
         }
-        let outage = await QuotaEngine.refresh(Provider.allCases) { _ in throw ProbeError.timeout }
+        let outage = await QuotaEngine.refresh(Provider.allCases) { _ in throw ProbeError.timeout(partialOutput: "") }
         let merged = QuotaEngine.retainingLastGood(fresh: outage, previous: good)
 
         XCTAssertEqual(merged.map(\.provider), Provider.allCases)

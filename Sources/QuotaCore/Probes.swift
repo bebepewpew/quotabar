@@ -84,6 +84,54 @@ private func probeWorkingDirectory() -> URL {
 
 
 struct GeminiTerminalProbe: QuotaProbe {
+    /// The time the expect script may spend, named once and read twice: the
+    /// script interpolates these values, and `deadline` — the bound `fetch()`
+    /// puts on the child — is derived from the same numbers.
+    ///
+    /// They used to be chosen independently, a literal 125 beside a script whose
+    /// own waits summed to 120.8, and raising any `set timeout` silently ate the
+    /// margin the teardown needs. When the outer deadline wins that race the
+    /// script is killed mid-`stop_child`, so "Gemini is waiting for a
+    /// folder-trust decision" degrades to "The CLI did not respond in time".
+    ///
+    /// `scriptTimeouts` sums *every* wait, including branches that cannot both
+    /// run. Each `set timeout` bounds at most one `expect`, so their sum bounds
+    /// any path through the script, and a branch added later cannot quietly
+    /// break the relation.
+    enum Budget {
+        /// Reaching the trust prompt, the sign-in menu, or the input prompt.
+        static let startup = 30
+        /// The tier rejection that arrives a moment after the sign-in menu.
+        static let authClassification = 6
+        /// `/stats` rendering its session view, which is what refreshes quota.
+        static let statsView = 45
+        /// Returning to the input prompt once `/stats` has finished.
+        static let promptReturn = 15
+        /// `/model` rendering the account-wide buckets.
+        static let modelView = 30
+        /// Milliseconds to let a view settle before typing into it.
+        static let viewSettleMilliseconds = 300
+        /// Milliseconds between a typed command and its Return.
+        static let keyPressMilliseconds = 100
+        /// `stop_child`: a Ctrl-C, two signals to the process group, a close and
+        /// a wait, plus the interpreter exiting and its pipes draining. The
+        /// script has to fit all of that inside the deadline, because a caller
+        /// that kills it mid-teardown loses the verdict it already printed.
+        static let teardown: TimeInterval = 5
+
+        /// What the script's own `expect` waits can add up to.
+        static var scriptTimeouts: TimeInterval {
+            TimeInterval(startup + authClassification + statsView + promptReturn + modelView)
+        }
+        /// The pauses around the two commands the script types.
+        static var sendPauses: TimeInterval {
+            2 * TimeInterval(viewSettleMilliseconds + keyPressMilliseconds) / 1_000
+        }
+        /// The bound `fetch()` puts on the child: never less than the script can
+        /// legitimately spend, so the script's own diagnostic wins the race.
+        static var deadline: TimeInterval { scriptTimeouts + sendPauses + teardown }
+    }
+
     let runner: any ProbeRunner
 
     init(runner: any ProbeRunner = SystemProbeRunner()) { self.runner = runner }
@@ -92,21 +140,35 @@ struct GeminiTerminalProbe: QuotaProbe {
         guard let binary = runner.find("gemini") else { throw ProbeError.missing("Gemini CLI") }
         let output: String
         do {
-            output = try runner.runExpect(Self.expectScript(binary: binary), timeout: 125, currentDirectory: probeWorkingDirectory())
+            output = try runner.runExpect(Self.expectScript(binary: binary),
+                                          timeout: Budget.deadline, currentDirectory: probeWorkingDirectory())
         } catch {
             // `expect` writes the whole pseudo-terminal transcript to its stdout,
             // so a non-zero exit carries the session — markers and all — as the
-            // command failure's detail. The markers still say what blocked the
-            // probe; the transcript itself must never reach the UI.
+            // command failure's detail, and an expired deadline carries whatever
+            // reached us before it. The markers still say what blocked the probe;
+            // the transcript itself must never reach the UI.
             //
             // Neither may the failure's own message. The executable handed to
             // `run` is the `expect` helper, so the message names *that* —
             // "expect exited with status 1" points at a binary the user never
             // invoked and cannot usefully run. Anything this probe cannot
             // classify is reported against the CLI it is actually for.
-            guard case .commandFailed(let commandFailure)? = error as? ProbeError else { throw error }
-            throw Self.failure(in: commandFailure.detail)
-                ?? .unsupported("Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
+            guard let probeError = error as? ProbeError else { throw error }
+            switch probeError {
+            case .commandFailed(let commandFailure):
+                throw Self.failure(in: commandFailure.detail)
+                    ?? .unsupported("Gemini CLI did not finish. Run `gemini` in a terminal to see what it reports.")
+            case .timeout(let partial):
+                // The script prints its marker and only then tears the child
+                // down, so a teardown that outlives the deadline used to throw
+                // away an actionable message. What arrived before the deadline
+                // still says why; anything else keeps the error it came with.
+                guard let failure = Self.failure(in: partial) else { throw error }
+                throw failure
+            default:
+                throw error
+            }
         }
         if let failure = Self.failure(in: output) { throw failure }
         return try Self.parse(output, now: Date())
@@ -177,7 +239,7 @@ struct GeminiTerminalProbe: QuotaProbe {
             # The sign-in menu is also what Gemini shows when Google has withdrawn
             # the account's tier, and the rejection arrives a moment later. Wait for
             # it rather than reporting a sign-in that cannot succeed.
-            set timeout 6
+            set timeout \(Budget.authClassification)
             expect {
                 -re {(?i)(no longer supported|migrate to the antigravity|ineligible)} {puts "QUOTABAR_INELIGIBLE"}
                 timeout {puts "QUOTABAR_AUTH"}
@@ -186,7 +248,7 @@ struct GeminiTerminalProbe: QuotaProbe {
             stop_child
             exit 0
         }
-        set timeout 30
+        set timeout \(Budget.startup)
         set env(TERM) xterm-256color
         set env(NO_COLOR) 1
         spawn -noecho \(CommandRunner.tclQuoted(binary)) --screen-reader --skip-trust
@@ -202,11 +264,11 @@ struct GeminiTerminalProbe: QuotaProbe {
         # Full /stats performs the quota refresh in Gemini 0.56, but its default
         # view contains session data only. Wait for it to finish before opening
         # /model, which renders the freshly updated account-wide quota buckets.
-        after 300
+        after \(Budget.viewSettleMilliseconds)
         send -- "/stats"
-        after 100
+        after \(Budget.keyPressMilliseconds)
         send -- "\\r"
-        set timeout 45
+        set timeout \(Budget.statsView)
         expect {
             -re {(?i)Session Stats} {}
             -re {(?i)(no longer supported|migrate to the antigravity)} {puts "QUOTABAR_INELIGIBLE"; stop_child; exit 0}
@@ -215,17 +277,17 @@ struct GeminiTerminalProbe: QuotaProbe {
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
-        set timeout 15
+        set timeout \(Budget.promptReturn)
         expect {
             -re {Type your message or @path/to/file} {}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
             eof {puts "QUOTABAR_STATS_TIMEOUT"; exit 0}
         }
-        after 300
+        after \(Budget.viewSettleMilliseconds)
         send -- "/model"
-        after 100
+        after \(Budget.keyPressMilliseconds)
         send -- "\\r"
-        set timeout 30
+        set timeout \(Budget.modelView)
         expect {
             -re {(?i)\\(Press Esc to close\\)} {puts "QUOTABAR_STATS_COMPLETE"}
             timeout {puts "QUOTABAR_STATS_TIMEOUT"; stop_child; exit 0}
