@@ -228,6 +228,69 @@ final class ProbeFetchTests: XCTestCase {
         XCTAssertEqual(runner.expectDirectories.compactMap { $0 }.count, 1, "the expect child needs a working directory")
     }
 
+    /// The outer deadline and the script's own waits used to be picked
+    /// independently — a literal 125 beside a script that may legitimately spend
+    /// 120.8 — so raising any `set timeout` silently ate the margin the teardown
+    /// needs, and the deadline started winning a race it should always lose.
+    /// The relation is checked against what the generated script actually asks
+    /// for, so a wait raised without the deadline following fails here.
+    func testGeminiDeadlineCoversEveryScriptTimeoutAndTheTeardownBudget() throws {
+        let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"],
+                                     expectResult: .success("Model Usage\ngemini-2.5-pro   -   0.0%\n"))
+        _ = try GeminiTerminalProbe(runner: runner).fetch()
+        let script = try XCTUnwrap(runner.expectScripts.first)
+        let deadline = try XCTUnwrap(runner.expectTimeouts.first)
+
+        // Every wait the script can perform, whichever branch it takes, plus the
+        // pauses it spends between typing a command and pressing Return.
+        let waits = try seconds(matching: #"(?m)^ *set timeout (\d+) *$"#, in: script)
+        let pauses = try seconds(matching: #"(?m)^ *after (\d+) *$"#, in: script).map { $0 / 1_000 }
+        let budget = GeminiTerminalProbe.Budget.self
+        XCTAssertEqual(waits.sorted(), [budget.startup, budget.authClassification, budget.statsView,
+                                        budget.promptReturn, budget.modelView].map { TimeInterval($0) }.sorted(),
+                       "the script has a `set timeout` the budget does not know about")
+        XCTAssertEqual(budget.scriptTimeouts, waits.reduce(0, +), accuracy: 0.001)
+        XCTAssertEqual(budget.sendPauses, pauses.reduce(0, +), accuracy: 0.001)
+        XCTAssertGreaterThan(budget.teardown, 0, "tearing the child down needs a budget of its own")
+        XCTAssertEqual(deadline, budget.deadline, "fetch must use the derived deadline")
+        XCTAssertGreaterThanOrEqual(deadline, waits.reduce(0, +) + pauses.reduce(0, +) + budget.teardown,
+                                    "the deadline no longer covers what the script may spend")
+    }
+
+    /// The script prints its verdict and only then tears the child down, so a
+    /// teardown that outruns the deadline used to replace an actionable message
+    /// with a bare timeout. Whatever reached the caller first still says why.
+    func testGeminiFetchKeepsTheScriptVerdictWhenTheDeadlineWinsTheRace() {
+        let cases: [(partial: String, expected: String)] = [
+            ("Do you trust the files in this folder?\nQUOTABAR_TRUST\n",
+             "Gemini is waiting for a folder-trust decision. Start Gemini CLI once in your home directory and trust the folder."),
+            ("How would you like to authenticate for this project?\nQUOTABAR_AUTH\n",
+             "Gemini authentication is required. Open Gemini CLI and sign in."),
+            ("QUOTABAR_STATS_TIMEOUT\n", "Gemini did not finish refreshing /stats in time."),
+            ("QUOTABAR_STARTUP_TIMEOUT\n", "Gemini did not reach its input prompt in time.")
+        ]
+        for expectation in cases {
+            let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"],
+                                         expectResult: .failure(ProbeError.timeout(partialOutput: expectation.partial)))
+            XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: runner).fetch() }), expectation.expected,
+                           "the marker in \(expectation.partial.debugDescription) was thrown away")
+        }
+    }
+
+    /// A deadline with nothing to classify keeps the timeout it came with, and
+    /// so does a failure that is not a timeout at all. A transcript that only
+    /// completed is not a verdict either: half a `/model` view is not reported
+    /// as quota.
+    func testGeminiFetchStillReportsFailuresItCannotClassify() {
+        for failure: ProbeError in [.timeout(partialOutput: ""),
+                                    .timeout(partialOutput: "\u{1B}[2Kloading Gemini…"),
+                                    .timeout(partialOutput: "QUOTABAR_STATS_COMPLETE\n"),
+                                    .message("The CLI exited but left its output stream open")] {
+            let runner = FakeProbeRunner(executables: ["gemini": "/usr/bin/gemini"], expectResult: .failure(failure))
+            XCTAssertEqual(message(from: { try GeminiTerminalProbe(runner: runner).fetch() }), failure.errorDescription)
+        }
+    }
+
     func testGeminiFetchParsesTheStatsTableEndToEnd() throws {
         let transcript = """
         Model Usage                 Reqs                  Usage left
@@ -352,6 +415,18 @@ final class ProbeFetchTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Every number the pattern's first group captures, read out of the script
+    /// itself rather than restated here — a test that repeated the values would
+    /// pass however far the script and its deadline had drifted apart.
+    private func seconds(matching pattern: String, in script: String) throws -> [TimeInterval] {
+        let regex = try NSRegularExpression(pattern: pattern)
+        let matches = regex.matches(in: script, range: NSRange(script.startIndex..., in: script))
+        XCTAssertFalse(matches.isEmpty, "no `\(pattern)` in the script")
+        return matches.compactMap { match in
+            Range(match.range(at: 1), in: script).flatMap { TimeInterval(script[$0]) }
+        }
+    }
 
     private func message(from body: () throws -> QuotaSnapshot) -> String? {
         do {
