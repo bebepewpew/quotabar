@@ -33,7 +33,7 @@ and write its caption at the same time, and delete the placeholder it replaces.
 | --- | --- |
 | `Package.swift`, `Sources/`, `Tests/` | The SwiftPM package: every target and its tests |
 | `Resources/` | `Info.plist` and the icons the macOS app bundle is built from |
-| `packaging/` | The nfpm configuration the release workflow builds the `.deb` and `.rpm` from |
+| `packaging/` | What the release workflow builds distributables from: the nfpm configuration for the `.deb` and `.rpm`, the container `Dockerfile`, and `homebrew/quotabar.rb` |
 | `scripts/` | `install-hooks`, `install-codex-skills`, `coverage`, `codex-parallel` |
 | `docs/agent-guides/` | The long-form guidance the agent tooling points at |
 | `.github/` | Workflows, `CODEOWNERS`, `dependabot.yml`, the pull request template, `CONTRIBUTING.md`, `SECURITY.md` |
@@ -46,10 +46,13 @@ One of those cannot move, so please do not re-litigate it:
   are.** SwiftPM requires the manifest at the package root and finds target
   sources by convention.
 
-The Homebrew formula is not here. It lives in
-[`bebepewpew/homebrew-tap`](https://github.com/bebepewpew/homebrew-tap),
-which the release workflow writes to directly — see
-[Homebrew](#macos--homebrew) below.
+The Homebrew formula is `packaging/homebrew/quotabar.rb`, and that directory is
+not a tap — Homebrew installs from
+[`bebepewpew/homebrew-tap`](https://github.com/bebepewpew/homebrew-tap), which
+the release workflow renders this file into. It is kept here because a formula's
+`install` and `test` blocks execute on every user's machine, so they belong
+behind this repository's review and branch protection; the tap is generated
+output. See [Homebrew](#macos--homebrew) below.
 
 `CONTRIBUTING.md` and `SECURITY.md` live under `.github/` deliberately: GitHub
 still surfaces both from there, and the root stays short enough to read.
@@ -103,6 +106,10 @@ Released binaries and packages are published on the
 [releases page](https://github.com/bebepewpew/quotabar/releases). To
 build from a checkout instead, skip to [Build and run](#build-and-run).
 
+Every artifact is signed and checksummed. The commands below install without
+checking that — see [Verifying a release](#verifying-a-release) for the one extra
+step, which is worth taking on anything you are about to run as root.
+
 ### macOS — Homebrew
 
 ```sh
@@ -112,9 +119,9 @@ brew install quotabar
 
 No URL is needed: Homebrew maps `user/name` to `github.com/user/homebrew-name`,
 which is the [`homebrew-tap`](https://github.com/bebepewpew/homebrew-tap)
-tap. The release workflow pushes each new formula there after installing and
-testing it on a macOS runner, so a release cannot publish a formula that does
-not build. If `quotabar` is ambiguous on your machine, name it in full:
+tap. The release workflow renders `packaging/homebrew/quotabar.rb` into that
+tap and then audits, installs and tests it on a macOS runner — pushing only if
+all three pass, so a release cannot publish a formula that does not build. If `quotabar` is ambiguous on your machine, name it in full:
 `brew install bebepewpew/tap/quotabar`.
 
 The formula builds from source on purpose. A downloaded Mach-O that Apple has
@@ -154,16 +161,20 @@ the first is used only by the Gemini probe, the second only by `--notify`.
 VERSION=0.1.0
 BASE=https://github.com/bebepewpew/quotabar/releases/download/v$VERSION
 
-curl -fLO "$BASE/quotabar-${VERSION}-linux-x86_64.tar.gz"
-tar -xzf "quotabar-${VERSION}-linux-x86_64.tar.gz"
-sudo install -m 0755 "quotabar-${VERSION}-linux-x86_64/quotabar" /usr/local/bin/
+# Linux
+NAME=quotabar-${VERSION}-linux-x86_64
+# macOS
+NAME=quotabar-${VERSION}-macos-universal
+
+curl -fLO "$BASE/${NAME}.tar.gz"
+tar -xzf "${NAME}.tar.gz"
+sudo install -m 0755 "${NAME}/quotabar" /usr/local/bin/
 ```
 
-The macOS build is published the same way, as
-`quotabar-${VERSION}-macos-universal.tar.gz`. Each tarball holds the `quotabar`
-binary alongside `README.md` and `LICENSE`. Prefer the Homebrew tap on macOS:
-a browser download picks up `com.apple.quarantine` and Gatekeeper then blocks
-the unnotarized binary on first run.
+Set `NAME` to whichever of the two matches your platform. Each tarball holds the
+`quotabar` binary alongside `README.md` and `LICENSE`. Prefer the Homebrew tap on
+macOS: a browser download picks up `com.apple.quarantine` and Gatekeeper then
+blocks the unnotarized binary on first run.
 
 ### Container
 
