@@ -24,6 +24,15 @@ final class ProcessLineSession: @unchecked Sendable {
     /// ceiling this is what the session can cost, whether or not anybody drains
     /// it.
     static let maximumPendingBytes = 4 * 1024 * 1024
+    /// What each queued line costs on top of its own bytes. A line is not free
+    /// to hold: it occupies an array element and, unless it is short enough to
+    /// live inline in the `String`, an allocation of its own. Charging only the
+    /// bytes would bound nothing against a child writing empty or one-character
+    /// lines — a megabyte of newlines is a million entries that cost nothing —
+    /// so the queue charges a fixed overhead per line too, which caps the number
+    /// of entries at `maximumPendingBytes / pendingEntryBytes` no matter how
+    /// small each one is.
+    static let pendingEntryBytes = 64
     /// What a caller's transcript retains: enough of the tail for a probe to
     /// find an authentication complaint, and no more.
     static let maximumTranscriptLines = 200
@@ -218,10 +227,13 @@ final class ProcessLineSession: @unchecked Sendable {
     ///
     /// The exchange is request/response, so the line being waited for is the
     /// newest one: a child that outruns its consumer loses its backlog rather
-    /// than the reply, and the session's cost stays bounded either way.
+    /// than the reply, and the session's cost stays bounded either way. Each
+    /// line is charged `pendingEntryBytes` on top of its own, so the ceiling
+    /// bounds a flood of empty lines by count as well as one of long lines by
+    /// size.
     private func enqueue(_ line: String) {
         pending.append(line)
-        pendingBytes += line.utf8.count
+        pendingBytes += line.utf8.count + Self.pendingEntryBytes
         while pendingBytes > Self.maximumPendingBytes && pending.count - pendingHead > 1 {
             _ = dequeue()
         }
@@ -236,7 +248,7 @@ final class ProcessLineSession: @unchecked Sendable {
         let line = pending[pendingHead]
         pending[pendingHead] = ""
         pendingHead += 1
-        pendingBytes -= line.utf8.count
+        pendingBytes -= line.utf8.count + Self.pendingEntryBytes
         if pendingHead >= 1_024 && pendingHead * 2 >= pending.count {
             pending.removeFirst(pendingHead)
             pendingHead = 0

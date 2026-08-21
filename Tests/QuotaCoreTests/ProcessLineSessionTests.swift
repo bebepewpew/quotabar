@@ -223,6 +223,61 @@ final class ProcessLineSessionTests: XCTestCase {
         XCTAssertEqual(transcript.last, payload, "the newest line is the one that survives")
     }
 
+    /// The same ceiling against the cheapest line there is. Charging the queue
+    /// only the bytes of each line bounded nothing here: an empty line costs
+    /// zero bytes, so `pendingBytes` never moved and the drop loop never ran,
+    /// while the array grew one entry per newline for as long as the child kept
+    /// writing them — a megabyte of newlines is a million entries that were all
+    /// free, tens of megabytes of storage out of a megabyte of output.
+    /// A fixed cost per entry is what turns the byte ceiling into a count
+    /// ceiling as well.
+    ///
+    /// Against that behaviour the `oldest` line written before the flood is
+    /// still queued behind every one of them, and the count runs past the
+    /// ceiling.
+    func testTheUndeliveredQueueBoundsAFloodOfEmptyLines() throws {
+        let shell = try systemBinary("sh")
+        let marker = scratch.appendingPathComponent("newlines-finished").path
+        let ceiling = ProcessLineSession.maximumPendingBytes / ProcessLineSession.pendingEntryBytes
+        // Four times what the queue may hold, so that the newlines the reader
+        // has taken by the time the child finishes — everything but the pipe
+        // buffer's worth still in flight — are well past the ceiling.
+        let lines = 4 * ceiling
+        let session = try ProcessLineSession(
+            executable: shell,
+            arguments: ["-c", "printf 'oldest\\n'; head -c \(lines) /dev/zero | tr '\\0' '\\n';"
+                              + " touch '\(marker)'"])
+        defer { session.close() }
+
+        XCTAssertTrue(waitUntil(60) { FileManager.default.fileExists(atPath: marker) },
+                      "the child never finished writing its newlines")
+        // What was still in the pipe when the child exited is on its way into
+        // the queue, and the queue is what this measures.
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Matching one line past the ceiling stops the drain there, so an
+        // unbounded queue fails the count below rather than taking as long as
+        // it takes to hand over everything it kept. The slack is for anything
+        // the reader had not queued yet when the drain began; the deadline only
+        // covers the wait once the queue is empty, never the drain itself.
+        var delivered = 0
+        var first: String?
+        var transcript: [String] = []
+        _ = session.waitForLine(matching: { line in
+                                    if first == nil { first = line }
+                                    delivered += 1
+                                    return delivered > ceiling + 1_024
+                                },
+                                before: Date().addingTimeInterval(1),
+                                transcript: &transcript)
+        XCTAssertEqual(first, "",
+                       "\(lines) empty lines followed `oldest` and it was still queued behind them")
+        XCTAssertLessThanOrEqual(delivered, ceiling + 1_024,
+                                 "nothing bounds how many lines the queue holds")
+        XCTAssertGreaterThan(delivered, 1_000,
+                             "the queue keeps the newest lines rather than dropping everything")
+    }
+
     // MARK: - send
 
     /// A pipe write blocks once the child stops reading and the buffer fills.
