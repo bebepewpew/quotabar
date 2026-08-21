@@ -9,6 +9,14 @@ on:
     # push, long after someone applied the label.
     types: [opened, reopened, labeled, unlabeled, synchronize]
 
+# `labeled` and `unlabeled` mean a pull request now starts a run every time
+# someone corrects a label, and the label usually lands moments after `opened`.
+# Without this, each correction leaves a full macOS and Linux build running to
+# completion beside the one that supersedes it. `codeql.yml` groups the same way.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
