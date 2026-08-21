@@ -9,7 +9,8 @@ description: Review or change QuotaBar's CI and delivery — the four workflows,
 hooks or branch protection to make a change pass.
 
 Four workflows, each authoritative for something different: `ci.yml` (build, test,
-CLI smoke, the 90% region coverage gate, the repository-policy step), `codeql.yml`
+the release-configuration builds, CLI smoke, the 90% region coverage gate, the
+repository-policy step), `codeql.yml`
 (Swift analysis, macOS only), `security-scan.yml` (leaked secrets fail; everything
 else is informational), `release.yml` (manual dispatch only).
 
