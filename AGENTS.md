@@ -17,7 +17,13 @@ log, or store provider credentials or complete login prompts.
 - Never commit or push directly to `main`. Create a focused branch and open a
   pull request for every change.
 - Merge pull requests with **Squash and merge** only. Keep the PR title concise
-  and imperative because it becomes the commit subject on `main`.
+  and imperative because it becomes the commit subject on `main` and the
+  changelog line in the release notes.
+- Label every pull request with exactly one category label, applied when the
+  pull request is opened: `feature`, `fix`, `security`, `performance`,
+  `tooling`, `ci`, `documentation`, `docs`, `dependencies`, or
+  `skip changelog`. The `Labels` CI job fails a pull request that carries none
+  of them or more than one.
 - Preserve unrelated and pre-existing working-tree changes. Do not rewrite,
   delete, or stage them.
 - Keep commits focused and use imperative commit subjects.

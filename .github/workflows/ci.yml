@@ -4,11 +4,99 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` and `unlabeled` are here for the Labels job below. Without them
+    # a pull request held back for a missing label would stay red until its next
+    # push, long after someone applied the label.
+    types: [opened, reopened, labeled, unlabeled, synchronize]
+
+# `labeled` and `unlabeled` mean a pull request now starts a run every time
+# someone corrects a label, and the label usually lands moments after `opened`.
+# Without this, each correction leaves a full macOS and Linux build running to
+# completion beside the one that supersedes it. `codeql.yml` groups the same way.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # Release notes are generated from the merged pull requests and grouped by
+  # label (.github/release.yml), so a pull request without exactly one category
+  # label is a changelog line in the wrong section or in no section at all.
+  labels:
+    name: Labels
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Require exactly one category label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        # This job runs directly on the runner, where bash is already the
+        # default, but the arrays and `pipefail` below are bash-only: a job that
+        # gained a container would silently drop to `sh -e` and lose both.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Exactly the labels .github/release.yml categorises, and exactly the
+          # table in README.md. Changing one means changing all three.
+          allowed=(
+            feature
+            fix
+            security
+            performance
+            tooling
+            ci
+            documentation
+            docs
+            dependencies
+            "skip changelog"
+          )
+
+          # The live label set rather than the event payload's copy, which is
+          # only a snapshot of whenever the event was delivered.
+          gh api "repos/$REPOSITORY/pulls/$PULL_REQUEST" \
+            --jq '.labels[].name' > "$RUNNER_TEMP/pull-request-labels"
+
+          applied=()
+          # `|| [ -n "$name" ]` so a final line without a trailing newline is
+          # still counted rather than silently dropped.
+          while IFS= read -r name || [ -n "$name" ]; do
+            for candidate in "${allowed[@]}"; do
+              if [ "$name" = "$candidate" ]; then
+                applied+=("$name")
+                break
+              fi
+            done
+          done < "$RUNNER_TEMP/pull-request-labels"
+
+          if [ "${#applied[@]}" -eq 1 ]; then
+            echo "Category label: ${applied[0]}"
+            exit 0
+          fi
+
+          if [ "${#applied[@]}" -eq 0 ]; then
+            carried='it carries none of them'
+          else
+            carried="it carries ${#applied[@]}: $(printf '%s, ' "${applied[@]}" | sed 's/, $//')"
+          fi
+
+          {
+            printf 'Every pull request needs exactly one category label; %s.\n' "$carried"
+            printf 'Allowed labels: %s.\n' "$(printf '%s, ' "${allowed[@]}" | sed 's/, $//')"
+            printf 'The label chooses the release-notes section in .github/release.yml.\n'
+            printf 'Use "skip changelog" for a change that should not appear in the notes at all.\n'
+            printf 'The repository squash-merges, so the pull-request title becomes the\n'
+            printf 'changelog line: keep it concise and imperative.\n'
+            printf 'See the "Pull requests" section of README.md.\n'
+          } >&2
+          exit 1
+
   build-and-test:
     name: macOS (menu-bar app, core, CLI)
     runs-on: macos-15

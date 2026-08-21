@@ -333,3 +333,37 @@ All changes go through pull requests with required CI. Read
 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) and the shared human/AI
 rules in [AGENTS.md](AGENTS.md), then run `scripts/install-hooks` once per clone
 (and `scripts/install-codex-skills` if you use Codex).
+
+## Pull requests
+
+The repository squash-merges, and merge commits and rebase merges are disabled.
+One pull request therefore becomes exactly one commit on `main` and exactly one
+line in the release notes, and the **pull-request title** is that line — not the
+branch name, and not the commit messages on the branch. Write it concise and
+imperative: "Bound the Gemini probe deadline", not "gemini fixes".
+
+Every pull request also carries exactly **one** category label, applied when the
+pull request is opened. The `Labels` CI job fails the pull request until exactly
+one is present. The label decides which section the title appears under, exactly
+as [`.github/release.yml`](.github/release.yml) configures:
+
+| Label | Release-notes section |
+| --- | --- |
+| `feature` | Added |
+| `fix` | Fixed |
+| `security` | Security |
+| `performance` | Performance |
+| `tooling` | Tooling |
+| `ci` | Tooling |
+| `documentation` | Documentation |
+| `docs` | Documentation |
+| `dependencies` | Dependencies |
+| `skip changelog` | none — the pull request is left out of the notes entirely |
+
+Use `skip changelog` for a change that should not appear in the release notes at
+all. An unlabelled pull request is not dropped: it lands in the catch-all
+**Other** section, which is a safety net rather than a destination — a change
+that reaches a release under Other is a change nobody categorised.
+
+[`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) lists the same labels with
+the colours to create them in.
