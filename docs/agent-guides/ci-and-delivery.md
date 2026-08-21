@@ -113,9 +113,12 @@ a merge blocks on a check that no longer exists; adding a job means adding it to
 - **A newly added workflow's first execution is the pull request that adds it.**
   A `pull_request`-triggered workflow cannot have run before its PR existed. Say
   that in the PR rather than letting a reviewer read the absence as a failure.
-- **`scripts/` and `.githooks/` entries are asserted executable** by the policy
-  job, along with `test ! -e REVIEW.md`. A new script needs `chmod +x` *and* a
-  line in that job.
+- **The root `quotabar` wrapper and every `scripts/` and `.githooks/` entry are
+  asserted executable** by the policy job, along with `test ! -e REVIEW.md`. A new
+  script needs `chmod +x` *and* a line in that job. The wrapper is in that list
+  because CI never runs it: no job would otherwise notice its bit going away,
+  and `.githooks/pre-push` plus every documented `./quotabar build` would break
+  the moment it did.
 - **A job added without a line in `gate`'s `needs`** runs, goes red, and blocks
   nothing: the only required check never learns it failed.
 - **`always()` on the gate reports a red check for a cancelled run.** The
