@@ -43,6 +43,8 @@ public enum CommandRunner {
     }
 
     public static func run(_ executable: String, _ arguments: [String], input: Data? = nil, timeout: TimeInterval = 12, currentDirectory: URL? = nil) throws -> Data {
+        // Before `input` is written to a child that may already have exited.
+        ProcessSignals.ignoreBrokenPipe()
         let process = Process()
         let output = Pipe(), errors = Pipe(), stdin = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -70,7 +72,13 @@ public enum CommandRunner {
         DispatchQueue.global(qos: .utility).async {
             stderr.set(errors.fileHandleForReading.readDataToEndOfFile()); readers.leave()
         }
-        if let input { stdin.fileHandleForWriting.write(input) }
+        // A child that read no stdin and exited leaves this write failing with
+        // `EPIPE`. That is not the interesting failure: the exit status and the
+        // child's own stderr below say far more than "broken pipe", so the write
+        // is allowed to fail and the normal diagnostic path reports the cause.
+        // The throwing `write(contentsOf:)` is deliberate — the non-throwing
+        // `write(_:)` raises an unrecoverable exception on the same error.
+        if let input { try? stdin.fileHandleForWriting.write(contentsOf: input) }
         try? stdin.fileHandleForWriting.close()
 
         if finished.wait(timeout: .now() + timeout) == .timedOut {

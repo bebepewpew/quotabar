@@ -103,6 +103,40 @@ final class ProcessLineSessionTests: XCTestCase {
                              "a write into a closed pipe must not look like a delivered request")
     }
 
+    /// The regression #34 was filed for, and the case the test above does *not*
+    /// cover: there the local write end was closed, which fails with `EBADF` and
+    /// throws under any signal disposition. Here the write end is still open and
+    /// the *child* is gone, which is what the Codex probe hits when
+    /// `codex app-server` exits between the initialize response and the
+    /// `initialized`/`rateLimits` writes that follow it. That write returns
+    /// `EPIPE` only because `SIGPIPE` is ignored; under the default disposition
+    /// this test does not fail, it kills the test process with signal 13.
+    func testSendThrowsRatherThanKillingTheProcessWhenTheChildHasExited() throws {
+        let shell = try systemBinary("sh")
+        // Exits immediately without ever reading stdin, leaving our write end open.
+        let session = try ProcessLineSession(executable: shell, arguments: ["-c", "echo ready"])
+        defer { session.close() }
+
+        var transcript: [String] = []
+        XCTAssertEqual(session.waitForLine(matching: { $0 == "ready" },
+                                           before: Date().addingTimeInterval(2),
+                                           transcript: &transcript), "ready")
+        // Drains to end of file, which the child reaches only as it exits.
+        _ = session.waitForLine(matching: { _ in false },
+                                before: Date().addingTimeInterval(2),
+                                transcript: &transcript)
+
+        // The exit and the pipe teardown are not simultaneous, so the first write
+        // can still land in the buffer. Reaching the deadline without throwing is
+        // the failure; being killed by SIGPIPE never gets here at all.
+        let deadline = Date().addingTimeInterval(2)
+        var thrown: Error?
+        while Date() < deadline && thrown == nil {
+            do { try session.send("after the child exited") } catch { thrown = error }
+        }
+        XCTAssertNotNil(thrown, "a write to a dead child must surface as a thrown error")
+    }
+
     // MARK: - close
 
     /// Nothing is left to signal once the child has exited on its own, and the
