@@ -443,6 +443,48 @@ jobs:
             --verify-tag \
             "$RUNNER_TEMP"/dist/*
 
+  container:
+    name: Publish the container image
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Fetch the released Linux binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The build context is dist/ only; .dockerignore excludes the repo
+          # root, where an executable zsh dev wrapper shares the name quotabar.
+          mkdir -p dist
+          gh release download "$TAG" --pattern "quotabar-${VERSION}-linux-x86_64.tar.gz" --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/quotabar-${VERSION}-linux-x86_64.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/quotabar-${VERSION}-linux-x86_64/quotabar" dist/quotabar
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+
   formula:
     name: Open the Homebrew formula pull request
     needs: [version, release]
