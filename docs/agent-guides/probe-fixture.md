@@ -23,6 +23,15 @@ Threshold changes need exact boundary tests: 79.9 / 80 / 94.9 / 95.
 - **Gemini `--screen-reader` wraps one character per line.** `normalize()`
   rejoins single-character lines. A realistic fixture must include that shape,
   not just tidy rows.
+- **A row is one line, so every run in a row pattern has to be.** A lazy
+  `.*?` under `(?s)`, or a `[^)]+` that can cross the line break, does not
+  stop at the end of the row: a Gemini model row with no `Resets:` clause
+  reported the *next* row's percentage under its own name, and a Claude pool
+  name smuggled a raw newline into a window label. Both also cost quadratic
+  time over untrusted output — 186 KB of rows that never finish took a
+  minute, with nothing left to bound it once the process deadline is met.
+  Use `[^\n]` and `[^\S\n]`, and spell out the one wrap that is real:
+  Gemini's reset parenthetical, which a narrow terminal breaks once.
 - **`expectScript` is a non-raw multiline literal**, so `\t`, `\r` and `\n` in it
   are *real control characters*. A test asserting `contains("[ \\t]+")` looks
   right and always fails; it must be `contains("[ \t]+")`.
